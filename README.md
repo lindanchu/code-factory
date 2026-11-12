@@ -11,7 +11,7 @@ the pull request and merges.
 ```
 
 It assumes nothing about your project: no stack, framework or human language
-is built in. `/factory init` learns each project (code, history, style, team
+is built in. `/code-factory:factory init` learns each project (code, history, style, team
 rules), or interviews you and scaffolds a new one.
 
 **The factory never lives inside a project.** Each project gets its own
@@ -246,7 +246,7 @@ because of what the base branch already has.
 
 Scanners cannot judge business rules, such as whether one customer can read
 another's order: the security reviewer and its verifier look for those in each
-change, and `/factory audit` can add a deeper audit by agents. Vulnerabilities in
+change, and `/code-factory:factory audit` can add a deeper audit by agents. Vulnerabilities in
 the operating system packages of a container image are not checked.
 
 The gate catches mistakes and makes going around it hard, but it is not a wall. Agents and
@@ -348,7 +348,7 @@ with exit code 4 and says where the file goes and what it holds, never printing 
 token is redacted like the other local secrets in what fx posts or prints, and a job file
 that holds it stays on the machine instead of going to S3; the email is an address, not a
 secret. In mode `mcp` fx never opens the file, so `fx doctor` says to delete one left there.
-`/factory init` keeps agents' Read tool away from the keys folder. `fx install` reports the
+`/code-factory:factory init` keeps agents' Read tool away from the keys folder. `fx install` reports the
 mode and whether `jira.env` is there and complete (null in mode `mcp`).
 
 fx sends the token to this factory's Jira site only, `jira.base_url`, which init sets, and
@@ -418,7 +418,7 @@ s3://<bucket>/<prefix>/      this project's factory (no prefix when the bucket i
 
 Keys are never in `factory.json` or git. fx signs its requests itself, in its own process:
 the keys reach no environment, your own `AWS_*` variables pass through untouched and are not
-used, and `/factory init` keeps agents' Read tool away from the keys folder. Code running as
+used, and `/code-factory:factory init` keeps agents' Read tool away from the keys folder. Code running as
 your user that goes looking for the file could still read it, like every other local secret,
 so keep the write key only on machines that upload images. Keys still in `local/` from an
 older version keep working, and `fx doctor` says how to move them. Objects are never
@@ -626,7 +626,7 @@ The tools of the scanners in `security.required` (gitleaks, osv-scanner and semg
 marked required, and `fx doctor` fails without them, because every gate would.
 Run it once on each machine.
 
-The command is `/code-factory:factory`; typing `/factory` suggests it.
+The command is `/code-factory:factory`, written in full everywhere in this README.
 Alternatively `bash install.sh` installs it as a personal skill (the command
 is then `/factory`); do not use both. A personal skill and its agents have plain names, so
 a different `factory` skill, or other `factory-*.md` agent files, would be overwritten:
@@ -756,7 +756,7 @@ own PR.
 
 ## How it learns
 
-After each job (or once per run, or only on `/factory lessons`: see
+After each job (or once per run, or only on `/code-factory:factory lessons`: see
 `learning.ask_after`) the factory looks at what it can learn from:
 
 - its own reviewers' blocking findings and failed gates;
@@ -789,7 +789,7 @@ The project knowledge follows the code: `knowledge/.ref` records the
 commit it describes. When the base branch has moved on in ways that matter
 (dependencies, lint configs, CI, schema, API, auth, environment, tests, UI), a
 librarian agent drafts updated knowledge files and you approve each one.
-`/factory rework` also brings in commits a human pushed to the PR branch before
+`/code-factory:factory rework` also brings in commits a human pushed to the PR branch before
 the builder starts.
 
 ## Security standards

@@ -1,4 +1,4 @@
-<!-- FACTORY_TODO: /factory init writes these files from the repository, its history and an interview with the team, then deletes this line. -->
+<!-- FACTORY_TODO: /code-factory:factory init writes these files from the repository, its history and an interview with the team, then deletes this line. -->
 # Project knowledge
 
 Every factory agent reads this index first, then the files listed for its role.

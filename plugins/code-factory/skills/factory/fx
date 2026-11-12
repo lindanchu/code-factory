@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """fx: the deterministic half of the software factory.
 
-The /factory skill (an LLM) decides *what to ask agents*; this script owns
+The factory skill (an LLM) decides *what to ask agents*; this script owns
 everything that must not drift: job state and legal stage moves, model routing
 (never below Sonnet), the gate, Jira reads/writes and pull requests.
 
@@ -235,7 +235,7 @@ def factory_home():
     if not top:
         raise FxError("not inside a git repository. The factory lives in its own repository, never in the "
                       "project's: create an empty private repository for it (for example <project>-factory), "
-                      "clone it, open it in Claude Code and run /factory init there.", code=3)
+                      "clone it, open it in Claude Code and run /code-factory:factory init there.", code=3)
     return top
 
 
@@ -289,7 +289,7 @@ class Ctx:
         if raw is None:
             if require:
                 raise FxError("this factory repository is not set up yet (no factory.json); "
-                              "run /factory init", code=3)
+                              "run /code-factory:factory init", code=3)
             self.cfg = {}
             return
         try:
@@ -307,7 +307,7 @@ class Ctx:
     def url(self):
         u = self.c("project.url")
         if not u:
-            raise FxError("factory.json has no project.url; run /factory init <the project's git URL>", code=3)
+            raise FxError("factory.json has no project.url; run /code-factory:factory init <the project's git URL>", code=3)
         return u
 
     @property
@@ -451,7 +451,7 @@ def job_clone(ctx, dest, branch, start=None):
     if start:
         if git(["rev-parse", "--verify", "-q", start], dest, check=False).returncode != 0:
             shutil.rmtree(dest, ignore_errors=True)
-            raise FxError("the project has no %s yet (an empty repository?); run /factory init and let it make "
+            raise FxError("the project has no %s yet (an empty repository?); run /code-factory:factory init and let it make "
                           "the first commit" % start, code=3)
         git(["checkout", "-q", "-b", branch, start], dest)
     else:
@@ -717,7 +717,7 @@ def jira_site(ctx):
     if not o:
         raise FxError("factory.json has no jira.base_url%s. In mode token fx sends the Jira token to this factory's "
                       "Jira site only: set jira.base_url to it (for example https://your-team.atlassian.net), as "
-                      "/factory init does" % (" fx can use (%r)" % site if site else ""), code=4)
+                      "/code-factory:factory init does" % (" fx can use (%r)" % site if site else ""), code=4)
     if o[0] != "https" and not (o[0] == "http" and o[1] in ("127.0.0.1", "localhost", "::1")):
         raise FxError("jira.base_url %s is not an https address: fx sends the Jira token over https only" % site,
                       code=4)
@@ -1215,7 +1215,7 @@ def cmd_new(ctx, a):
                               "fresh." % job_id, code=2)
             existing = ctx.load_exact(job_id)
             if not (step and existing.get("spans_repos")):
-                raise FxError("job %s already exists (stage %s). Use `/factory resume %s`, or pass --again "
+                raise FxError("job %s already exists (stage %s). Use `/code-factory:factory resume %s`, or pass --again "
                               "for a fresh attempt." % (job_id, existing["stage"], key), code=2)
         n = 2
         while os.path.exists(ctx.job_dir("%s-r%d" % (key, n))):
@@ -1487,7 +1487,7 @@ def cmd_init(ctx, a):
         if src:
             raise FxError("%s holds code (%s). The factory must live in its own repository, separate from the "
                           "project: create an empty private repository (for example <project>-factory), open it "
-                          "in Claude Code and run /factory init there with the project's git URL."
+                          "in Claude Code and run /code-factory:factory init there with the project's git URL."
                           % (ctx.factory, ", ".join(src[:3])), code=3)
     url = (a.project or ctx.c("project.url") or "").strip()
     if not url:
@@ -1846,7 +1846,7 @@ def app_stop(ctx, job):
 def app_start(ctx, job):
     up = ctx.c("app.up")
     if not up:
-        raise FxError("no app.up command in factory.json; set it with /factory init", code=3)
+        raise FxError("no app.up command in factory.json; set it with /code-factory:factory init", code=3)
     if not os.path.isdir(job["worktree"]):
         raise FxError("the worktree %s is missing" % job["worktree"], code=3)
     url = app_url(ctx, job)
@@ -2411,7 +2411,7 @@ def cmd_result(ctx, a):
             set_needs_info(ctx, job, "intake")
             res["next"] = "ask"
         elif verdict == "MULTI-REPO" and job.get("jira_base"):
-            # Not a refusal: nothing goes on the issue, and /factory feature picks the issue up from here.
+            # Not a refusal: nothing goes on the issue, and /code-factory:factory feature picks the issue up from here.
             job["spans_repos"] = True
             ctx.move(job, "rejected", "intake: the issue spans several repositories")
             res["clone"] = drop_clone(ctx, job)
@@ -2598,7 +2598,7 @@ def cmd_gate(ctx, a):
     wt = job["worktree"]
     if not os.path.isdir(wt):
         raise FxError("the job's clone %s is missing. If its branch was pushed: `%s stage %s handed-off --force`, "
-                      "then `/factory rework %s`; otherwise start a new attempt of %s" % (
+                      "then `/code-factory:factory rework %s`; otherwise start a new attempt of %s" % (
                           wt, FX_CMD, job["id"], job["issue_key"], job["issue_key"]), code=3)
     bl_cfg = baselines_config(ctx)
     bl_pre = baselines_refresh(ctx, bl_cfg, hold=True) if bl_cfg else None  # before anything reads checks.sh
@@ -2714,7 +2714,7 @@ def cmd_gate(ctx, a):
     if not problems and ui_wanted:
         if not ctx.c("app.up"):
             job["skipped_checks"].append("UI checks skipped: no app.up command to run the app "
-                                         "(set it with /factory init)")
+                                         "(set it with /code-factory:factory init)")
         elif not os.path.exists(ui_script):
             problems.append("this change is user-visible but the builder wrote no ui/check.js "
                             "(a Playwright check of the UI acceptance criteria) in the job folder")
@@ -3039,7 +3039,7 @@ def cmd_ask_jira(ctx, a):
     notes = []
     qtext = read(os.path.join(ctx.job_dir(job["id"]), "questions.md"), "")
     body = ("**Software factory needs information before continuing %s.**\n\n%s\n\n"
-            "Reply in a comment, then run `/factory resume %s`." % (job["issue_key"], easy_first(qtext).strip(),
+            "Reply in a comment, then run `/code-factory:factory resume %s`." % (job["issue_key"], easy_first(qtext).strip(),
                                                                    job["issue_key"]))
     r = comment_for_people(ctx, job, summary_to_use(ctx, job, "ask", given, notes), body, notes, force=True)
     if "error" in r:
@@ -3249,7 +3249,7 @@ def finish(ctx, res, job, push=False):
     out(res)
 
 
-# fx jira children, finished and statuses: the Jira reads of /factory feature and /factory init, about no job. Mode token:
+# fx jira children, finished and statuses: the Jira reads of /code-factory:factory feature and /code-factory:factory init, about no job. Mode token:
 # fx reads with jira.env, so a machine without Claude's Atlassian connector runs those commands too. Mode mcp: fx calls no
 # Jira and opens no jira.env; it says what to read, and the orchestrator reads it with its Atlassian tools.
 JIRA_READS = ("children", "finished", "statuses")
@@ -5760,7 +5760,7 @@ def workspace_resolve_folder(folder):
         if same_repo((factory_settings(known).get("project") or {}).get("url"), url):
             return known, "%s is the project's own clone; using its factory repository %s" % (folder, known)
     raise FxError("%s is the project's own clone and this machine has no factory repository for it. Create one next "
-                  "to it (for example %s-factory), run /factory init there, and give that folder"
+                  "to it (for example %s-factory), run /code-factory:factory init there, and give that folder"
                   % (folder, os.path.basename(path)), code=3)
 
 
@@ -5888,7 +5888,7 @@ def feature_load(key, required=True):
     raw = read(os.path.join(feature_dir(key), "feature.json"))
     if raw is None:
         if required:
-            raise FxError("this machine has no multi-repo run for %s: start it with /factory feature %s" % (key, key),
+            raise FxError("this machine has no multi-repo run for %s: start it with /code-factory:factory feature %s" % (key, key),
                           code=3)
         return None
     try:
@@ -6692,7 +6692,7 @@ def playwright_ok():
     except subprocess.TimeoutExpired:
         return False, "Chromium for Playwright did not start within 120s"
     if r.returncode == 3:
-        return False, "Chromium for Playwright is missing or cannot start (/factory install)"
+        return False, "Chromium for Playwright is missing or cannot start (/code-factory:factory install)"
     if r.returncode != 0:
         return False, "playwright not installed for the factory"
     axe = os.path.exists(os.path.join(tools_dir(), "node_modules", "axe-core", "axe.min.js"))
@@ -6846,7 +6846,7 @@ def admin_commands(name):
     if name == "semgrep":
         return ["pipx install semgrep   (or: python3 -m pip install --user semgrep)"]
     if name == "playwright":
-        return ["install Node.js first (see node), then run /factory install again"]
+        return ["install Node.js first (see node), then run /code-factory:factory install again"]
     if name == "node":
         return ["curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash",
                 "nvm install --lts   (in a new terminal; no administrator rights needed)"]
@@ -6954,7 +6954,7 @@ def machine_status(ctx):
             method = None
         manual = [] if ok or method else admin_commands(name)
         if name == "playwright" and not ok and not method:
-            manual = ["install Node.js first (see node), then run /factory install again"]
+            manual = ["install Node.js first (see node), then run /code-factory:factory install again"]
         if name == "docker" and not ok:
             method, manual = None, admin_commands(name) if detail == "not found" else ["start Docker"]
         t = {"name": name, "need": need, "purpose": purpose, "ok": ok, "version": version, "path": path,
@@ -7717,7 +7717,7 @@ const T = {
  en: {title:'Factory board', updated:'Updated', ago:'ago', running:'Running', waitingN:'Waiting for you', doneToday:'Done today',
   active:'Jobs in progress', recent:'Finished recently', none:'No job is running.', eta:'Expected done', left:'left', overdue:'over the usual time',
   questions:'Waiting for your answers to its questions', target:'Waiting for you to pick the branch to push into',
-  stale:'No activity since', staleHint:'the Claude Code session may have stopped: /factory resume', round:'Round', from:'from',
+  stale:'No activity since', staleHint:'the Claude Code session may have stopped: /code-factory:factory resume', round:'Round', from:'from',
   into:'into', typical:'usually', tokens:'tokens', project:'Project', job:'Job', result:'Result', took:'Took', rounds:'Rounds',
   pr:'Pull request / branch', now:'now', needsHuman:'needs a careful look', unsaved:'not saved on S3', heldBack:'%d file(s) not on S3', rejected:'rejected', paused:'Pause auto-reload', step:'fx',
   sub:'%d factories on this machine: %s', agentsAt:'agents at work', machines:'fx steps running', openJobs:'open jobs', tokensToday:'tokens today',
@@ -7731,7 +7731,7 @@ const T = {
   drawerNow:'Working on', drawerDoes:'Does', drawerWrites:'Writes its result to', drawerHist:'Recent runs', idleNow:'Free right now',
   runsToday:'runs today', jobsToday:'jobs today', close:'Close', machine:'fx step', waitPkg:'%s: %s, waits for %s', pkgReq:'%s: asked the planner for a change',
   pkgQ:'%s: has a question for you', pkgBlocked:'%s: blocked', splitN:'split into %d packages', bestOf:'best of %d, the judge picks one',
-  roundN:'round %d', knowNote:'Runs during /factory init and after each job; every room reads the knowledge first.',
+  roundN:'round %d', knowNote:'Runs during /code-factory:factory init and after each job; every room reads the knowledge first.',
   name:'%s', pkg:'package', cand:'candidate',
   flowTitle:'Flow map', lFlow:'Flow map', lOffice:'Office', layoutL:'Page layout',
   flowLegend:'One row per job. A solid line is a step already passed, the ring is where the job is now, with who is working on it, and a dashed line is a step still ahead.',
@@ -7749,7 +7749,7 @@ const T = {
  vi: {title:'Văn phòng factory', updated:'Cập nhật', ago:'trước', running:'Đang chạy', waitingN:'Chờ bạn', doneToday:'Xong hôm nay',
   active:'Hồ sơ đang xử lý', recent:'Đã xong gần đây', none:'Không có job nào đang chạy.', eta:'Dự kiến xong', left:'còn', overdue:'lâu hơn thường lệ',
   questions:'Chờ bạn trả lời câu hỏi', target:'Chờ bạn chọn nhánh đích để đẩy',
-  stale:'Không có hoạt động từ', staleHint:'phiên Claude Code có thể đã dừng: /factory resume', round:'Vòng', from:'từ',
+  stale:'Không có hoạt động từ', staleHint:'phiên Claude Code có thể đã dừng: /code-factory:factory resume', round:'Vòng', from:'từ',
   into:'vào', typical:'thường', tokens:'token', project:'Dự án', job:'Job', result:'Kết quả', took:'Thời gian', rounds:'Vòng',
   pr:'PR / nhánh', now:'bây giờ', needsHuman:'cần bạn xem kỹ', unsaved:'chưa lưu lên S3', heldBack:'%d tệp không có trên S3', rejected:'từ chối', paused:'Tạm dừng tự tải lại', step:'fx',
   sub:'%d factory trên máy này: %s', agentsAt:'cu li đang làm', machines:'máy fx đang chạy', openJobs:'job đang mở', tokensToday:'token hôm nay',
@@ -7763,7 +7763,7 @@ const T = {
   drawerNow:'Đang làm', drawerDoes:'Phụ trách', drawerWrites:'Kết quả ghi vào', drawerHist:'Lần chạy gần đây', idleNow:'Đang rảnh',
   runsToday:'lần chạy hôm nay', jobsToday:'job hôm nay', close:'Đóng', machine:'Máy của fx', waitPkg:'%s: %s, chờ %s xong', pkgReq:'%s: xin Planner đổi kế hoạch',
   pkgQ:'%s: có câu hỏi cho bạn', pkgBlocked:'%s: bị chặn', splitN:'chia %d gói', bestOf:'best-of-%d, Judge sẽ chọn 1',
-  roundN:'vòng %d', knowNote:'Làm khi /factory init và sau mỗi job; mọi phòng đọc tri thức trước khi làm.',
+  roundN:'vòng %d', knowNote:'Làm khi /code-factory:factory init và sau mỗi job; mọi phòng đọc tri thức trước khi làm.',
   name:'Cu li %s', pkg:'gói', cand:'ứng viên',
   flowTitle:'Bản đồ luồng', lFlow:'Bản đồ luồng', lOffice:'Văn phòng', layoutL:'Cách bố trí trang',
   flowLegend:'Mỗi job một hàng: đường liền là bước đã qua, vòng tròn là bước đang làm kèm cu li đang làm, đường đứt là bước sắp tới.',
@@ -7888,7 +7888,7 @@ function askCard(v) {
   const msg = st ? L.stale + ' ' + clock(ts(v.updated)) + ': ' + L.staleHint + ' ' + v.key : waitText(v);
   return '<a class="ask' + (st ? ' stale' : '') + '" href="#' + esc(v.id) + '" data-open="' + esc(v.id) + '"><span><b>' + esc(v.key) + '</b> ' + esc(v.summary) +
     ' <span class="muted xs">' + esc(v.project) + '</span></span><span class="msg">' + esc(msg) + '</span>' +
-    (st ? '' : '<span class="muted xs">/factory resume ' + esc(v.key) + '</span>') + '</a>';
+    (st ? '' : '<span class="muted xs">/code-factory:factory resume ' + esc(v.key) + '</span>') + '</a>';
 }
 
 function card(v, r) {
@@ -8254,7 +8254,7 @@ def ui_run(ctx, job, script, out_dir):
     """Run a Playwright check script against the job's running app; return the parsed report."""
     ok, why = playwright_ok()
     if not ok:
-        return {"skipped": "Playwright is not available (%s): run /factory install" % why}
+        return {"skipped": "Playwright is not available (%s): run /code-factory:factory install" % why}
     info = app_start(ctx, job)
     os.makedirs(out_dir, exist_ok=True)
     report_path = os.path.join(out_dir, "ui-report.json")
@@ -8283,7 +8283,7 @@ def ui_run(ctx, job, script, out_dir):
 def ui_judge(ctx, rep_):
     block_a11y = set(ctx.c("ui_checks.a11y_block", ["critical", "serious"]) or [])
     if rep_.get("browser_missing"):
-        return {"skipped": "Playwright could not launch Chromium: %s (/factory install)"
+        return {"skipped": "Playwright could not launch Chromium: %s (/code-factory:factory install)"
                            % rep_["browser_missing"][:200]}
     # The browser also logs failed responses as console errors; those are judged by status below.
     rep_["console"] = [c for c in rep_.get("console", []) if not c.get("text", "").startswith(
@@ -8558,7 +8558,7 @@ def scan_secrets(ctx, job, mb, rdir):
         return f, err, None
     f, err = scan_secrets_builtin(ctx, job, mb, rdir)
     return f, err, ("gitleaks not installed: only the built-in check ran (well-known key formats and local env "
-                    "values; /factory install adds gitleaks)")
+                    "values; /code-factory:factory install adds gitleaks)")
 
 
 REDACTED = "[redacted by fx]"
@@ -9713,7 +9713,7 @@ def run_security(ctx, job, rdir, app_url_, whole=False):
             off(name)
             return
         if binary and not shutil.which(binary):
-            miss(name, "%s not installed (/factory install)" % binary)
+            miss(name, "%s not installed (/code-factory:factory install)" % binary)
             return
         try:
             f, err = fn()
@@ -9762,7 +9762,7 @@ def run_security(ctx, job, rdir, app_url_, whole=False):
             return compared(f, "zap"), err
         use("headers", None, hdrs)
         if sc["zap"] and not shutil.which("docker"):
-            no_docker = "docker not installed (/factory install)"
+            no_docker = "docker not installed (/code-factory:factory install)"
         elif sc["zap"] and not docker_running():
             no_docker = "Docker is installed but not running (start Docker to enable ZAP scans)"
         if no_docker:  # a laptop with Docker off: noted, not a reason to hand every job to a human
@@ -9775,7 +9775,7 @@ def run_security(ctx, job, rdir, app_url_, whole=False):
                 notes.append(n)
     else:
         if sc["headers"] or sc["zap"]:
-            skipped.append("headers/zap: no running app (set app.up with /factory init)")
+            skipped.append("headers/zap: no running app (set app.up with /code-factory:factory init)")
         for n in ("headers", "zap"):
             if not sc[n]:
                 off(n)
@@ -9924,7 +9924,7 @@ def source_root(ctx, a):
 
 
 def cmd_scan(ctx, a):
-    """A fast, language-neutral inventory of the repository (or of a reference) for /factory init."""
+    """A fast, language-neutral inventory of the repository (or of a reference) for /code-factory:factory init."""
     root = source_root(ctx, a)
     files = list_files(root)
     ext, top, manifests, tests, i18n, migrations, docker = {}, {}, [], set(), set(), set(), []
@@ -10386,7 +10386,7 @@ def jira_doctor(ctx, add, issue=None):
             why = "jira.mode is not chosen, so fx uses %s for now (token only while jira.env holds both values)" % mode
         else:
             why = "jira.mode %r is neither mcp nor token, so fx uses %s for now" % (setting, mode)
-        add("Jira mode chosen (advice)", True, why + ": choose mcp or token with /factory init (local tasks need neither)")
+        add("Jira mode chosen (advice)", True, why + ": choose mcp or token with /code-factory:factory init (local tasks need neither)")
     if mode == "mcp":
         left = JIRA_MODES.get(setting) == "mcp" and os.path.exists(jira_env_path(ctx))  # seen, never opened
         add("Jira access", True, "mode mcp: Claude's Atlassian connector does the Jira work, and fx cannot check it (the "
@@ -10432,14 +10432,14 @@ def doctor_checks(ctx, issue=None, session=True, live=False):
         checks.append({"check": name, "ok": bool(ok), "detail": detail})
 
     add("python >= 3.9", sys.version_info >= (3, 9), sys.version.split()[0])
-    add("factory repository set up (factory.json)", bool(ctx.cfg), ctx.factory if ctx.cfg else "run /factory init")
+    add("factory repository set up (factory.json)", bool(ctx.cfg), ctx.factory if ctx.cfg else "run /code-factory:factory init")
     url = ctx.c("project.url") or ""
     base = ctx.c("base_branch", "main")
     try:
         heads, _ = remote_heads(url) if url else ({}, None)
-        add("project reachable", bool(url), url or "no project.url: run /factory init <git URL>")
+        add("project reachable", bool(url), url or "no project.url: run /code-factory:factory init <git URL>")
         add("project base branch %s" % base, base in heads, "" if base in heads else
-            "missing: empty repository? /factory init can make the first commit")
+            "missing: empty repository? /code-factory:factory init can make the first commit")
     except FxError as e:
         add("project reachable", False, str(e))
         heads = {}
@@ -10461,9 +10461,9 @@ def doctor_checks(ctx, issue=None, session=True, live=False):
         add("pull requests", True, "off (pr.create): branches are pushed, a human opens the pull request")
         if cli:
             add("%s installed and logged in (advice: learning reads review comments with it)" % cli, True,
-                "yes" if login else "no: run /factory install for the command, or learning skips review comments")
+                "yes" if login else "no: run /code-factory:factory install for the command, or learning skips review comments")
     elif cli:
-        add("%s installed and logged in" % cli, login, "" if login else "run /factory install for the command")
+        add("%s installed and logged in" % cli, login, "" if login else "run /code-factory:factory install for the command")
     else:
         add("PR provider", True, "%s: PRs are opened by hand from a link" % prov)
     mode = jira_doctor(ctx, add, issue)
@@ -10473,14 +10473,14 @@ def doctor_checks(ctx, issue=None, session=True, live=False):
         ents = lesson_entries(read(lessons_file(ctx), "") or "")
         n = len([e for e in ents if e["id"] and REVIEW_TAG not in e["tags"]])
         cap = int(ctx.c("learning.max_lessons", 40) or 40)
-        add("lessons.md size (advice)", True, "%d lessons, over the limit of %d: /factory lessons proposes merges "
+        add("lessons.md size (advice)", True, "%d lessons, over the limit of %d: /code-factory:factory lessons proposes merges "
             "and moves into knowledge/" % (n, cap) if n > cap else "%d lessons (limit %d)" % (n, cap))
     add("project knowledge written", knowledge_status(ctx),
-        "" if knowledge_status(ctx) else "knowledge/ still has FACTORY_TODO or is mostly empty: /factory init")
+        "" if knowledge_status(ctx) else "knowledge/ still has FACTORY_TODO or is mostly empty: /code-factory:factory init")
     if ctx.cfg and heads.get(base):
         ks = knowledge_stale(ctx)
         add("knowledge in step with the base branch (advice)", True,
-            ks.get("reason") or ("stale: %d new commits touch %s (/factory lessons refreshes it)" % (
+            ks.get("reason") or ("stale: %d new commits touch %s (/code-factory:factory lessons refreshes it)" % (
                 ks["commits"], ", ".join(ks["files"])) if ks["stale"] else "describes %s" % (ks["ref"] or "")[:10]))
         old = git(["cat-file", "-e", "refs/heads/%s:factory/config.json" % base], ctx.repo, check=False)
         add("no factory files inside the project", old.returncode != 0,
@@ -10496,7 +10496,7 @@ def doctor_checks(ctx, issue=None, session=True, live=False):
         elif not on[name]:
             why = "turned off in security.scanners: turn it on, or remove it from security.required"
         elif tool and not shutil.which(tool):
-            why = "run /factory install, or remove it from security.required"
+            why = "run /code-factory:factory install, or remove it from security.required"
         elif name == "osv" and vtuple(tool_version(tool)) and vtuple(tool_version(tool)) < INSTALL_MIN[tool]:
             why = OSV_TOO_OLD
         elif name == "zap" and not docker_running():
@@ -10534,7 +10534,7 @@ def doctor_checks(ctx, issue=None, session=True, live=False):
     add("git >= 2.38", gver >= (2, 38), "%d.%d (the approver's merge-tree needs 2.38)" % gver)
     if session:
         add("job clones and fx allowed without prompts", local_settings_ok(ctx),
-            "" if local_settings_ok(ctx) else "run /factory init")
+            "" if local_settings_ok(ctx) else "run /code-factory:factory init")
     if live:
         for name, ok, detail in scanner_probes(ctx, ctx.code() if heads.get(base) else None):
             add(name, ok, detail)
@@ -10560,7 +10560,7 @@ def doctor_checks(ctx, issue=None, session=True, live=False):
         except ValueError:
             denied = []
         if not set(key_deny_rules(ctx)) <= set(denied):
-            add("agents kept from reading the keys folder (advice)", True, "S3 keys and jira.env: run /factory init to "
+            add("agents kept from reading the keys folder (advice)", True, "S3 keys and jira.env: run /code-factory:factory init to "
                 "add the rules")
     baselines_doctor(ctx, add)
     jobs_store_doctor(ctx, add)
@@ -11119,7 +11119,7 @@ def baselines_profile_keys(profile):
         return static
     if not shutil.which("aws"):
         raise StoreError("credentials", "AWS profile %s has no static keys, and without the AWS CLI fx cannot get "
-                                        "temporary ones (/factory install)" % profile)
+                                        "temporary ones (/code-factory:factory install)" % profile)
     p = run_sep(["aws", "configure", "export-credentials", "--profile", profile, "--format", "process"], timeout=60)
     try:
         data = json.loads(p.stdout) if p.returncode == 0 else {}
@@ -12418,7 +12418,7 @@ def jobs_secret_scan(ctx, blobs):
     a .gitleaks.toml or .gitleaksignore among a job's files is one more file there, and tunes nothing. Of a finding only
     the file and the rule's name leave this function."""
     if not shutil.which("gitleaks"):
-        raise FxError("gitleaks is not on this machine, and nothing goes to S3 unscanned: /factory install", code=3)
+        raise FxError("gitleaks is not on this machine, and nothing goes to S3 unscanned: /code-factory:factory install", code=3)
     flags, err = gitleaks_flags(ctx)
     if err:
         raise FxError(err, code=3)
@@ -12448,7 +12448,7 @@ def jobs_secret_scan(ctx, blobs):
             raise FxError("gitleaks did not finish, and nothing goes to S3 unscanned", code=3)
         if r.returncode != 0 and "max-archive-depth" in (r.stdout or ""):
             raise FxError("this gitleaks cannot look inside archives (--max-archive-depth), and nothing goes to S3 unscanned: "
-                          "upgrade it with /factory install", code=3)
+                          "upgrade it with /code-factory:factory install", code=3)
         if r.returncode != 0 or not os.path.exists(rpt):
             raise FxError("gitleaks failed (exit %s), and nothing goes to S3 unscanned" % r.returncode, code=3)
         try:
@@ -12578,7 +12578,7 @@ def jobs_after_step(ctx, res, names=None):
         res.setdefault("warnings", []).append(text)
 
 
-JOBS_NOT_KEPT = ("S3 is set up but jobs are not kept there: add jobs_store with /factory init, or remove storage from "
+JOBS_NOT_KEPT = ("S3 is set up but jobs are not kept there: add jobs_store with /code-factory:factory init, or remove storage from "
                  "factory.json")
 
 
@@ -12618,7 +12618,7 @@ def jobs_store_doctor(ctx, add):
             "the reference images: put s3-jobs-write.env in %s, or name storage.jobs_write_profile, with s3:PutObject only "
             "on %s/*" % (baselines_key_dir(ctx), place))
     gitleaks = bool(shutil.which("gitleaks"))
-    add("jobs store scans with gitleaks", gitleaks, "" if gitleaks else "nothing goes to S3 unscanned: /factory install")
+    add("jobs store scans with gitleaks", gitleaks, "" if gitleaks else "nothing goes to S3 unscanned: /code-factory:factory install")
     try:
         baselines_store(ctx, cfg, "read").list("snapshots/", limit=1)
         add("jobs store readable", True, "")

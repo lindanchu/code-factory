@@ -2,8 +2,8 @@
     python3 -I -m unittest discover -s tests
 
 mcp: Claude's own Atlassian connector does the Jira work, and fx only queues it. token: fx calls Jira's REST API itself,
-with the email and API token in jira.env, in this machine's keys folder; it also does the Jira reads of /factory feature
-and /factory init (fx jira children, finished and statuses). A fake Jira site on 127.0.0.1 answers, checks the
+with the email and API token in jira.env, in this machine's keys folder; it also does the Jira reads of /code-factory:factory feature
+and /code-factory:factory init (fx jira children, finished and statuses). A fake Jira site on 127.0.0.1 answers, checks the
 credentials of every request and keeps what was posted.
 """
 
@@ -466,7 +466,7 @@ class TokenSiteTest(JiraCase):
         code, res = self.fx("jira", "fetch", "T-1")
         self.assertEqual(code, 4, res)
         self.assertIn("factory.json has no jira.base_url", res["error"])
-        self.assertIn("/factory init", res["error"])
+        self.assertIn("/code-factory:factory init", res["error"])
         self.assertFalse(self.rows()[0]["Jira access"]["ok"])
         self.assertEqual(self.jira.log, [])
 
@@ -505,7 +505,7 @@ class TokenSiteTest(JiraCase):
 
 
 # --------------------------------------------------------------------------
-# the Jira reads of /factory feature and /factory init: fx jira children, finished and statuses
+# the Jira reads of /code-factory:factory feature and /code-factory:factory init: fx jira children, finished and statuses
 
 FIELDS = "summary,issuetype,status,project,components,labels"
 CHILDREN_JQL = 'parent = "%s"' % KEY
@@ -893,7 +893,7 @@ class OlderValuesTest(JiraCase):
             row = self.rows()[0]["Jira mode chosen (advice)"]
             self.assertTrue(row["ok"])
             self.assertIn(words, row["detail"])
-            self.assertIn("choose mcp or token with /factory init", row["detail"])
+            self.assertIn("choose mcp or token with /code-factory:factory init", row["detail"])
         for value in ("mcp", "token"):
             self.mode(value)
             self.assertNotIn("Jira mode chosen (advice)", self.rows()[0])

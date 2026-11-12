@@ -212,7 +212,7 @@ class MultiCase(unittest.TestCase):
 
     def assert_no_machine_path(self, text):
         self.assertNotIn(self.tmp, text)
-        self.assertNotIn("/factory", text.replace("software factory", ""))
+        self.assertNotIn("/code-factory:factory", text.replace("software factory", ""))
 
 
 # --------------------------------------------------------------------------
@@ -252,7 +252,7 @@ class WorkspaceTest(MultiCase):
         sh(["git", "clone", "-q", other, clone], self.tmp)
         code, res = self.add("--path", clone)
         self.assertEqual(code, 3)
-        self.assertIn("/factory init", res["error"])
+        self.assertIn("/code-factory:factory init", res["error"])
 
     def test_a_folder_that_is_not_here_is_asked_again(self):
         code, res = self.add("--path", os.path.join(self.tmp, "on-another-machine"))
@@ -570,7 +570,7 @@ class JobTest(MultiCase):
 
 
 class IntakeDetectsTest(MultiCase):
-    """/factory PROJ-9 in one repository: intake finds it spans others."""
+    """/code-factory:factory PROJ-9 in one repository: intake finds it spans others."""
 
     def setUp(self):
         super().setUp()
@@ -880,7 +880,7 @@ class ChildrenTest(MultiCase):
 
 
 class ChildrenFromJiraTest(MultiCase):
-    """Mode token on a machine without Claude's Atlassian connector: fx reads the issue's children (step 1 of /factory
+    """Mode token on a machine without Claude's Atlassian connector: fx reads the issue's children (step 1 of /code-factory:factory
     feature), and fx plan takes them as fx printed them (step 3)."""
 
     def setUp(self):

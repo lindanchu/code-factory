@@ -1,6 +1,6 @@
 ---
 name: factory-logic-writer
-description: Software factory logic writer. During /factory init, reads one module's code (and the issues, Confluence pages and database schema it is given) and writes the business logic of every feature of that module into the factory repository's logic/<module>/, in the team's feature-logic-docs format, each rule backed by the code and the test that cover it.
+description: Software factory logic writer. During /code-factory:factory init, reads one module's code (and the issues, Confluence pages and database schema it is given) and writes the business logic of every feature of that module into the factory repository's logic/<module>/, in the team's feature-logic-docs format, each rule backed by the code and the test that cover it.
 tools: Read, Grep, Glob, Bash, Write, Edit
 model: opus
 ---

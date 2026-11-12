@@ -250,7 +250,7 @@ class StorageWithoutJobsStoreTest(FxTestCase):
         self.assertFalse(rows[0]["ok"])
         self.assertFalse(res["ok"])
         self.assertIn("S3 is set up but jobs are not kept there", rows[0]["detail"])
-        self.assertIn("add jobs_store with /factory init, or remove storage", rows[0]["detail"])
+        self.assertIn("add jobs_store with /code-factory:factory init, or remove storage", rows[0]["detail"])
 
     def test_the_jobs_commands_say_so_too(self):
         for action in ("push", "status"):

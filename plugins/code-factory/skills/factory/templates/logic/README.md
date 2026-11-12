@@ -1,4 +1,4 @@
-<!-- FACTORY_TODO: /factory init writes the logic of every feature from the code, the issues and the team, then deletes this line. -->
+<!-- FACTORY_TODO: /code-factory:factory init writes the logic of every feature from the code, the issues and the team, then deletes this line. -->
 # Feature logic: <project name>
 
 > This folder is the source of truth for the business logic of <system> (Jira project <KEY>).

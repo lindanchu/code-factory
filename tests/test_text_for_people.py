@@ -392,7 +392,7 @@ class AskOnJiraTest(PeopleCase):
 
     def technical(self, questions):
         return ("**Software factory needs information before continuing T-1.**\n\n%s\n\nReply in a comment, then run "
-                "`/factory resume T-1`." % questions.strip())
+                "`/code-factory:factory resume T-1`." % questions.strip())
 
     def test_the_summary_goes_first_and_each_easy_line_under_its_question(self):
         code, res = self.ask(QUESTIONS_NEW, "--summary-file", self.summary_file())
