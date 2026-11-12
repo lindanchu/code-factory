@@ -10,7 +10,8 @@
     {
       "name": "code-factory",
       "source": "./plugins/code-factory",
-      "description": "Turns a Jira issue (or a local task) into a reviewed pull request: intake, spec with test data, build, gate with checks, UI checks and security scans, verified reviews, approver, self-learning. Project-, stack- and language-agnostic; each project gets its own factory repository and the project is only touched through pull requests."
+      "version": "2.0.0",
+      "description": "Turns a Jira issue (or a local task) into reviewed pull requests: intake, spec with test data, build, gate with checks, UI checks and security scans, verified reviews, approver, self-learning. Project-, stack- and language-agnostic; each project gets its own factory repository for all its repositories, and they are only touched through pull requests."
     }
   ]
 }

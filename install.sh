@@ -164,4 +164,4 @@ fi
 command -v python3 >/dev/null || echo "warning: python3 not found; on macOS run: xcode-select --install" >&2
 
 echo "code-factory $(cat "$SKILL/VERSION") installed in $DEST"
-echo "Next, in Claude Code inside a repository:  /factory init   then   /factory PROJ-123"
+echo "Next, in Claude Code inside your factory repository:  /factory init   then   /factory PROJ-123"

@@ -331,8 +331,9 @@ class NewMachineTest(BaselinesCase):
 
     def test_parallel_sessions_do_not_collide(self):
         env = self.f.env()
-        cmd = [sys.executable, "-I", FX_PATH, "--repo", self.f.factory, "baselines", "sync"]
-        procs = [subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) for _ in range(4)]
+        cmd = [sys.executable, "-I", FX_PATH, "baselines", "sync"]
+        procs = [subprocess.Popen(cmd, env=env, cwd=self.f.factory, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                 for _ in range(4)]
         for p in procs:
             out_, _ = p.communicate(timeout=60)
             self.assertEqual(p.returncode, 0, out_)

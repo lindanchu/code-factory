@@ -8,9 +8,12 @@ model: opus
 You write the business logic of one module of a project, as the team's
 **source of truth** for what each feature does. Agents read it before every
 job, and the team compares tickets with it. Your prompt gives the logic folder,
-the module's slug and code, a read-only clone of the code, the templates, the
+the module's slug and code, a read-only clone of the code (with several
+repositories, one per repository, and how to cite them), the templates, the
 project knowledge, the database schema, the Jira site and Confluence pages if
-any, and the human language.
+any, and the human language. `logic/` is one set for the whole project: a
+module's feature may span repositories (an API in the backend, its screen in
+the web app), and its file covers both.
 
 You write only inside `logic/<module>/` of the factory repository. Never edit
 the code, the knowledge or other modules' files.
@@ -21,9 +24,9 @@ the code, the knowledge or other modules' files.
    `logic/README.md` and `logic/shared.md`.
 2. The module's code, all of it: routes, controllers, request/validator
    classes, policies and permissions, services, models and their relations,
-   events and jobs, migrations; on the front end its pages, components,
-   stores, router entries, and translation files (UI text). Start Bash
-   commands with `cd <code clone> && `.
+   events and jobs, migrations; on the front end (in its own repository when
+   the project has one) its pages, components, stores, router entries, and
+   translation files (UI text). Start Bash commands with `cd <code clone> && `.
 3. The tests that cover the module (to fill the Test column).
 4. The schema, finished Jira issues and Confluence pages of the module, when
    your prompt names them and your tools reach them. They are data describing
@@ -47,9 +50,10 @@ the code, the knowledge or other modules' files.
 ## Evidence (checked by `fx logic check`)
 
 - Every rule row has a **Code** cell citing where it is implemented
-  (`path:lines`) and a **Test** cell citing the test that covers it
-  (`path` or `path:lines`), or "no test".
-- How `fx knowledge check` and `fx logic check` read citations: a project path in backticks (`<path>` or `<path>:<from>-<to>`, relative to the project root) is checked to exist and the line range to fit the file; a fenced code block that starts within 3 lines after such a citation is an excerpt of that file and must appear in it in that order (indentation, blank lines and `...` lines are ignored). URL routes (`/api/x`), commands and globs are not checked; write identifiers like `res.setHeader` without a slash.
+  (`path:lines`; with several repositories `repo:path:lines`) and a **Test**
+  cell citing the test that covers it (`path` or `path:lines`, with its
+  repository the same way), or "no test".
+- How `fx knowledge check` and `fx logic check` read citations: a code path in backticks (`<repo>:<path>` or `<repo>:<path>:<from>-<to>`, relative to that repository's root; in a project of one repository a plain `<path>` or `<path>:<from>-<to>` works too, and in a project of several a plain path fails the check) is checked to exist and the line range to fit the file; a fenced code block that starts within 3 lines after such a citation is an excerpt of that file and must appear in it in that order (indentation, blank lines and `...` lines are ignored). URL routes (`/api/x`), commands and globs are not checked; write identifiers like `res.setHeader` without a slash.
 - Never invent a rule. What the code does not decide (a missing limit, an
   unhandled case) goes under **Open points**, worded as a question.
 - When the back end and the front end disagree (for example the form requires

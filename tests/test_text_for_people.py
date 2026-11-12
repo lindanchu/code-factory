@@ -23,7 +23,8 @@ from unittest import mock
 
 from test_jira import KEY as ISSUE, TOKEN, JiraCase
 from test_jobs_store import PushCase
-from test_multirepo import KEY as FEATURE, MultiCase
+from test_project_pr import PrCase
+from test_project_repos import KEY as PR_KEY
 from test_security import FX_PATH, TEMPLATE, FxTestCase, fx, load_json, sh, slurp, write
 
 SITE = "https://example.atlassian.net"
@@ -156,7 +157,9 @@ class PeopleCase(FxTestCase):
         with mock.patch.object(fx, where, side_effect=KeyboardInterrupt), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(KeyboardInterrupt):
-                fx.main(["--repo", self.f.factory] + list(argv))
+                if not (os.getcwd() + os.sep).startswith(self.f.factory + os.sep):  # fx runs in its factory
+                    os.chdir(self.f.factory)
+                fx.main(list(argv))
         os.chdir(self.cwd)
 
 
@@ -665,38 +668,28 @@ class TokenModeTest(JiraCase):
 
 
 # --------------------------------------------------------------------------
-# one issue across repositories
+# one job across repositories
 
-class FeatureTest(MultiCase):
-    def setUp(self):
-        super().setUp()
-        self.scope()
-        self.start()
-        self.new("be")
-        self.new("fe")
-
-    def pr_with(self, name, text):
-        path = os.path.join(self.tmp, "summary-%s.md" % name)
-        write(path, text)
-        self.to_pr(name)
-        return self.ok("pr", FEATURE, "--target", "main", "--summary-file", path, repo=self.factory[name])
+class SummaryAcrossReposTest(PrCase):
+    """One job changes be and fe: each pull request gets the summary first, also once it is rewritten with the other's
+    link, and the one Jira comment opens with it (no repository's name before it)."""
 
     def test_each_description_keeps_its_summary_when_the_others_link_comes(self):
-        be = "The server sends the reset link."
-        self.pr_with("be", be)
-        self.pr_with("fe", VI)
-        edits = [c for c in self.gh_calls() if c["argv"][:2] == ["pr", "edit"] and "body" in c]
-        be_edit = [c for c in edits if c["argv"][2].endswith("/be/pull/7")][-1]
-        self.assertTrue(be_edit["body"].startswith(two_parts(be, "Jira: [%s]" % FEATURE)), be_edit["body"][:200])
-        self.assertIn("https://github.com/acme/fe/pull/7", be_edit["body"])
-        fe_body = slurp(os.path.join(self.factory["fe"], "jobs", FEATURE, "pr-body.md"))
-        self.assertTrue(fe_body.startswith(two_parts(VI, "Jira: [%s]" % FEATURE, True)), fe_body[:200])
-
-    def test_a_comment_on_the_shared_issue_keeps_its_heading(self):
-        self.pr_with("be", "The server sends the reset link.")
-        comment = [i["markdown"] for i in self.job("be")["jira_todo"] if i["action"] == "comment"][-1]
-        self.assertTrue(comment.startswith("**[be]**\n\n## Summary\n\nThe server sends the reset link.\n\n"
-                                           "## Technical part\n\n**Software factory: work ready for review**"), comment)
+        job = self.jira_job()
+        before = self.to_pr(job)
+        summary = "The server sends the reset link and the form asks for it."
+        path = os.path.join(self.tmp, "summary-pr.md")
+        write(path, summary + "\n")
+        self.ok("pr", job, "--summary-file", path)
+        be_edit = [c for c in self.gh_calls("edit") if os.path.basename(c["cwd"]) == "be"][-1]
+        self.assertTrue(be_edit["body"].startswith(two_parts(summary, "Jira: [%s]" % PR_KEY)), be_edit["body"][:200])
+        self.assertIn(self.url("fe"), be_edit["body"])
+        fe_body = slurp(os.path.join(self.factory, "jobs", job, "pr-body-fe.md"))
+        self.assertTrue(fe_body.startswith(two_parts(summary, "Jira: [%s]" % PR_KEY)), fe_body[:200])
+        comments = [t["markdown"] for t in self.raw(job)["jira_todo"][before:] if t["action"] == "comment"]
+        self.assertEqual(len(comments), 1)
+        self.assertTrue(comments[0].startswith(two_parts(summary, "**Software factory: work ready for review**")),
+                        comments[0][:200])
 
 
 # --------------------------------------------------------------------------

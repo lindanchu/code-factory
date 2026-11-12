@@ -1,4 +1,4 @@
-"""Security tests for fx (code-factory 1.0.0).
+"""Security tests for fx (code-factory 2.0.0).
 
 Standard library only. Run from the repository root:
     python3 -I -m unittest discover -s tests
@@ -252,8 +252,9 @@ class Factory:
         return job
 
     def job(self):
+        """job.json with its first changed repository's fields at the top as well, as fx shows it."""
         with open(os.path.join(self.jd, "job.json")) as f:
-            return json.load(f)
+            return fx.job_flat_copy(json.load(f))
 
     def commit(self, files, msg="change"):
         for rel, text in files.items():
@@ -309,7 +310,9 @@ class FxTestCase(unittest.TestCase):
         code = 0
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
             try:
-                fx.main(["--repo", self.f.factory] + list(argv))
+                if not (os.getcwd() + os.sep).startswith(self.f.factory + os.sep):  # fx runs in its factory
+                    os.chdir(self.f.factory)
+                fx.main(list(argv))
             except SystemExit as e:
                 code = e.code
         os.chdir(self.cwd)
@@ -1787,7 +1790,7 @@ class ScriptTest(unittest.TestCase):
             v = f.read().strip()
         with open(os.path.join(ROOT, "plugins", "code-factory", ".claude-plugin", "plugin.json")) as f:
             self.assertEqual(json.load(f)["version"], v)
-        self.assertEqual(v, "1.0.0")
+        self.assertEqual(v, "2.0.0")
 
 
 if __name__ == "__main__":

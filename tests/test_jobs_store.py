@@ -1229,7 +1229,7 @@ class OtherMachineCase(PullCase):
         self.assertEqual(code, 0, res)
 
     def restored(self):
-        return load_json(os.path.join(self.f.jd, "job.json"))
+        return fx.job_flat_copy(load_json(os.path.join(self.f.jd, "job.json")))
 
 
 class FinishedJobMovesTest(OtherMachineCase):
@@ -1246,7 +1246,7 @@ class FinishedJobMovesTest(OtherMachineCase):
         job = self.restored()
         ctx = self.f.ctx()
         self.assertEqual(job["worktree"], os.path.join(ctx.work, "T-1"))
-        self.assertEqual(job["upstream"], [os.path.join(self.new, "jobs", "T-1", "upstream", "1-a.md")])
+        self.assertNotIn("upstream", job)  # an older job's notes from another repository: nothing reads them now
         self.assertEqual(job["runs"][0]["result"], [os.path.join(self.new, "jobs", "T-1", "build.md")])
         self.assertEqual(job["note_text"], "see %s/jobs for it" % self.old_factory)  # only what starts with the path
         self.assertEqual(job["other_path"], self.old_factory + "-other/x")  # another folder with a similar name
@@ -1290,6 +1290,59 @@ class FinishedJobMovesTest(OtherMachineCase):
         code, res = self.fx("rework", "T-1", "again please")
         self.assertEqual(code, 3)
         self.assertIn("not on the remote", res["error"])
+
+
+class TwoRepoJobMovesTest(OtherMachineCase):
+    """A job over two repositories, pushed from one machine and pulled on another: every repository comes back, the one
+    it changes from its branch, the one it only runs at its base. The factory moved to the new form of factory.json in
+    between, and its keys folder stayed where it was."""
+
+    def setUp(self):
+        super().setUp()
+        seed = os.path.join(self.tmp, "seed-fe")
+        os.makedirs(seed)
+        sh(["git", "init", "-q", "-b", "main"], seed)
+        write(os.path.join(seed, "web.txt"), "web\n")
+        sh(["git", "add", "-A"], seed)
+        sh(["git", "commit", "-q", "-m", "base"], seed)
+        self.fe_origin = os.path.join(self.tmp, "fe.git")
+        sh(["git", "clone", "-q", "--bare", seed, self.fe_origin], self.tmp)
+        keys = fx.baselines_key_dir(self.f.ctx())
+        cfg = load_json(os.path.join(self.f.factory, "factory.json"))
+        url = cfg["project"].pop("url")
+        cfg["repos"] = [{"name": "be", "url": url, "base_branch": "main"},
+                        {"name": "fe", "url": self.fe_origin, "app": {"up": "true", "needs": ["be"]}}]
+        write(os.path.join(self.f.factory, "factory.json"), json.dumps(cfg, indent=1))
+        self.assertEqual(fx.baselines_key_dir(self.f.ctx()), keys)
+        sh(["git", "commit", "-q", "--allow-empty", "-m", "pushed work"], self.f.wt)
+        sh(["git", "push", "-q", "origin", self.f.branch], self.f.wt)
+        job = {k: v for k, v in self.f.job().items() if k not in fx.JOB_REPO_FIELDS}
+        job.update(stage="build", pushed_head=None, repo_order=["be", "fe"], repos={
+            "be": {"role": "change", "branch": self.f.branch, "worktree": os.path.join(self.old_work, "T-1", "be"),
+                   "base_branch": "main", "base_ref": "origin/main", "setup_done": True},
+            "fe": {"role": "run", "worktree": os.path.join(self.old_work, "T-1", "fe"), "base_branch": "main",
+                   "base_ref": "origin/main", "setup_done": True}})
+        write(os.path.join(self.f.jd, "job.json"), json.dumps(job, indent=1))
+        code, res = self.fx("jobs", "push", "T-1")
+        self.assertEqual(code, 0, res)
+        self.new = self.move_to_a_new_machine()
+        code, self.res = self.pull("T-1")
+        self.assertEqual(code, 0, self.res)
+
+    def test_every_repository_comes_back(self):
+        row = self.res["jobs"][0]
+        self.assertIn("Cloned its branch %s of be" % self.f.branch, row["next"])
+        self.assertIn("Cloned fe at its base main", row["next"])
+        raw = load_json(os.path.join(self.f.jd, "job.json"))
+        work = self.f.ctx().work
+        be, fe = raw["repos"]["be"], raw["repos"]["fe"]
+        self.assertEqual((be["worktree"], fe["worktree"]), (os.path.join(work, "T-1", "be"), os.path.join(work, "T-1", "fe")))
+        self.assertFalse(be["setup_done"] or fe["setup_done"])
+        self.assertNotIn("worktree", raw)
+        self.assertEqual(sh(["git", "branch", "--show-current"], be["worktree"]).strip(), self.f.branch)
+        self.assertEqual(sh(["git", "log", "-1", "--format=%s"], be["worktree"]).strip(), "pushed work")
+        self.assertEqual(sh(["git", "branch", "--show-current"], fe["worktree"]).strip(), "")  # detached at its base
+        self.assertTrue(os.path.exists(os.path.join(fe["worktree"], "web.txt")))
 
 
 class UnfinishedJobMovesTest(OtherMachineCase):
@@ -1409,11 +1462,15 @@ class WhatTheFileMaySayTest(OtherMachineCase):
         self.pull("T-1")
         self.assertEqual(self.restored()["candidates"][0]["worktree"], os.path.join(self.f.ctx().work, "T-1") + "-c1")
 
-    def test_an_upstream_file_elsewhere_is_dropped(self):
-        self.push_as(upstream=[os.path.join(self.f.jd, "upstream", "1-a.md"), "/etc/passwd", 7])
+    def test_an_older_job_s_upstream_and_feature_fields_are_left_out(self):
+        self.push_as(upstream=[os.path.join(self.f.jd, "upstream", "1-a.md"), "/etc/passwd", 7],
+                     feature={"id": "PROJ-9", "repo": "be", "shared": True})
         self.new = self.move_to_a_new_machine()
-        self.pull("T-1")
-        self.assertEqual(self.restored()["upstream"], [os.path.join(self.new, "jobs", "T-1", "upstream", "1-a.md")])
+        code, res = self.pull("T-1")
+        self.assertEqual(code, 0, res)
+        job = self.restored()
+        self.assertNotIn("upstream", job)
+        self.assertEqual(job["worktree"], os.path.join(self.f.ctx().work, "T-1"))
 
     def test_the_old_machine_s_process_is_forgotten(self):
         self.write_job("T-1", {"app.json": json.dumps({"pid": os.getpid()})})
@@ -1789,7 +1846,7 @@ class WholeWayTest(JobsStoreCase):
 
         code, res = self.fx("rework", "T-1", "one more thing")
         self.assertEqual(code, 0, res)
-        job = load_json(os.path.join(new, "jobs", "T-1", "job.json"))
+        job = fx.job_flat_copy(load_json(os.path.join(new, "jobs", "T-1", "job.json")))
         self.assertEqual(job["stage"], "build")
         self.assertTrue(job["worktree"].startswith(os.path.join(self.tmp, "other-machine")))
         self.assertTrue(os.path.isdir(os.path.join(job["worktree"], ".git")))

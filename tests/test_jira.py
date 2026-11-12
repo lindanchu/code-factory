@@ -2,7 +2,7 @@
     python3 -I -m unittest discover -s tests
 
 mcp: Claude's own Atlassian connector does the Jira work, and fx only queues it. token: fx calls Jira's REST API itself,
-with the email and API token in jira.env, in this machine's keys folder; it also does the Jira reads of /code-factory:factory feature
+with the email and API token in jira.env, in this machine's keys folder; it also does the Jira reads of a parent issue
 and /code-factory:factory init (fx jira children, finished and statuses). A fake Jira site on 127.0.0.1 answers, checks the
 credentials of every request and keeps what was posted.
 """
@@ -505,7 +505,7 @@ class TokenSiteTest(JiraCase):
 
 
 # --------------------------------------------------------------------------
-# the Jira reads of /code-factory:factory feature and /code-factory:factory init: fx jira children, finished and statuses
+# the Jira reads of a parent issue and of /code-factory:factory init: fx jira children, finished and statuses
 
 FIELDS = "summary,issuetype,status,project,components,labels"
 CHILDREN_JQL = 'parent = "%s"' % KEY

@@ -1,6 +1,6 @@
 {
   "name": "code-factory",
-  "version": "1.0.0",
-  "description": "Software factory for Claude Code: give it a Jira issue, get back a pull request that agents specified, built, tested (logic, UI with Playwright, security) and reviewed. A human always reviews and merges. Lives in its own factory repository per project, never inside the project; each job works in a throw-away clone.",
+  "version": "2.0.0",
+  "description": "Software factory for Claude Code: give it a Jira issue, get back pull requests that agents specified, built, tested (logic, UI with Playwright, security) and reviewed. A human always reviews and merges. One factory repository per project, with one or more repositories: one job per issue covers every repository it needs, and each changed repository gets its own branch and pull request, linked to the others. Never inside the project; each job works in throw-away clones.",
   "license": "UNLICENSED"
 }
