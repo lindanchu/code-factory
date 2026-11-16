@@ -775,6 +775,48 @@ factory repository (quick; it keeps your files and refreshes permissions).
 An install only moves when the plugin's version changes: commits pushed under the
 same version never reach it, and update reports it is already at the latest.
 
+### Upgrading from code-factory 2.0
+
+3.0.0 is a new plugin, `auto-factory` (the code and review flows of auto-code-factory 1.10.0), in place of
+2.0's `code-factory`. Its commands are `/auto-factory:code` and `/auto-factory:review` (2.0:
+`/code-factory:factory`), and each repository of a project now has its own factory repository (2.0: one factory
+for all of them). Once per machine, then once per factory repository:
+
+1. **Finish the jobs that are running on 2.0** (or close them): a job is not carried over to 3.0.0.
+2. **Replace the plugin**, from a terminal:
+
+   ```
+   claude plugin marketplace update code-factory
+   claude plugin uninstall code-factory@code-factory
+   claude plugin install auto-factory@code-factory
+   ```
+
+   Installed with `install.sh` instead: pull this repository and run `bash install.sh` again; it removes 2.0's
+   `/factory`. With auto-code-factory's `auto-factory` installed, keep only one of the two.
+3. **Move this machine's keys** (S3 keys; 2.0 kept them in `~/.config/code-factory`): the folder of each project
+   keeps its name.
+
+   ```
+   mkdir -p ~/.config/auto-code-factory
+   cp -R ~/.config/code-factory/keys ~/.config/auto-code-factory/
+   ```
+
+4. **Install the tools again**, in a new session: `/auto-factory:code install` (they now live in
+   `~/.cache/auto-code-factory`).
+5. **Jira**: 3.0.0 reads Jira through the Atlassian connector of Claude, or `JIRA_EMAIL` and `JIRA_API_TOKEN` in
+   the environment; 2.0's `jira.env` file is not read.
+6. **In each 2.0 factory repository**, which becomes the factory of its first repository:
+   `/auto-factory:code init <git URL of that repository>`. Its `factory.json` settings, `logic/` and `lessons.md`
+   stay; init sets `project.url` and makes `checks.sh`: put in it the commands of `checks/<repo>.sh`. Knowledge is
+   now one folder per factory: move that repository's files from `knowledge/<repo>/` up into `knowledge/` (all but
+   its `README.md`), then `fx knowledge check`. When everything is moved, delete `checks/`, `knowledge/<repo>/` and
+   the `repos` list from `factory.json`; then `fx doctor`, and commit.
+7. **The other repositories of the project**: a factory repository each, made with `/auto-factory:code init <git
+   URL>` in a new empty repository; copy into its `knowledge/` the project-wide files of the 2.0 factory and that
+   repository's `knowledge/<repo>/` files. A ticket that needs several of them runs with
+   `/auto-factory:code feature PROJ-1` (**One issue, several repositories**); reviews of all of them can stay in one
+   factory (`review.repos`).
+
 ## Set up a project: `init`
 
 1. Create an empty private repository for the project's factory (for example
