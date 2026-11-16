@@ -1,0 +1,10 @@
+/* Token của gói thử "d1" (tiền tố --t-), bịa ra cho các ca biên của fixture. */
+:root {
+  --t-color-ink: #1B1F2A;
+  --t-color-danger: #C63B2F;
+  --t-text-primary: #1B1F2A;
+  --t-text-inverse: #F7F6F3;
+  --t-bg-page: #F4F3EF;
+  --t-bg-card: #FFFFFF;
+  --t-border-strong: #D3D0C8;
+}

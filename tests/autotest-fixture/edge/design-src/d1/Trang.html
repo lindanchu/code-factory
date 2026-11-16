@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<!-- One page that plays both sides in the edge tests of the UI check (tests/autotest-fixture/edge):
+       as the design page, its state comes in the address as #dc=<JSON> (variant, side, mx, my, crash, refuse, data);
+       as the "web", the same drawing is asked for in the query string (?variant=…&side=…&mx=…&my=…&bold=…&seed=…&scroll=…),
+       with seeded differences the design never has (bold, seed, another text in the side panel).
+     variant: plain | menu | dialog. A side panel is fixed at the left, 200px wide. -->
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trang thử</title>
+<style>
+  html, body { margin: 0; }
+  body { font: 14px/20px Arial, Helvetica, sans-serif; color: #1B1F2A; background: #F4F3EF; }
+  .wrap { min-height: 1600px; }
+  .side { position: fixed; left: 0; top: 0; bottom: 0; width: 200px; box-sizing: border-box; padding: 16px; background: #1B1F2A; color: #F7F6F3; }
+  .content { margin-left: 200px; padding: 24px; }
+  h1 { margin: 0 0 16px; font-size: 24px; line-height: 32px; }
+  .menu { position: absolute; width: 180px; padding: 6px; background: #FFFFFF; border: 1px solid #D3D0C8; border-radius: 8px; }
+  .item { display: block; padding: 6px 10px; border-radius: 6px; }
+  .dialog { position: fixed; top: 100px; left: 400px; width: 360px; padding: 20px; background: #FFFFFF; border: 1px solid #D3D0C8; border-radius: 12px; }
+  .dialog h2 { margin: 0 0 12px; font-size: 18px; line-height: 24px; }
+</style>
+</head>
+<body>
+<div id="dc-root"></div>
+<script>
+(function () {
+  var input = {};
+  try {
+    var m = location.hash.match(/^#dc=(.*)$/);
+    if (m) input = JSON.parse(decodeURIComponent(m[1]));
+  } catch (err) { document.body.textContent = 'Không mở được trang: ' + err; return; }
+  if (input.refuse) { document.body.textContent = 'Không mở được trang: Error: màn này không nhận ' + input.refuse; return; }
+  var q = new URLSearchParams(location.search);
+  var variant = input.variant || q.get('variant') || 'plain';
+  var data = input.data || { who: 'Lan Phạm', items: ['Sửa', 'Khoá', 'Xoá'] };
+  var html = '<div class="side">' + (q.get('side') || input.side || 'Thanh bên') + '<br><span>' + data.who + '</span></div>' +
+    '<div class="content"><h1>Trang thử</h1><p>Nội dung của trang thử, đủ dài để thấy.</p></div>';
+  if (variant === 'menu') {
+    html += '<div class="menu" role="menu" style="left:' + (q.get('mx') || input.mx || 300) + 'px;top:' + (q.get('my') || input.my || 200) + 'px">' +
+      data.items.map(function (t, i) { return '<span class="item" role="menuitem"' + (q.get('bold') === String(i) ? ' style="font-weight:700"' : '') + '>' + t + '</span>'; }).join('') + '</div>';
+  }
+  if (variant === 'dialog') {
+    html += '<div class="dialog" role="dialog" aria-label="Xác nhận"><h2>Xác nhận</h2><p' + (q.get('seed') ? ' style="color:#C63B2F"' : '') + '>Bạn chắc chắn muốn tiếp tục?</p>' +
+      '<button type="button">Đồng ý</button></div>';
+  }
+  document.getElementById('dc-root').innerHTML = '<div class="wrap">' + html + '</div>';
+  // a page that stops on an error after it has drawn (data it cannot use), as a real design page does
+  if (input.crash) requestAnimationFrame(function () { var none; none.map(function () {}); });
+  if (q.get('scroll')) window.scrollTo(0, Number(q.get('scroll')));
+})();
+</script>
+</body>
+</html>

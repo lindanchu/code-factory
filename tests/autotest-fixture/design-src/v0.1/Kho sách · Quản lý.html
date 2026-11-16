@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<!-- A made-up design page for the fixture of the auto test runtime. It follows what a real design package promises:
+     the state and the data come from outside in the address (#dc=<JSON>), the screen is drawn in #dc-root, and a page
+     that cannot use its input says "Không mở được trang: …". Objects are taken by position: the book of the detail
+     dialog is the first of data.books. A dialog or a menu is drawn one frame after the screen under it, as real pages do. -->
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kho sách · Quản lý</title>
+<style>
+  :root {
+    --ks-color-ink: #1B1F2A; --ks-color-primary: #2457D6; --ks-color-success: #23774A; --ks-success-light: #E3F3EA; --ks-color-danger: #C63B2F; --ks-danger-light: #FBE8E5;
+    --ks-text-primary: #1B1F2A; --ks-text-secondary: #5B6270; --ks-text-inverse: #F7F6F3; --ks-white: #FFFFFF;
+    --ks-bg-page: #F4F3EF; --ks-bg-card: #FFFFFF; --ks-bg-subtle: #FAF9F6; --ks-bg-dark: #1B1F2A;
+    --ks-border: #E2E0DA; --ks-border-light: #EFEEE9; --ks-border-strong: #D3D0C8;
+    --ks-r-md: 8px; --ks-r-lg: 12px; --ks-r-pill: 999px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 20px; color: var(--ks-text-primary); }
+  .d-app { min-height: 100vh; background: var(--ks-bg-page); }
+  .d-bar { height: 56px; background: var(--ks-bg-dark); color: var(--ks-text-inverse); display: flex; align-items: center; padding: 0 40px; font-size: 12px; }
+  .d-main { padding: 32px 40px; }
+  .d-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; }
+  .d-h1 { margin: 0; font-size: 24px; line-height: 32px; font-weight: 600; }
+  .d-sub { margin: 4px 0 0; color: var(--ks-text-secondary); }
+  .d-btn { height: 40px; padding: 0 16px; border: 1px solid var(--ks-border-strong); border-radius: var(--ks-r-md); background: var(--ks-white); color: var(--ks-text-primary);
+    font-family: inherit; font-size: 14px; line-height: 20px; font-weight: 600; cursor: pointer; }
+  .d-btn-primary { border-color: var(--ks-color-ink); background: var(--ks-color-ink); color: var(--ks-text-inverse); }
+  .d-tools { display: flex; gap: 8px; }
+  .d-sort { position: relative; }
+  .d-menu { position: absolute; top: 46px; right: 0; width: 200px; padding: 6px; background: var(--ks-bg-card); border: 1px solid var(--ks-border); border-radius: var(--ks-r-md);
+    box-shadow: 0 8px 24px rgba(27, 31, 42, 0.12); }
+  .d-menu-item { display: flex; align-items: center; height: 32px; padding: 0 10px; border-radius: 6px; }
+  .d-card { background: var(--ks-bg-card); border: 1px solid var(--ks-border); border-radius: var(--ks-r-lg); overflow: hidden; }
+  .d-row { display: flex; }
+  .d-cell { flex: 0 0 auto; display: flex; align-items: center; height: 44px; padding: 0 16px; white-space: nowrap; border-bottom: 1px solid var(--ks-border-light); }
+  .d-row-head .d-cell { height: 40px; background: var(--ks-bg-subtle); border-bottom: 1px solid var(--ks-border); font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ks-text-secondary); }
+  .d-row:last-child .d-cell { border-bottom: 0; }
+  .d-c1 { width: 140px; } .d-c2 { flex: 1 1 0; min-width: 0; } .d-c3 { width: 240px; } .d-c4 { width: 120px; } .d-c5 { width: 160px; }
+  .d-tag { display: inline-block; height: 24px; line-height: 24px; padding: 0 10px; border-radius: var(--ks-r-pill); font-size: 12px; font-weight: 600; }
+  .d-tag-in { background: var(--ks-success-light); color: var(--ks-color-success); }
+  .d-tag-out { background: var(--ks-danger-light); color: var(--ks-color-danger); }
+  .d-foot { margin-top: 12px; font-size: 13px; line-height: 18px; color: var(--ks-text-secondary); }
+  .d-overlay { position: fixed; inset: 0; background: rgba(27, 31, 42, 0.4); }
+  .d-dialog { position: fixed; top: 120px; left: 50%; transform: translateX(-50%); width: 480px; padding: 24px; background: var(--ks-bg-card); border-radius: var(--ks-r-lg);
+    box-shadow: 0 12px 32px rgba(27, 31, 42, 0.18); }
+  .d-dialog-title { margin: 0 0 20px; font-size: 18px; line-height: 24px; font-weight: 600; }
+  .d-field { margin-bottom: 16px; }
+  .d-label { margin-bottom: 6px; font-size: 13px; line-height: 18px; font-weight: 600; }
+  .d-input { display: block; width: 100%; height: 40px; padding: 0 12px; border: 1px solid var(--ks-border-strong); border-radius: var(--ks-r-md); background: var(--ks-white);
+    color: var(--ks-text-primary); font-family: inherit; font-size: 14px; line-height: 20px; outline: none; }
+  .d-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
+  .d-fact { display: flex; margin-bottom: 8px; }
+  .d-fact-name { flex: 0 0 120px; color: var(--ks-text-secondary); }
+  .d-help-h1 { margin: 0 0 16px; font-size: 24px; line-height: 32px; font-weight: 600; }
+  .d-p { margin: 0 0 12px; }
+  .d-lead { color: var(--ks-text-secondary); }
+  .d-linklike { -webkit-appearance: none; appearance: none; display: inline-block; margin: 0; padding: 0; border: 0; background: none; font: inherit; line-height: 20px;
+    color: var(--ks-color-primary); text-decoration: underline; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="dc-root"></div>
+<script>
+(function () {
+  var SAMPLE = {
+    books: [
+      { id: 'b1', code: 'KS-101', name: 'Những ngày thơ ấu', author: 'Nguyên Hồng', qty: 5, status: 'in' },
+      { id: 'b2', code: 'KS-102', name: 'Chí Phèo', author: 'Nam Cao', qty: 0, status: 'out' },
+      { id: 'b3', code: 'KS-103', name: 'Vang bóng một thời', author: 'Nguyễn Tuân', qty: 9, status: 'in' }
+    ],
+    demo: { newBook: { code: 'KS-104', name: 'Bỉ vỏ', author: 'Nguyên Hồng' } }
+  };
+  var esc = function (s) { return String(s === undefined || s === null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+  var label = function (b) { return b.status === 'in' ? 'Còn hàng' : 'Hết hàng'; };
+  var cell = function (cls, html) { return '<div class="d-cell ' + cls + '">' + html + '</div>'; };
+  var bar = '<div class="d-bar">Thanh đầu trang: giữ như sản phẩm</div>';
+
+  function books(data) {
+    var rows = data.books.map(function (b) {
+      return '<div class="d-row">' + cell('d-c1', esc(b.code)) + cell('d-c2', esc(b.name)) + cell('d-c3', esc(b.author)) + cell('d-c4', esc(b.qty)) +
+        cell('d-c5', '<span class="d-tag d-tag-' + (b.status === 'in' ? 'in' : 'out') + '">' + label(b) + '</span>') + '</div>';
+    }).join('');
+    return '<div class="d-app">' + bar + '<div class="d-main">' +
+      '<div class="d-head"><div><h1 class="d-h1">Kho sách</h1><p class="d-sub">Danh sách đầu sách đang quản lý.</p></div>' +
+      '<div class="d-tools"><div class="d-sort"><button type="button" class="d-btn">Sắp xếp</button></div>' +
+      '<button type="button" class="d-btn d-btn-primary">Thêm sách</button></div></div>' +
+      '<div class="d-card"><div class="d-table"><div class="d-row d-row-head">' + cell('d-c1', 'Mã') + cell('d-c2', 'Tên sách') + cell('d-c3', 'Tác giả') + cell('d-c4', 'Số lượng') + cell('d-c5', 'Trạng thái') + '</div>' +
+      rows + '</div></div>' +
+      '<div class="d-foot">Tổng số: ' + data.books.length + ' đầu sách</div>' +
+      '</div></div>';
+  }
+  function addDialog(data) {
+    var f = (data.demo && data.demo.newBook) || {};
+    var field = function (name, value) { return '<div class="d-field"><div class="d-label">' + name + '</div><input class="d-input" value="' + esc(value) + '"></div>'; };
+    return '<div class="d-overlay"></div><div class="d-dialog" role="dialog" aria-label="Thêm sách"><h2 class="d-dialog-title">Thêm sách</h2>' +
+      field('Mã sách', f.code) + field('Tên sách', f.name) + field('Tác giả', f.author) +
+      '<div class="d-actions"><button type="button" class="d-btn">Huỷ</button><button type="button" class="d-btn d-btn-primary">Lưu</button></div></div>';
+  }
+  function detailDialog(data) {
+    var b = data.books[0];
+    if (!b) throw new Error('trạng thái chi tiết cần ít nhất một đầu sách trong data.books');
+    var fact = function (name, value) { return '<div class="d-fact"><span class="d-fact-name">' + name + '</span><span>' + esc(value) + '</span></div>'; };
+    return '<div class="d-overlay"></div><div class="d-dialog" role="dialog" aria-label="Chi tiết sách"><h2 class="d-dialog-title">' + esc(b.name) + '</h2>' +
+      fact('Mã sách', b.code) + fact('Tác giả', b.author) + fact('Số lượng', b.qty) + fact('Trạng thái', label(b)) +
+      '<div class="d-actions"><button type="button" class="d-btn">Đóng</button></div></div>';
+  }
+  function sortMenu() {
+    return '<div class="d-menu" role="menu" aria-label="Sắp xếp">' + ['Theo mã', 'Theo tên sách', 'Theo số lượng'].map(function (t) {
+      return '<div class="d-menu-item" role="menuitem">' + t + '</div>';
+    }).join('') + '</div>';
+  }
+  function help() {
+    return '<div class="d-app">' + bar + '<div class="d-main"><h1 class="d-help-h1">Trợ giúp</h1>' +
+      '<p class="d-p d-lead">Kho sách giúp theo dõi số lượng của từng đầu sách.</p>' +
+      '<p class="d-p">Bấm vào một dòng của bảng để xem chi tiết đầu sách. Bấm “Thêm sách” để ghi một đầu sách mới.</p>' +
+      '<p class="d-p"><button type="button" class="d-linklike">Quay lại Kho sách</button></p></div></div>';
+  }
+
+  try {
+    var input = {};
+    var m = location.hash.match(/^#dc=(.*)$/);
+    if (m) input = JSON.parse(decodeURIComponent(m[1]));
+    if (input === null || typeof input !== 'object' || Array.isArray(input)) throw new Error('đầu vào phải là một đối tượng');
+    var data = input.data === undefined ? SAMPLE : input.data;
+    if (data === null || typeof data !== 'object' || !Array.isArray(data.books)) throw new Error('data.books phải là một danh sách');
+    var screen = input.screen || 'books', variant = input.variant || 'default';
+    var root = document.getElementById('dc-root');
+    if (screen === 'help') root.innerHTML = help();
+    else if (screen === 'books') {
+      root.innerHTML = books(data);
+      var layer = variant === 'add' ? addDialog(data) : variant === 'detail' ? detailDialog(data) : '';
+      if (layer) requestAnimationFrame(function () { root.insertAdjacentHTML('beforeend', layer); });
+      if (variant === 'sort') requestAnimationFrame(function () { root.querySelector('.d-sort').insertAdjacentHTML('beforeend', sortMenu()); });
+    } else throw new Error('không có màn "' + screen + '"');
+  } catch (err) { document.body.textContent = 'Không mở được trang: ' + err; }
+})();
+</script>
+</body>
+</html>

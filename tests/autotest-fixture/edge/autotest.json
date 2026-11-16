@@ -1,0 +1,25 @@
+{
+ "_doc": "Settings of the second tiny repository of the fixture: the edge paths of the UI check. A BAD screen does not fail a case here (ui_bad = column), so each test can look at what a check returned.",
+ "version": 1,
+ "project": {
+  "name": "Ca biên của kiểm giao diện (fixture)"
+ },
+ "web": {
+  "dir": "web"
+ },
+ "design": {
+  "dir": "design-src",
+  "current": "d1"
+ },
+ "conventions": {
+  "ui_threshold": {
+   "value": "medium"
+  },
+  "ui_percent_from": {
+   "value": 4
+  },
+  "ui_bad": {
+   "value": "column"
+  }
+ }
+}

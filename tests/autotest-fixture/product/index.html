@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<!-- A made-up product for the fixture of the auto test runtime: "Kho sách", a list of books with a menu and two dialogs.
+     Static, no server, no network. ?seed=minor and ?seed=bad draw it a little / far from its design on purpose.
+     It has one functional bug on purpose: a book with a code that already exists is saved without a word. -->
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kho sách</title>
+<style>
+  :root { --ink: #1B1F2A; --blue: #2457D6; --red: #C63B2F; --red-soft: #FBE8E5; --green: #23774A; --green-soft: #E3F3EA;
+    --text: #1B1F2A; --text-2: #5B6270; --on-ink: #F7F6F3; --white: #FFFFFF; --page: #F4F3EF; --soft: #FAF9F6;
+    --line: #E2E0DA; --line-soft: #EFEEE9; --line-strong: #D3D0C8; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 20px; color: var(--text); }
+  .app { min-height: 100vh; background: var(--page); }
+  .topbar { height: 56px; background: var(--ink); color: var(--on-ink); display: flex; align-items: center; justify-content: space-between; padding: 0 40px; }
+  .topbar strong { font-size: 16px; }
+  .main { padding: 32px 40px; }
+  .head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; }
+  h1 { margin: 0; font-size: 24px; line-height: 32px; font-weight: 600; }
+  .sub { margin: 4px 0 0; color: var(--text-2); }
+  .btn { height: 40px; padding: 0 16px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--white); color: var(--text);
+    font-family: inherit; font-size: 14px; line-height: 20px; font-weight: 600; cursor: pointer; }
+  .btn.primary { border-color: var(--ink); background: var(--ink); color: var(--on-ink); }
+  .tools { display: flex; gap: 8px; }
+  .sort { position: relative; }
+  .menu { position: absolute; top: 46px; right: 0; width: 200px; padding: 6px; background: var(--white); border: 1px solid var(--line); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(27, 31, 42, 0.12); }
+  .menu button { display: block; width: 100%; height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: none; color: var(--text);
+    font-family: inherit; font-size: 14px; line-height: 20px; text-align: left; cursor: pointer; }
+  .menu button:hover { background: var(--soft); }
+  .card { background: var(--white); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+  col.c-code { width: 140px; } col.c-author { width: 240px; } col.c-qty { width: 120px; } col.c-status { width: 160px; }
+  th, td { padding: 0 16px; text-align: left; vertical-align: middle; white-space: nowrap; font-weight: 400; }
+  th { height: 40px; background: var(--soft); border-bottom: 1px solid var(--line); font-size: 12px; line-height: 16px; font-weight: 600; color: var(--text-2); }
+  td { height: 44px; border-bottom: 1px solid var(--line-soft); }
+  tbody tr { cursor: pointer; }
+  tbody tr:last-child td { border-bottom: 0; }
+  .tag { display: inline-block; vertical-align: top; height: 24px; line-height: 24px; padding: 0 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .tag.in { background: var(--green-soft); color: var(--green); }
+  .tag.out { background: var(--red-soft); color: var(--red); }
+  .foot { margin-top: 12px; font-size: 13px; line-height: 18px; color: var(--text-2); }
+  .overlay { position: fixed; inset: 0; background: rgba(27, 31, 42, 0.4); }
+  .dialog { position: fixed; top: 120px; left: 50%; transform: translateX(-50%); width: 480px; padding: 24px; background: var(--white); border-radius: 12px;
+    box-shadow: 0 12px 32px rgba(27, 31, 42, 0.18); }
+  .dialog h2 { margin: 0 0 20px; font-size: 18px; line-height: 24px; font-weight: 600; }
+  .field { margin-bottom: 16px; }
+  .field label { display: block; margin-bottom: 6px; font-size: 13px; line-height: 18px; font-weight: 600; }
+  .field input { display: block; width: 100%; height: 40px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--white);
+    color: var(--text); font-family: inherit; font-size: 14px; line-height: 20px; outline: none; }
+  .field input:focus { outline: 2px solid var(--blue); outline-offset: 1px; }
+  .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
+  dl, dt, dd { margin: 0; }
+  .fact { display: flex; margin-bottom: 8px; }
+  .fact dt { flex: 0 0 120px; color: var(--text-2); }
+  [hidden] { display: none !important; }
+
+  /* drawn a little off the design: the dialogs only */
+  .seed-minor .dialog h2 { margin-bottom: 23px; }
+  .seed-minor .dialog .btn { border-radius: 10px; }
+  /* drawn far from the design: the head of the list only */
+  .seed-bad .head .btn.primary { border-color: var(--red); background: var(--red); }
+  .seed-bad h1 { font-weight: 400; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar"><strong>Kho sách</strong><span>Lan Phạm</span></header>
+  <main class="main">
+    <div class="head">
+      <div>
+        <h1>Kho sách</h1>
+        <p class="sub">Danh sách đầu sách đang quản lý.</p>
+      </div>
+      <div class="tools">
+        <div class="sort">
+          <button type="button" class="btn" id="open-sort" aria-haspopup="menu" aria-expanded="false">Sắp xếp</button>
+          <div class="menu" id="sort-menu" role="menu" aria-label="Sắp xếp" hidden>
+            <button type="button" role="menuitem" data-by="code">Theo mã</button>
+            <button type="button" role="menuitem" data-by="name">Theo tên sách</button>
+            <button type="button" role="menuitem" data-by="qty">Theo số lượng</button>
+          </div>
+        </div>
+        <button type="button" class="btn primary" id="open-add">Thêm sách</button>
+      </div>
+    </div>
+    <div class="card">
+      <table>
+        <colgroup><col class="c-code"><col><col class="c-author"><col class="c-qty"><col class="c-status"></colgroup>
+        <thead><tr><th>Mã</th><th>Tên sách</th><th>Tác giả</th><th>Số lượng</th><th>Trạng thái</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="foot"><div id="total"></div><div>Cập nhật lúc 10:32</div></div>
+  </main>
+</div>
+
+<div class="overlay" id="overlay" hidden></div>
+
+<div class="dialog" id="add" role="dialog" aria-modal="true" aria-labelledby="add-title" hidden>
+  <h2 id="add-title">Thêm sách</h2>
+  <form id="add-form" autocomplete="off">
+    <div class="field"><label for="f-code">Mã sách</label><input id="f-code" name="code"></div>
+    <div class="field"><label for="f-name">Tên sách</label><input id="f-name" name="name"></div>
+    <div class="field"><label for="f-author">Tác giả</label><input id="f-author" name="author"></div>
+    <div class="actions">
+      <button type="button" class="btn" id="cancel-add">Huỷ</button>
+      <button type="submit" class="btn primary">Lưu</button>
+    </div>
+  </form>
+</div>
+
+<div class="dialog" id="detail" role="dialog" aria-modal="true" aria-labelledby="detail-title" hidden>
+  <h2 id="detail-title"></h2>
+  <dl>
+    <div class="fact"><dt>Mã sách</dt><dd id="d-code"></dd></div>
+    <div class="fact"><dt>Tác giả</dt><dd id="d-author"></dd></div>
+    <div class="fact"><dt>Số lượng</dt><dd id="d-qty"></dd></div>
+    <div class="fact"><dt>Trạng thái</dt><dd id="d-status"></dd></div>
+  </dl>
+  <div class="actions"><button type="button" class="btn" id="close-detail">Đóng</button></div>
+</div>
+
+<script>
+(function () {
+  var books = [
+    { code: 'KS-001', name: 'Dế Mèn phiêu lưu ký', author: 'Tô Hoài', qty: 12 },
+    { code: 'KS-002', name: 'Số đỏ', author: 'Vũ Trọng Phụng', qty: 0 },
+    { code: 'KS-003', name: 'Tắt đèn', author: 'Ngô Tất Tố', qty: 7 },
+    { code: 'KS-004', name: 'Truyện Kiều', author: 'Nguyễn Du', qty: 3 }
+  ];
+  var seed = new URLSearchParams(location.search).get('seed');
+  if (seed) document.body.classList.add('seed-' + seed);
+  var $ = function (id) { return document.getElementById(id); };
+  var status = function (b) { return b.qty > 0 ? 'Còn hàng' : 'Hết hàng'; };
+
+  function draw() {
+    var body = $('rows');
+    body.textContent = '';
+    books.forEach(function (b) {
+      var tr = document.createElement('tr');
+      [b.code, b.name, b.author, String(b.qty)].forEach(function (v) { var td = document.createElement('td'); td.textContent = v; tr.appendChild(td); });
+      var td = document.createElement('td'), tag = document.createElement('span');
+      tag.className = 'tag ' + (b.qty > 0 ? 'in' : 'out'); tag.textContent = status(b);
+      td.appendChild(tag); tr.appendChild(td);
+      tr.addEventListener('click', function () { openDetail(b); });
+      body.appendChild(tr);
+    });
+    $('total').textContent = 'Tổng số: ' + books.length + ' đầu sách';
+  }
+  function show(id, on) { $(id).hidden = !on; $('overlay').hidden = !on; }
+  function openDetail(b) {
+    $('detail-title').textContent = b.name; $('d-code').textContent = b.code; $('d-author').textContent = b.author;
+    $('d-qty').textContent = String(b.qty); $('d-status').textContent = status(b);
+    show('detail', true);
+  }
+  var order = { code: function (a, b) { return a.code.localeCompare(b.code); }, name: function (a, b) { return a.name.localeCompare(b.name, 'vi'); },
+    qty: function (a, b) { return b.qty - a.qty; } };
+  function menu(on) { $('sort-menu').hidden = !on; $('open-sort').setAttribute('aria-expanded', String(on)); }
+  $('open-sort').addEventListener('click', function () { menu($('sort-menu').hidden); });
+  $('sort-menu').addEventListener('click', function (e) {
+    var by = e.target.getAttribute('data-by');
+    if (!by) return;
+    books.sort(order[by]);
+    menu(false);
+    draw();
+  });
+  $('open-add').addEventListener('click', function () { menu(false); $('add-form').reset(); show('add', true); $('f-code').focus(); });
+  $('cancel-add').addEventListener('click', function () { show('add', false); });
+  $('close-detail').addEventListener('click', function () { show('detail', false); });
+  $('add-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    // the bug left in on purpose: nothing checks that the code is new
+    books.push({ code: $('f-code').value.trim(), name: $('f-name').value.trim(), author: $('f-author').value.trim(), qty: 0 });
+    show('add', false);
+    draw();
+  });
+  draw();
+})();
+</script>
+</body>
+</html>

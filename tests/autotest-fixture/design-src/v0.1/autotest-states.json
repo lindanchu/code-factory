@@ -1,0 +1,69 @@
+{
+ "version": "v0.1",
+ "sha256": "1c253967b43d5e29cdbfe9cbda689f8c09be0ecb99370cb4e46b43514206527b",
+ "tokens": "tokens.css",
+ "token_prefix": "--ks-",
+ "pages": {
+  "Kho sách · Quản lý.html": {
+   "data": "Kho sách · Quản lý.data.json",
+   "takes_data": true
+  },
+  "Báo cáo tồn kho.html": {
+   "data": null,
+   "takes_data": false
+  }
+ },
+ "states": {
+  "HP-1": {
+   "page": "Kho sách · Quản lý.html",
+   "input": {
+    "screen": "help",
+    "variant": "default"
+   },
+   "screen": "help",
+   "label": "Trợ giúp"
+  },
+  "BK-1": {
+   "page": "Kho sách · Quản lý.html",
+   "input": {
+    "screen": "books",
+    "variant": "default"
+   },
+   "screen": "books",
+   "label": "Danh sách"
+  },
+  "BK-2": {
+   "page": "Kho sách · Quản lý.html",
+   "input": {
+    "screen": "books",
+    "variant": "add"
+   },
+   "screen": "books",
+   "label": "Thêm sách"
+  },
+  "BK-3": {
+   "page": "Kho sách · Quản lý.html",
+   "input": {
+    "screen": "books",
+    "variant": "detail"
+   },
+   "screen": "books",
+   "label": "Chi tiết sách"
+  },
+  "BK-4": {
+   "page": "Kho sách · Quản lý.html",
+   "input": {
+    "screen": "books",
+    "variant": "sort"
+   },
+   "screen": "books",
+   "label": "Menu sắp xếp"
+  },
+  "RP-1": {
+   "page": "Báo cáo tồn kho.html",
+   "input": {},
+   "screen": "report",
+   "label": "Báo cáo tồn kho"
+  }
+ }
+}

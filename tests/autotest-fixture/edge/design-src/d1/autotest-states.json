@@ -1,0 +1,17 @@
+{
+ "version": "d1 thử",
+ "sha256": "0000000000000000000000000000000000000000000000000000000000000d01",
+ "tokens": "tokens.css",
+ "pages": {
+  "Trang.html": { "data": null, "takes_data": true }
+ },
+ "states": {
+  "PL-1": { "page": "Trang.html", "input": { "variant": "plain" }, "screen": "plain", "label": "Trang trơn" },
+  "MN-1": { "page": "Trang.html", "input": { "variant": "menu", "mx": 700, "my": 420 }, "screen": "menu", "label": "Menu mở" },
+  "DG-1": { "page": "Trang.html", "input": { "variant": "dialog" }, "screen": "dialog", "label": "Hộp thoại" },
+  "CR-1": { "page": "Trang.html", "input": { "variant": "plain", "crash": true }, "screen": "plain", "label": "Vẽ lỗi" },
+  "RF-1": { "page": "Trang.html", "input": { "variant": "plain", "refuse": "dữ liệu này" }, "screen": "plain", "label": "Từ chối" },
+  "AN-1": { "page": "Trang.html", "input": { "variant": "plain" }, "screen": "anon", "label": "Không dữ liệu" },
+  "ND-1": { "page": "Trang.html", "input": { "variant": "plain" }, "screen": "nodata", "label": "Thiếu dữ liệu" }
+ }
+}

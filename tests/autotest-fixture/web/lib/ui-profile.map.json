@@ -1,0 +1,14 @@
+{
+ "_": "Where each key of the design's data (Kho sách · Quản lý.data.json) is shown on the screen, by visible label. Read by the runtime's tojson.js through ui-profile.js.",
+ "books": {
+  "table": ["Mã", "Tên sách", "Tác giả", "Số lượng", "Trạng thái"],
+  "fields": {
+   "id":     { "col": "Mã" },
+   "code":   { "col": "Mã" },
+   "name":   { "col": "Tên sách" },
+   "author": { "col": "Tác giả" },
+   "qty":    { "col": "Số lượng", "number": true },
+   "status": { "col": "Trạng thái", "labels": { "Còn hàng": "in", "Hết hàng": "out" } }
+  }
+ }
+}

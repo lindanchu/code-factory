@@ -1,0 +1,7 @@
+{
+ "_": "Not a plan: the runtime's plan.js must never read a *.matrix.json. If it did, the case below would replace the real WEB-DEM-01 and its test would have no step to run.",
+ "WEB-DEM-01": {
+  "name": "KHÔNG PHẢI KẾ HOẠCH",
+  "steps": []
+ }
+}

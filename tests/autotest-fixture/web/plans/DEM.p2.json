@@ -1,0 +1,22 @@
+{
+ "WEB-DEM-06": {
+  "name": "Xuất báo cáo tồn kho",
+  "steps": [
+   { "name": "Mở trang Kho sách, bấm \"Xuất báo cáo\"", "expected": "Tải về file báo cáo tồn kho" }
+  ],
+  "ac": [{ "code": "KS-6", "content": "Xuất được báo cáo tồn kho" }],
+  "preconditions": [],
+  "test_data": [],
+  "state": "ACTIVE"
+ },
+ "WEB-DEM-07-ENV": {
+  "name": "Trang Trợ giúp mở được sau khi khởi động lại",
+  "steps": [
+   { "name": "Mở trang Trợ giúp", "expected": "Thấy tiêu đề \"Trợ giúp\"" }
+  ],
+  "ac": [{ "code": "KS-7", "content": "Trang Trợ giúp luôn mở được" }],
+  "preconditions": [],
+  "test_data": [],
+  "state": "ACTIVE"
+ }
+}

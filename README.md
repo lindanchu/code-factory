@@ -1,98 +1,58 @@
-# code-factory
+# auto-factory
 
 A software factory for Claude Code. Give it a Jira issue or a plain task; get
-back pushed branches, ready for pull requests, that agents specified, built,
+back a pushed branch, ready for a pull request, that agents specified, built,
 tested (logic, UI and security) and reviewed. A human always opens or reviews
-the pull requests and merges.
+the pull request and merges.
 
 ```
-/code-factory:factory https://your-site.atlassian.net/browse/PROJ-123
-/code-factory:factory task "Add CSV export to the invoice list"
+/auto-factory:code https://your-site.atlassian.net/browse/PROJ-123
+/auto-factory:code task "Add CSV export to the invoice list"
 ```
+
+The same plugin also reviews a colleague's merge request against its ticket
+(`/auto-factory:review`).
 
 It assumes nothing about your project: no stack, framework or human language
-is built in. `/code-factory:factory init` learns each project (code, history, style, team
+is built in. `/auto-factory:code init` learns each project (code, history, style, team
 rules), or interviews you and scaffolds a new one.
 
-**One factory per project, with one or more repositories.** A project is
-whatever one team ships together: a backend, a web app and a mobile app, say,
-or a single repository. Its factory lists them all in `factory.json`, each with
-its own checks, knowledge and way to run. One issue is one job, whichever
-repositories it needs: intake names them, the spec gives each its part and the
-contract they share, and each changed repository gets its own branch and pull
-request, linked to the others.
-
 **The factory never lives inside a project.** Each project gets its own
-factory repository (for example `shop-factory`, private), which holds the
-settings, checks, knowledge and lessons. The project's repositories receive
-nothing but the job branches and pull requests, and your own checkouts of them
-are never touched: every job works in its own clones, deleted as soon as its
-branches are pushed. Reading the code for init, audits or knowledge updates
-uses short-lived clones that are deleted afterwards, so no project code stays
-on the machine between jobs.
+factory repository (for example `api-factory`, private), which holds the
+settings, checks, knowledge and lessons. The project's repository receives
+nothing but the job branches and pull requests, and your own checkout of it is
+never touched: every job works in its own clone of the project, deleted as soon
+as its branch is pushed. Reading the code for init, audits or knowledge
+updates uses short-lived clones that are deleted afterwards, so no project
+code stays on the machine between jobs.
 
 ## How a job runs
 
 | # | Step | Who | Writes |
 |---|---|---|---|
-| 1 | Read the issue (or task) into the job folder. With one repository: ask you which branch to take the code from, clone it for this job and create branch `factory/KEY-…` | you + fx | `issue.md` |
-| 2 | Intake: clear enough? risk? user-visible? With several repositories, also which ones the issue needs to change (`REPOS:`); then you are asked each one's branch to start from, and fx clones them, all on the same branch name | agent, you + fx | `intake.md` |
-| 3 | Missing information → multiple-choice questions to you, one at a time, each explained first | you | `qa-log.md` |
-| 4 | Spec: criteria, **one related test-data scenario** with cases per criterion, security requirements (OWASP ASVS) and abuse cases, UI check plan; with 2 or more repositories, a part per repository and the contract they share | agent | `spec.md` |
+| 1 | Ask you which branch to take the code from; read the issue (or task), clone the project for this job, create branch `factory/KEY-…` from it | you + fx | `issue.md` |
+| 2 | Intake: clear enough? risk? user-visible? | agent | `intake.md` |
+| 3 | Missing information → multiple-choice questions to you | you | `qa-log.md` |
+| 4 | Spec: criteria, **one related test-data scenario** with cases per criterion, security requirements (OWASP ASVS) and abuse cases, UI check plan | agent | `spec.md` |
 | 4b | Plan: one builder, or packages built in parallel that never share a file (a contract first) | agent | `plan.md` |
 | 5 | Build in the project's style; authorization and data-isolation tests **written first**; Playwright UI check for user-visible changes | agent | code, tests, `ui/check.js`, `build.md` |
-| 6 | Gate, per changed repository: its checks, path rules and scanners; the apps the job needs, started in dependency order with the scenario seeded; e2e and the Playwright UI check (screenshots, console/network errors, accessibility) | fx | `round-N/checks.md`, `ui.md`, `security.md` |
-| 7 | Parallel reviews of the whole change: security (ASVS, verified by a second agent), code (tests vs spec, style), UX and UI with Playwright, and with 2 or more repositories the fit checker (do they work with each other?) | agents | `round-N/review-*.md` |
+| 6 | Gate: checks, app with the scenario seeded, e2e, Playwright UI check (screenshots, console/network errors, accessibility), security scanners | fx | `round-N/checks.md`, `ui.md`, `security.md` |
+| 7 | Parallel reviews: security (ASVS, verified by a second agent), code (tests vs spec, style), UX and UI with Playwright | agents | `round-N/review-*.md` |
 | 8 | Changes requested → back to 5 (max 3 rounds) | | |
-| 9 | Approver: APPROVE, or ESCALATE with what a human must look at, in plain words first | agent | `decision.md` |
-| 10 | Ask you which branch each pull request goes into; sync with it and scan for secrets in every repository first, then push each branch, open the PRs when `pr.create` is on (draft if incomplete), link them to each other, delete the clones | you + fx | `pr-body.md` (ready to paste into the PR; it opens with a summary for people) |
+| 9 | Approver: APPROVE or ESCALATE | agent | `decision.md` |
+| 10 | Ask you which branch the pull request goes into; sync with it, scan for secrets, push the branch, open the PR when `pr.create` is on (draft if incomplete), delete the clone | you + fx | `pr-body.md` (ready to paste into the PR) |
 | 11 | You review and merge, or send it back with `rework` | you | |
-| 12 | Learn: propose lessons and knowledge updates from what happened; you decide on each one | agents + you | `lessons.md`, `knowledge/` |
+| 12 | Learn: propose lessons and knowledge updates from what happened, for your approval | agents + you | `lessons.md`, `knowledge/` |
 
 Jira is updated along the way (start status, comments, review status, PR
-link), in the way chosen in init (see **Jira**). Local tasks skip Jira.
-
-## How the factory explains
-
-Whenever the factory needs you to decide something, in a job or in any other command, it
-explains first and asks in the same message. One decision per question, never a batch.
-
-- **The easy version first:** what the user of the app does and sees, why it matters, and a
-  little of the code in plain words, without function names, line numbers or ids, and no
-  analogies unless you ask.
-- **Then the technical version:** the code with `path:line`, and the gate and review results.
-- Both say what is uncertain and what ran: "not measured", "inferred from code", which checks
-  were skipped. Both are short but complete, and more detailed when you ask.
-- **The question** is in plain words too, since the question box may cover the chat: what
-  happens in the app and what has to be decided, with no internal codes. Each option says what
-  happens if you choose it, including who has more to do and what stays broken. The
-  recommended option comes first, with its reason.
-
-That is how you get a job's questions (one at a time), a spec that differs from `logic/`, a gate
-or review that stops a job or needs a human, the approver's ESCALATE and the final report,
-lessons (one change at a time), updates to `logic/` and `knowledge/` (one job or file at a
-time) and audit findings to fix (one at a time). Questions that only ask for information,
-such as which branch each repository starts from or which tools to install, may still come
-together. The agents write both versions themselves: each question in
-`questions.md` has an `Easy:` and a `Technical:` line, and the approver's `## For the human`
-has an easy part and a technical part.
-
-What the factory posts for people to read or act on comes in two parts as well: the comment
-when intake turns an issue down, the comment on an issue that differs from `logic/`, the
-questions posted to Jira, the comment when the pull request is open, and the pull request
-description. Each opens with `## Summary`, for people who do not read code (the reporter, PM,
-QA): what happens for the user of the app, what has to be done and by whom, and what was not
-checked. `## Technical part` follows with what fx writes; where the two differ, the technical
-part is the standard. When the factory's `language` is Vietnamese, the headings are
-`## Tóm tắt` and `## Phần kỹ thuật`. The orchestrator writes the summary to a file, and fx takes
-it with `--summary-file` (on `fx result` for intake and spec, `fx ask-jira` and `fx pr`) and
-scrubs it for secrets like the rest. A comment without a summary still goes, and fx's output
-says the summary is missing. Short comments (work started, answers recorded) stay as they are.
+link) through your own Jira connection or an API token. Local tasks skip Jira.
 
 ## Watching the factory
 
-`/code-factory:factory board` opens the factory board, one HTML page for
-every factory repository on your machine (`~/.cache/code-factory/board.html`).
+`/auto-factory:code board` opens the factory board, which also shows each review of a
+colleague's merge request: its merge requests, which reviewers are running and which are done,
+the check together, and what waits for you. It is one HTML page for
+every factory repository on your machine (`~/.cache/auto-code-factory/board.html`).
 It opens on the flow map: one row per job and one column per step, so you see where each job is,
 which steps it has passed and who is working on it, and only the row of a job with many agents
 grows. A switch next to the filters goes to the office layout.
@@ -105,8 +65,7 @@ best-of-N build; a room with more than four jobs lists them one per line.
 Free agents sit at the bottom of their room. Your desk holds what waits for you
 (answers, the branch to push into) and sessions that seem to have stopped.
 You can filter by project, show only what waits for you, or find a job by key.
-Below the office, one row per job opens its steps (with several repositories, each one's
-branch and pull request), its timeline (parallel
+Below the office, one row per job opens its steps, its timeline (parallel
 builders side by side), the expected finish (from the typical time of each step
 in your earlier jobs), tokens the agents reported (and a rough cost when
 `dashboard.usd_per_mtok` is set) and links to its files; then recent activity
@@ -122,16 +81,16 @@ tightly knit job keeps one builder. Otherwise it is split into packages:
 
 - **One owner per file.** Every package lists the files it may change, and no
   file belongs to two packages. A package that changes anything else is not
-  merged and goes back to its builder. In a job that changes several
-  repositories, each package belongs to one of them.
+  merged and goes back to its builder.
 - **Contract first.** What packages share (routes, API shapes, migrations,
   types, translation keys) is a contract package built first, then frozen;
   the others build against it.
 - **Own clone, branch, port and database** for every package, so builders,
   their tests and their app never meet. They run in the background and each
   is merged as soon as it is done; packages waiting for it start right away.
-  There is no limit on how many run at once unless you set
-  `split.max_builders`.
+  As many run at once as the machine has room for (**Several jobs at once**);
+  `split.max_builders` puts a ceiling on one job. A merged package's stack is
+  stopped for you.
 - **Change requests.** A builder that needs a file it does not own, or a
   different contract, stops and asks; the planner reassigns files or reopens
   the contract, and the work goes on.
@@ -140,14 +99,99 @@ tightly knit job keeps one builder. Otherwise it is split into packages:
   Gate and reviews then run as usual; each finding goes back to the package
   that owns its file, the rest to the integrator.
 
+## Several jobs at once
+
+Give one command several tickets (`/auto-factory:code C2P3-1,C2P3-2 C2P3-3`): the session
+runs them side by side, each job going on whenever it is ready, and asks you the questions
+of several jobs together. Or open a Claude Code session for each ticket, in one project's
+factory repository or in several projects'. Either way the jobs share the machine through
+fx, with no server and nothing to set up.
+
+- **Ports.** Every clone that runs the project's stack (a job, a package, a candidate, a
+  review's sandbox) gets its own block of `ports.step` ports, handed out for the whole
+  machine. Two projects never get the same ones, and a port something else already
+  listens on is passed over. A job started by an older version keeps the ports it has;
+  its packages, which had ports one apart then, each get a block before they start again.
+- **Room.** Steps that install, test, scan or start the app (`setup`, the gate, the checks
+  before a push, a sandbox, a selftest) first take a place on the machine. What the
+  machine has is read when it is needed: CPUs, memory, what Docker was given, what other
+  programs use, and whether the system says memory is short. What a step uses is measured
+  while it runs and remembered for that machine. A step that does not fit waits in a
+  line, first come first served, and starts by itself. With one job nothing changes: the
+  only step on the machine starts at once.
+- **No number is set for one machine.** Every default is a share: a tenth of Docker's
+  memory is kept free; a step nobody measured yet counts as a quarter of Docker's
+  memory and of the CPUs and a tenth of the machine's memory; a package being built
+  counts as a tenth of the machine's memory and a quarter of its CPUs until its stack
+  or its tests were measured. So a larger machine runs more at once and a smaller one
+  fewer, with the same settings. A machine that does not tell how much memory it has
+  holds no step back for memory.
+  `/auto-factory:code capacity` shows what the machine has, who runs, who waits and why, and takes
+  your wishes for this machine (`fx capacity --set pressure=strict`).
+- **Builders.** A split build opens only as many packages as there is room for, counted
+  over every job and session. Agents run their own heavy commands through `fx run`,
+  which queues them the same way. When the session that was building a job's packages
+  is closed, the session that goes on with the job starts those packages again.
+- **One job, one session.** A job is driven by the session that last worked on it;
+  another open session has to take it over on purpose. One job runs one long step at a
+  time, and two commands of a job never wipe each other's notes.
+- **Shared files.** When a project keeps files in its factory repository that several
+  jobs change (UI tests, reference images), a lane in `factory.json` lets one such job
+  build at a time; the next one does its intake and spec and waits. What you allow for
+  one job (an existing test it may change, a finding you accept) is written by
+  `fx override` into `overrides/<job>.json`: it holds for that job only, and committing
+  it disturbs no other job's gate.
+- **Nothing is left running.** A step that is stopped stops what it started. When fx
+  itself was killed outright (no memory left), the job's next step first stops the
+  checks that were left running in its clone. Containers of clones that are gone or of
+  jobs that are over are listed by `/auto-factory:code capacity` and stopped when you say so.
+
+- **One run of the checks for a commit.** The builder runs the checks with `fx checks`,
+  and fx keeps the result with the commit and a fingerprint of everything else the
+  script reads: the script, `factory.json`, the factory repository's files, the
+  reference images, and the environment the script runs in (a builder's
+  `SKIP_SLOW=1 fx checks` is not the gate's run). The gate and `fx pr` do not run the
+  script again on that same commit with those same inputs, and say so. A failure is
+  never reused and every other step still runs. A gate that expected to reuse a pass
+  and finds something changed waits for the room the checks need before it runs them.
+  `fx reuse --off` turns it off.
+- **Rounds that needed no builder.** After a human accepts the findings a round failed
+  on, the next round judges the ZAP reports it has instead of scanning again. A pass on
+  an unchanged commit, with nothing the checks read changed either, gives the failed
+  rounds back, and a run that something outside stopped does not count, once for a
+  commit.
+- **Shared folders, read as committed.** A job that does not hold a lane reads the
+  lane's folders as committed, from its own copy, once the project's script reads
+  `FACTORY_LANE_<PATH>`. How long each step waited for room is in `/auto-factory:code status`,
+  `/auto-factory:code capacity` and the board.
+- **A gate in two phases.** The checks script takes one place; the app with e2e, the UI
+  check and the scanners takes another, after it. Each is measured as its own kind of
+  step and gives its room back when it ends, so another job's checks can run while a
+  gate scans. The second phase keeps the gate's turn in the line.
+- **CPUs per step.** Every step is given a number of CPUs when it starts: all of them
+  alone, about its share beside others. The project's commands read it as
+  `FACTORY_CPUS` (`--workers=${FACTORY_CPUS:-3}` for Playwright); ZAP, in the gate, runs
+  limited to it.
+- **A job waiting for you rests its stack.** When a job stops for your answers and
+  nothing of it runs, its containers are stopped (`docker stop`: containers and volumes
+  stay; one that keeps data in memory keeps running) and started again with the answers.
+
+How many tickets finish in a day is still set by the heaviest step. On a machine that
+fits one gate, two gates overlap only where one's checks fit beside the other's scans.
+
 ## What blocks a job
 
-- A changed repository's checks script, `checks/<repo>.sh` (your lint, type check, tests,
-  build), failing. The gate goes through the changed repositories in merge order and stops at
-  the first that fails; `checks.md` says which.
+- `checks.sh` (your lint, type check, tests, build) failing.
 - A user-visible change without a Playwright UI check, or a UI check with a
   failed step, a browser console error, a server error, or an accessibility
   violation at a blocking level (default: critical and serious).
+- A screen far from its design, when the UI reviewer finds the code is the cause. The UI check measures each
+  screen the spec gives a design code with the auto test's own comparer: element by element against the design
+  package, the design drawn with the data the web shows, at the auto test's screen size and thresholds (read from
+  the project's auto test repository, `ui_checks.design.test_repo`). A heavy difference does not fail the gate,
+  since it can be the package's own way of drawing: the UI reviewer, on Opus, first looks at each pair of images,
+  then decides each measured screen in a `## Design` table (`code`, `design`, `different data`), and fx refuses a
+  review that leaves one out or calls a heavy difference fine.
 - A secret in a commit (checked every round, and again right before the push:
   the factory never pushes a branch with a secret in its history); a
   vulnerability the job introduced at or above the blocking severity (default:
@@ -189,14 +233,14 @@ tightly knit job keeps one builder. Otherwise it is split into packages:
   factory repository, semgrep with `--disable-nosem`, osv-scanner with its own
   config. Changing those files is always a sensitive path.
 - The gate's own settings differing from what is committed and pushed: `factory.json`,
-  every checks script and scanner rules are compared by content, whatever git has been told
+  `checks.sh` and scanner rules are compared by content, whatever git has been told
   about them (`assume-unchanged`, `skip-worktree`, a filter), and commits only on this
   machine that change them must be pushed first. A job's clone or the factory repository
   with `refs/replace` or a grafts file, or a shallow job clone, which show git another
-  history; a clone whose HEAD is not the job's branch. The base branch each repository is
-  measured from is read from that repository's own remote at every gate, never from the clone,
-  so the gate needs to reach it. The gate also fails when something fx did not start already
-  answers on one of the job's ports, since the checks of the running apps would read that.
+  history; a clone whose HEAD is not the job's branch. The base branch a job is measured
+  from is read from the project's remote at every gate, so the gate needs to reach it. The
+  gate also fails when something fx did not start already answers on the job's port, since
+  the checks of the running app would read that.
 - With baselines on S3: an image that cannot be fetched, a list with an unsafe
   path, a list that is gone from a branch that had one or from the branch it goes into, or a committed list naming
   a hash S3 does not have (or that fx cannot check, because S3 or the read key is
@@ -218,7 +262,7 @@ tightly knit job keeps one builder. Otherwise it is split into packages:
 - Touching existing tests, frozen paths (`.claude/`, `AGENTS.md`, `CLAUDE.md`)
   or sensitive paths (the last always needs a human).
 
-Scanners and Playwright are installed for the factory itself (`/code-factory:factory
+Scanners and Playwright are installed for the factory itself (`/auto-factory:code
 install`), never into your project, at pinned versions where fx picks the version
 (Playwright 1.64.1 unless the machine has a global Playwright to match, axe-core
 4.10.3, semgrep 1.100.0 when installed with pip or pipx); Homebrew and release
@@ -237,12 +281,6 @@ afterwards changes nothing until the next selftest, and with that image gone ZAP
 as not run, so the job goes to a human. ZAP runs as your user and reaches the app through `host.docker.internal`
 (on Linux via `--add-host host.docker.internal:host-gateway`; the host network
 only when the app listens on 127.0.0.1 alone, with a note).
-
-Each changed repository is scanned in its own clone, with its own
-`security.semgrep_exclude`, `security.accepted_rules` and base-branch baseline (a repository's
-entry in `factory.json` can set them; otherwise the project's apply). The header check and ZAP
-run against each started app of a changed repository. With 2 or more repositories,
-`checks.md`, `ui.md` and `security.md` have one `## Repo: <name>` section each.
 
 ### What the security scans can and cannot see
 
@@ -263,7 +301,7 @@ because of what the base branch already has.
 
 Scanners cannot judge business rules, such as whether one customer can read
 another's order: the security reviewer and its verifier look for those in each
-change, and `/code-factory:factory audit` can add a deeper audit by agents. Vulnerabilities in
+change, and `/auto-factory:code audit` can add a deeper audit by agents. Vulnerabilities in
 the operating system packages of a container image are not checked.
 
 The gate catches mistakes and makes going around it hard, but it is not a wall. Agents and
@@ -274,269 +312,241 @@ proof that nothing went around it. What stops a bad change is that a human reads
 every pull request. If you need a line no agent can cross, have your host's CI run the scanners
 again as a required check on the pull request.
 
-Project code never sees fx's credentials: setup, the checks scripts, the apps, e2e,
+Project code never sees fx's credentials: setup, `checks.sh`, the app, e2e,
 `seed.sh`, `ui/check.js` and the scanners run without `JIRA_*`, `GH_TOKEN`,
 `GITHUB_TOKEN`, `GITLAB_TOKEN`, `GLAB_*`, `CI_JOB_TOKEN`, model API keys and the
-like (`security.strip_env` adds names, `security.pass_env` lets one through), and
-the files in this machine's keys folder (the S3 keys and `jira.env`) are read only
-inside fx's own process, never put in any environment.
+like (`security.strip_env` adds names, `security.pass_env` lets one through).
 fx never commits the `copy_into_worktree` files or `.env*` files when it saves
 left-over work (names ending in `.example`, `.sample`, `.dist` or `.template`,
-such as `.env.example`, are ordinary files), and redacts well-known key formats, the
-keys in the keys folder (the S3 keys and the token of `jira.env`) and local env secrets (the
+such as `.env.example`, are ordinary files), and redacts well-known key formats and local env secrets (the
 values of variables named like a secret, and other values that look generated;
 not host names, email addresses or `${OTHER}` references) from the text it posts
 to the pull request and Jira.
 
-## A project of several repositories
+## One issue, several repositories
 
-An issue can need the backend, the web app and the mobile app at once. They all belong to
-one factory: `factory.json` lists them under `repos`, in merge order (a backend before the
-apps that call it).
+An issue can need the backend, the web app and the mobile app at once. Each repository
+keeps its own factory repository, so its job follows its own knowledge, style,
+`checks.sh`, UI checks and settings, and you run them all from one conversation:
+
+```
+/auto-factory:code feature PROJ-100
+```
+
+1. **Where is each repository?** You are asked, and the answer is remembered in
+   `~/.config/auto-code-factory/` on this machine only: machines have different folders,
+   so it never goes in git, a pull request or an issue. A teammate answers only the
+   folder, because name, order and Jira components can be committed in `factory.json`
+   (`workspace`). A folder that moved is asked again.
+2. **Which repository does what?** With a child issue per repository they are matched by
+   component and label. With one issue, an agent reads it and each repository's
+   knowledge, and proposes each one's part and the contract they share (API paths, field
+   names, roles, errors), for you to confirm. A job started the usual way
+   (`/auto-factory:code PROJ-100`) offers this when intake sees other repositories
+   are needed.
+3. **Which branch does each take its code from?** Asked for each repository, every time.
+   Nothing starts until every repository has a branch that exists and passes `fx doctor`,
+   so a run does not stop in its third repository after two are done.
+4. **The jobs run one by one in merge order.** Each sees only its part. API notes of
+   earlier repositories reach the later ones by themselves.
+5. **The branches are checked together.** An agent reads all of them side by side and
+   follows each connection in the code: calls, fields, roles, errors, merge order, and
+   whether anything in the issue fell between them. A mismatch sends the repository that
+   must change back through rework; a branch that moves afterwards, or is deleted without a
+   merge, needs a new check. One merged and deleted has not moved.
+   Only a human can accept going on without a pass, and that is written on the issue and
+   in every description.
+6. **The pull requests point to each other**, each listing all of them in merge order and
+   updated as the others open. A shared issue moves to the review status once, when every
+   repository is ready and the check passed, with one comment listing every pull request.
+   A human still reviews and merges each one.
+
+This check reads the code. It does not run the repositories together: each gate runs only
+its own repository. A run belongs to the machine that started it.
+
+## Reviewing a colleague's merge request
+
+```
+/auto-factory:review https://gitlab.example.com/acme/api/-/merge_requests/7
+/auto-factory:review PROJ-123
+/auto-factory:review
+```
+
+The last form lists the merge requests waiting for your review. It needs `glab`, logged
+in; a token with only `read_api` is enough, since the factory never writes to GitLab. Run
+it in the factory repository of that project, because the review follows its knowledge,
+lessons and logic. One factory can review several repositories: see below.
+
+1. **Merge conflict first.** With a conflict the review stops before any agent runs, and
+   you are asked what to put on the ticket.
+2. **The ticket, without the code.** An agent writes the requirement checklist from the
+   ticket alone. The code is cloned only after that, so what the ticket asks is not worked
+   out from what the code does.
+3. **Scanners, CI and discussion.** gitleaks, osv-scanner and semgrep on what the merge
+   request changes; the CI result and the discussion as GitLab shows them.
+4. **The code runs, for real.** fx starts it in a throw-away sandbox with your `setup` and
+   `app.up`, and a runner agent calls the API for every requirement, at least two cases each.
+   Each call goes through `fx review call`, which reaches only that sandbox and logs the request
+   and response in `run/calls.jsonl`, each row chained to the one before. fx refuses a `run.md`
+   that passes a requirement on a call it did not log. No reviewer starts before this is done.
+5. **Reviewers in parallel.** Requirement, code and security; UX and UI too when it changes
+   `ui_paths`, with the run's results in hand. The requirement reviewer follows each requirement from where it starts to what it returns,
+   with concrete values, and compares that with the ticket, `logic/` and what the code did
+   before. It has to write what it followed (`## Logic traced`), and fx sends it back if a
+   requirement has no path or no cases, if it calls something implemented that was never run, or
+   if it contradicts a failed call without saying why. fx can check that the work is there, not
+   that the reasoning is right or the cases well chosen, so you see both in the report.
+6. **A verifier** tries to disprove every blocking finding, and what it disproves is dropped.
+   Before all this, fx asks for the tickets around this one: the parent, its other sub-tasks and the
+   linked ones, because the worst bug may show only against a ticket not built yet. For a UI change it
+   also asks for the ticket's design packages, unpacks them as data, and the sandbox stays up so UX and
+   UI can look in a real browser through `fx review ui`. There the UI reviewer, on Opus, measures each
+   screen the merge request changes against the package with the auto test's comparer, as a job does.
+   fx refuses a UI review with no `## Components`
+   table (each element, what the Spec asks, what the code uses, its props, what overrides it), one that
+   leaves a measured screen out of its `## Design` table, and a UX
+   review with no `## Text` table (each string against its source), and a wrong row with no finding.
+   Each finding says how to see it (`Repro:`), when it is fixed (`Accept:`) and, with `logic/`, what it
+   was checked against (`Checked against:`); on a screen it says whose mistake it is (`Type:`).
+7. **You choose.** fx sorts what is left by where it points, from the diff: findings on what
+   the author changed, open questions about the ticket, and pre-existing issues. Only the
+   first group can go out, and only what you pick. For each one you are told whether it is
+   serious and why, and whether the merge request can be merged with it: the reviewers lean
+   **must be fixed before merging** for a blocking finding and **can wait for a follow-up
+   ticket** for a note, and you decide. The comment opens with the verdict (not ready to merge,
+   or can be merged), and what you let wait goes in a sub-task of its own. The full `review.md` stays in
+   `jobs/_reviews/<KEY>-mr<iid>/round-<N>/`, which goes to S3 only with `jobs_store.include_reviews`.
+8. **You confirm.** Every Jira comment and transition is shown to you first, and fx only
+   posts the exact draft you saw. You merge on GitLab yourself: the factory never comments,
+   approves or merges there.
 
 ```json
-"project": { "name": "shop" },
-"repos": [
-  { "name": "backend", "url": "git@github.com:team/shop-api.git", "base_branch": "main",
-    "setup": "composer install",
-    "app": { "up": "php artisan serve --port {port}", "health": "/up", "needs": [], "env": {} } },
-  { "name": "web", "url": "git@github.com:team/shop-web.git", "base_branch": "develop",
-    "app": { "up": "npm run dev -- --port {port}", "needs": ["backend"],
-             "env": { "VITE_API_URL": "{url:backend}" } },
-    "ui_paths": ["src/**"] }
-]
+"jira": { "transitions": { "review_changes": "Doing", "conflict": "Doing" } }
 ```
 
-- **Names** are lower case letters, digits and `-`, start with a letter, are unique, and
-  never `repos`; a name may not end in `-c<digits>` or hold `--`, the shapes of best-of-N
-  candidates' and split packages' clones. No two repositories share a URL, and the
-  factory's own is refused.
-- **Settings per repository, with the project's as default.** `name`, `url`, `base_branch`,
-  `app.needs` and `app.env` belong to a repository only. Other settings, such as `setup`,
-  `app`, `e2e`, `copy_into_worktree`, the `*_paths`, `security.semgrep_exclude`,
-  `security.accepted_rules`, `ui_checks`, `pr.provider` and `baselines`, may be set in a
-  repository's entry; one it does not set comes from the top level of `factory.json`. A
-  repository's value replaces the project's whole value: lists are not merged. Jira,
-  storage, models, reviewers, rounds and learning stay project-wide. The template's
-  `_doc_repos` lists every key.
-- **Checks.** Each repository has its own checks script, `checks/<repo>.sh`, run in that
-  repository's clone. Everything under `checks/` (a helper the scripts source too) must be
-  committed and pushed before a gate runs.
-- **Local files.** A repository's own untracked files (`copy_into_worktree`, such as
-  `.env`) go in `local/<repo>/` of the factory repository; fx looks there first, then in
-  `copy_from` or `local/`. `fx doctor` warns when two repositories copy the same file.
-- **Knowledge.** The shared files (`README.md` as the index, `overview.md`, `domain.md`,
-  `rules.md`, `security.md`, `conventions.md`, `definition-of-done.md`) are at the top of
-  `knowledge/`; each repository's own (`README.md`, `architecture.md`, `style.md`,
-  `stack.md`, `api.md`, `ui.md`, `testing.md`, `environment.md`) are in `knowledge/<repo>/`.
-  Each agent gets the shared files for its role and the files of the job's repositories
-  (intake and the spec writer: of every repository). Knowledge and logic cite code as
-  `repo:path` or `repo:path:lines`; a project of one repository may keep a plain `path`.
-  `logic/` is one set for the whole project.
+These two name the status a ticket goes back to a dev in, per project. Empty, the ticket
+keeps its status and you are told. A clean review never moves a ticket: where a deploy moves
+tickets on after a merge from their submit status, as a `jira-bridge` does, a ticket has to
+stay there, and one sent back to a dev has to return to it before the merge.
 
-**Apps start as the job needs them.** The job's apps are those of the repositories it
-changes that have an `app.up`, plus every app they need (`app.needs`, followed all the
-way). fx starts them in dependency order, each on its own port with its own database: a
-repository the job changes runs from the job's clone, any other from a checkout of its base
-branch. Each app gets `FACTORY_URL_<NAME>` (upper case, `-` as `_`) for every app started
-before it and for itself, and all of them as JSON `{name: URL}` in `FACTORY_APP_URLS`;
-`app.env` may use `{url:<repo>}` and `{port}`. `fx app up <job>` prints every URL. ZAP
-scans each changed repository's app, running `security.zap_auth.command` in that app's
-environment: set `security.zap_auth` in each repository's entry, or log in at the app that
-holds the accounts through `$FACTORY_URL_<NAME>`. Each job has a block of ports: one per
-repository, then the agents' own, then the best-of-N candidates' apps (`ports.step`
-defaults to at least 10; `fx init` raises it when it adds a repository, `fx doctor` fails
-when it is smaller than the repositories plus 3, and a new job never takes a block that
-overlaps one an unfinished job holds).
+A review is not a job: it has no build, gate or pull request. `/auto-factory:code status`
+still lists the open ones, and `resume <KEY>` picks one up, also in a new session. After a new commit, run it again: the next round looks first at what changed, and the
+requirement reviewer says which earlier findings were fixed and which are still open. At the
+end you are asked whether the review missed anything, and it proposes lessons from that: see
+**How it learns**. Nothing is saved without your approval.
 
-**One job per issue.** `/code-factory:factory PROJ-123` starts one job, whatever the
-repositories:
+You are asked one thing at a time. Chosen findings can open sub-tasks for the dev and for whoever owns
+the design or the Spec, instead of only a comment, each finding with its own number. Every ticket key is
+a link, and a code another ticket defines is too, with `"jira": {"code_owner": {"MSG": "ABC-1", "API-01":
+"ABC-24"}, "subtask_type": "Subtask"}`. At the end, what you decided that `logic/` or `knowledge/` says
+otherwise is listed, one at a time, and changed if you say so.
 
-1. **Which repositories?** Intake reads the issue, the shared knowledge and every
-   repository's, and names the ones the issue needs to change (`REPOS: backend, web`). A
-   project of one repository skips this.
-2. **Which branch does each start from?** You are asked for each repository. fx then
-   clones each in `<factory>-work/<KEY>/<repo>`, every one on the same branch
-   `factory/<KEY>-<slug>`. A repository the job only runs is a checkout of its base,
-   never changed or pushed.
-3. **One spec.** With 2 or more changed repositories, `spec.md` has a `## Repo: <name>`
-   part for each and a `## Shared contract` with what they must agree on (routes,
-   payloads, events, types, versions, deploy order); each acceptance criterion names its
-   repository. The builder keeps every repository to that contract, and when the build
-   must change it, it updates the contract in the spec and says so in its report. A split
-   build gives each package one repository.
-4. **The gate runs per changed repository**, in merge order: uncommitted files,
-   protected and frozen paths and its checks script; then one logic check over every
-   clone. A changed repository without commits, while another has some, is "not
-   changed": its checks and scans are skipped and it gets no pull request; `fx repos <job>
-   --drop <repo>` takes it out of the job (run-only when another repository's app needs
-   it), refused while its clone holds work not on the remote. A run-only clone with
-   changes or commits fails the gate until `fx repos <job> --add <repo>` makes it a
-   changed one, keeping that work. e2e runs per repository against its own app (`BASE_URL`); `seed.sh` and
-   `ui/check.js` run in the repository whose screens (`ui_paths`) the job changes.
-5. **The reviews look at the whole change**, and with 2 or more changed repositories the
-   **fit checker** reviews too: it reads every branch side by side against the shared
-   contract and follows each connection in the code (calls, fields, roles, errors, deploy
-   order), and checks that no part of the issue fell between them. It writes
-   `round-N/review-fit.md`, which counts like any other review.
-6. **One pull request per changed repository.** `fx pr` takes one target branch for all
-   (`--target develop`) or one per repository (`--target backend=main --target
-   web=develop`). First, in every repository: a work-in-progress commit when the job is
-   incomplete, a sync with the target (its checks run again when that changed anything),
-   and a secret scan of the commits to push. A secret in any repository means nothing is
-   pushed anywhere. Then each branch is pushed and, when `pr.create` is on, its pull
-   request opened or updated with that repository's provider; then every description is rewritten to list the other pull
-   requests, in merge order, with that repository's part of the spec and the shared
-   contract. A changed repository with no commits gets no pull request. fx pushes to each
-   repository's URL in `factory.json`, never to the clone's own `origin`, runs none of the
-   clone's git hooks, and names the repository to `gh` and `glab`. Jira gets one
-   comment and one transition for the job. Running `fx pr` again after a failure skips
-   the repositories already pushed and unchanged; the clones are deleted only when every
-   repository is pushed.
+A merged merge request can be reviewed too, when a ticket has no open one: it reads the merge
+request's own diff and runs the target branch as it is now, and the report says so.
 
-**Parent issues.** A parent issue's children are each a job of their own. In mode `token`,
-`fx jira children <KEY>` lists them (mode `mcp`: Claude reads them with the connector), and
-`/code-factory:factory PROJ-101 PROJ-102` runs them one after another.
+**The sandbox is not optional, and there is no setting to turn it off.** If it cannot start, because
+`app.up` is missing or the app fails to come up, the review stops and asks you. You can fix it, stop,
+or go on without running the code, and that takes your reason in your own words, which is then printed
+on the Jira comment. It cannot be skipped before it has failed. Every comment says what really ran: the
+commit, the number of calls, each requirement's result, and what was simulated.
 
-A human still reviews and merges each pull request. The learning reads every one of them,
-and a job's logic changes are applied once all its pull requests are merged; when some are
-merged and the others closed without a merge (state `partial` in `fx logic pending`), you
-decide whether to apply them. A rework after one pull request was merged leaves that
-repository out: it runs from its base when another app needs it, and its pull request
-stays recorded for the learning; with every pull request merged, start a new job.
+The merge request is a colleague's code running on your machine, so `app.up` has to keep it in a
+container, with fake values only, and fx passes it no credentials of its own. Also reach only what
+`environment.md` says: the factory cannot tell what else your compose file exposes. The log stays in
+`round-<N>/run/` and is never pushed to the jobs store. The sandbox and its clone are removed as soon as
+the run ends.
 
-## Jira
+What this does not force: an orchestrator that ignores `SKILL.md` and never calls `fx` is outside
+everything above, since fx can only refuse what goes through it. The hash chain shows a log edited by
+accident or in haste, and a determined agent with shell access could still rewrite it. GitHub is not
+supported yet.
 
-A factory reaches Jira in one of two ways. `init` explains both and asks which, before it
-reads any Jira history, and keeps the answer as `jira.mode` in `factory.json`, so the whole
-team works the same way. It recommends `mcp` when Claude has the Atlassian connector.
-Running init again keeps `mcp` or `token` (changing it is a decision of its own); an older
-value (`agent`, `api`, `auto`) or no mode is asked again.
+### Several repositories, one factory
 
-| | `mcp` | `token` |
-|---|---|---|
-| Who calls Jira | Claude, with its own Atlassian connector; fx only queues the Jira work, even when a token exists | fx itself, with the Jira REST API, for every Jira read and write |
-| A parent issue's child issues, finished issues and statuses (`init`) | Claude reads them with the connector | fx reads them (`fx jira children`, `finished`, `statuses`), so no connector is needed |
-| To set up | nothing, once the connector is connected | `jira.env` in this machine's keys folder, on each machine |
-| Attachments | not downloaded; `issue.md` lists their names | images downloaded, up to 5 MB each (`jira.max_attachment_mb`) |
-| What init checks | the connector lists the project's site, with read and write Jira scopes | once you have created `jira.env`, `fx doctor --issue <issue link>` reads that issue |
-| `fx doctor` | one row: the connector does the Jira work, which fx cannot check | `jira.base_url` is set, `jira.env` is there and complete; with `--issue`, reading the issue works |
-
-For `token`, create an API token at https://id.atlassian.com/manage-profile/security/api-tokens
-and put it in the keys folder yourself, never in the conversation. `fx where` prints the
-folder as `keys_folder`: `~/.config/code-factory/keys/<project>-<hash>/`, the same folder as
-the S3 keys, outside the factory repository and its clones.
-
-```
-# <keys_folder>/jira.env   (the folder chmod 700, the file chmod 600)
-JIRA_EMAIL=you@example.com
-JIRA_API_TOKEN=...
-```
-
-fx reads the file inside its own process and never puts it in any environment. The token is
-never in an environment variable, `factory.json` or git: fx does not read `JIRA_EMAIL` or
-`JIRA_API_TOKEN` from the environment, and `fx doctor` warns when they are set there, since
-any agent's shell can read them. With `token` and the file missing or incomplete, fx stops
-with exit code 4 and says where the file goes and what it holds, never printing a value. The
-token is redacted like the other local secrets in what fx posts or prints, and a job file
-that holds it stays on the machine instead of going to S3; the email is an address, not a
-secret. In mode `mcp` fx never opens the file, so `fx doctor` says to delete one left there.
-`/code-factory:factory init` keeps agents' Read tool away from the keys folder. `fx install` reports the
-mode and whether `jira.env` is there and complete (null in mode `mcp`).
-
-fx sends the token to this factory's Jira site only, `jira.base_url`, which init sets, and
-only over https: never to the site of a link to another one, and never along a redirect to
-another site (Jira Cloud's attachment links need no token). Without `jira.base_url`, mode
-`token` stops with exit code 4.
-
-With `token`, fx does every Jira read the factory needs, so a machine without the connector
-runs every command, parent issues and `init` included, and Claude leaves Jira to fx even when it
-has the connector: one way per mode. Confluence is not Jira: in both modes Claude reads its
-pages with the connector, and without one it skips them and says so.
-
-Older values keep working: `agent` means `mcp`, `api` means `token`, and `auto` or no mode at
-all uses the token when `jira.env` holds both values, the connector otherwise. `fx doctor`
-then advises choosing `mcp` or `token` with init.
-
-## S3 or this machine only
-
-`init` asks once whether this project's factory uses S3 at all. It recommends S3 when the
-team works from several machines or the reference images weigh more than a few MB.
-
-- **No.** Nothing goes to S3. `factory.json` gets no `storage`, `baselines` or `jobs_store`
-  block, jobs stay in `jobs/` on this machine (a broken machine loses them), and reference
-  images, if the project has any, stay in git. The rest of init does not ask about S3 again.
-- **Yes.** Jobs always go there (**Jobs on S3**), and reference images too when you choose so
-  (**Baselines on S3**). `fx doctor` fails when `factory.json` has `storage` but no
-  `jobs_store`: S3 is set up but jobs are not kept there. Add `jobs_store` with init, or
-  remove `storage`.
-
-On yes, init first tells you in one message what to have ready:
-
-- **A bucket** that already exists, is private and is this project's own. fx never creates
-  one, and `fx doctor` fails when two factories on this machine share a bucket and prefix.
-- **The region**, unless an endpoint is set.
-- **An endpoint** only for an S3-compatible service such as MinIO; empty for AWS.
-- **A prefix** only when the bucket holds other things.
-- **Key files** in this machine's keys folder, which `fx where` prints as `keys_folder`
-  (the folder `chmod 700`, the files `chmod 600`), each with `AWS_ACCESS_KEY_ID`,
-  `AWS_SECRET_ACCESS_KEY` and optionally `AWS_SESSION_TOKEN`:
-  - `s3-read.env` (`s3:GetObject`, `s3:ListBucket`) on every machine;
-  - `s3-write.env` (`s3:PutObject`) only on machines that upload reference images;
-  - `s3-jobs-write.env` (`s3:PutObject` on `<prefix>/jobs/*` only) on machines that run jobs.
-
-  Or AWS profile names in `storage.read_profile`, `storage.write_profile` and
-  `storage.jobs_write_profile`, which need the `aws` CLI. Never a key in the conversation:
-  you put the files there yourself.
-- **No lifecycle rule on `jobs/sha256/` alone.** fx deletes nothing on S3, and old snapshots
-  would point at files that are gone. Encryption is the bucket's.
-
-Then init asks for the place, writes `storage` and `jobs_store` together (`auto` on; audit
-reports only if you say yes to a question of their own), asks whether reference images go on
-S3 or stay in git when the project has them, runs `fx doctor`, and tells you what is missing.
-Running init again on a factory that uses S3 says so and keeps it: changing that is a
-decision of its own.
-
-The place has one folder per part of the factory:
-
-```
-s3://<bucket>/<prefix>/      this project's factory (no prefix when the bucket is only its own)
-  jobs/…                     every job's folder (Jobs on S3)
-  baselines/…                reference images, when they are kept on S3 (Baselines on S3)
-```
+For reviews, one factory can hold every repository of a project. Jobs and gates still belong
+to its one project, and a job needing several repositories uses `feature`, which has one
+factory per repository.
 
 ```json
-"storage": { "type": "s3", "bucket": "", "region": "", "endpoint": "", "prefix": "" }
+"review": { "repos": [
+  { "name": "fe", "url": "git@gitlab.com:group/fe.git" },
+  { "name": "admin", "url": "git@gitlab.com:group/admin.git", "ui_paths": ["src/**"] },
+  { "name": "node", "url": "git@gitlab.com:group/node.git", "setup": "./ops/prepare.sh",
+    "checks": ["pnpm ds:check", "pnpm eslint ."],
+    "app": { "up": "./ops/up.sh {port} {job}", "down": "./ops/down.sh {job}", "health": "/health" } }
+] }
 ```
 
-Keys are never in `factory.json` or git. fx signs its requests itself, in its own process:
-the keys reach no environment, your own `AWS_*` variables pass through untouched and are not
-used, and `/code-factory:factory init` keeps agents' Read tool away from the keys folder. Code running as
-your user that goes looking for the file could still read it, like every other local secret,
-so keep the write key only on machines that upload images. Keys still in `local/` from an
-older version keep working, and `fx doctor` says how to move them. Objects are never
-overwritten and never deleted; cleaning up old ones is up to you.
+A repository's `setup` and `app` say how the sandbox starts it, and `checks` what its own checks are
+(`review.checks` for the project). Without `app`, its review stops at the sandbox and asks you.
+
+`init` teaches the project. The others are taught with `fx review learn <name>`, and their
+knowledge stays apart in `knowledge/repos/<name>/`, so no reviewer reads one repository's rules
+as another's. `logic/` and `lessons.md` are shared. A repository with no knowledge yet is still
+reviewed, from the ticket and its code alone, and it has no database schema to look at.
+
+A ticket may have merge requests in several of them, and looked at alone each would seem to be
+missing what the others deliver. So a ticket is searched in every repository, and you choose
+which to review:
+
+1. **A conflict in any of them stops all of them,** before any agent runs.
+2. **One checklist,** for the whole ticket.
+3. **Each merge request is reviewed by its own repository's rules,** and its reviewers can read
+   the others' diffs. A requirement another one delivers counts as delivered.
+4. **Then together.** The fit checker of `feature` reads them side by side: calls, fields, roles,
+   errors, whether an order of merging matters, and whether the ticket fell between them.
+5. **One comment.** You pick from all the findings, and the ticket gets one comment listing every
+   merge request, with one move and one assignee. You still merge each one yourself.
+
+If you leave out a merge request of the ticket, the reviewers are told, and a requirement it may
+deliver counts as `cannot tell`. A repository GitLab does not answer for is named, so its merge
+requests are not silently left out. Clones stay on the machine until the check together is done.
 
 ## Baselines on S3
 
 Screenshots to compare against make a repository heavy for good: PNGs barely
-compress, and every version stays in the history. With a `baselines` block next to
-`storage` in `factory.json`, the images live on S3 by hash, the folder is git-ignored,
-and a sorted list of path, sha256 and size in git says which images belong to each
-commit. Without it, they are ordinary files in git.
+compress, and every version stays in the history. With the blocks below in
+`factory.json`, the images live on S3 by hash, the folder is git-ignored, and a
+sorted list of path, sha256 and size in git says which images belong to each
+commit. Without them nothing changes.
+
+Each project's factory has its own place on S3, which `init` always asks you for. It
+has one folder per part of the factory, so later parts only add a folder next to this
+one:
+
+```
+s3://<bucket>/<prefix>/      this project's factory (no prefix when the bucket is only its own)
+  baselines/sha256/<2 chars>/<hash>
+  <another part>/…           later
+```
 
 ```json
+"storage": { "type": "s3", "bucket": "", "region": "", "endpoint": "", "prefix": "" },
 "baselines": { "dir": "qa/ui-qa/baselines", "manifest": "qa/ui-qa/baselines.lock.json" }
 ```
 
+- `endpoint` is empty for AWS, or an S3-compatible service such as MinIO. Objects
+  are never overwritten and never deleted; cleaning up old ones is up to you. `fx
+  doctor` fails when two factories on this machine share a bucket and prefix.
 - `baselines.folder` names its folder in the storage (default `baselines`).
 - `repo` is `factory` (default: the list and folder are in the factory repository)
-  or the name of the project's repository that holds them, so each of its branches
-  carries its own list (`project` still works for a project of one repository);
-  commands then need `--job` or `--clone`. That repository's `.gitignore` must ignore
-  the folder, which `fx baselines migrate` does on the job's branch.
-- Fetching images takes the read key, uploading them the write key
-  (see **S3 or this machine only**).
+  or `project` (in the project, so each branch carries its own list; commands
+  then need `--job` or `--clone`). A project's `.gitignore` must ignore the folder,
+  which `fx baselines migrate` does on the job's branch.
+- Keys are never in `factory.json` or git. Put a read key in `s3-read.env` and a write
+  key in `s3-write.env` (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optionally
+  `AWS_SESSION_TOKEN`) in this machine's keys folder, which `fx baselines status`
+  prints as `keys_folder`: `~/.config/auto-code-factory/keys/<project>-<hash>/`, outside
+  the factory repository and its clones. Or name AWS profiles in
+  `storage.read_profile` and `storage.write_profile`. Every part of the factory uses
+  them, except that jobs may have a write key of their own (see **Jobs on S3**). The read key
+  needs `s3:GetObject` and `s3:ListBucket`, the write key `s3:PutObject`. fx signs its
+  requests itself, in its own process: the keys reach no environment, your own `AWS_*`
+  variables pass through untouched and are not used, and `/auto-factory:code init` keeps agents'
+  Read tool away from the folder. Code running as your user that goes looking for the
+  file could still read it, like every other local secret, so keep the write key only
+  on machines that upload images. Keys still in `local/` from an older version keep
+  working, and `fx doctor` says how to move them.
 
 | Command | What it does |
 |---|---|
@@ -552,9 +562,9 @@ There is nothing running in the background: fx checks at the start of `fx gate`,
 and clean, it runs `git pull --ff-only`; with uncommitted changes it stops with exit
 code 3 and touches nothing; if the remote cannot be reached it warns and goes on when
 the images are complete. A running gate or selftest holds a lock that keeps any pull
-away until it ends, so the checks scripts and `factory.json` never change under it: that is
+away until it ends, so `checks.sh` and `factory.json` never change under it: that is
 the one safe moment, and a command that finds the lock taken skips the pull and says
-so. A job's clones are never pulled; `fx pr` merges each target into its clone.
+so. A job's clone of the project is never pulled; `fx pr` merges the target into it.
 
 The gate only fetches what is missing or wrong, checks hash and size before an atomic
 rename, and refuses paths that are absolute, contain `..`, or go through a symlink out
@@ -580,9 +590,8 @@ format is still in the factory repository.
 ## Jobs on S3
 
 `jobs/` is not in git, so a broken machine loses every job's spec, reviews, decisions and
-history, and the audit reports the next audit compares with. A factory that uses S3 keeps
-each folder in its place there too, with the `jobs_store` block that init writes together
-with `storage`. Without S3, jobs stay on this machine.
+history, and the audit reports the next audit compares with. With a `jobs_store` block,
+each folder is also kept in this project's place on S3. Without it nothing changes.
 
 ```json
 "jobs_store": { "folder": "jobs", "auto": true, "include_audits": false,
@@ -592,7 +601,7 @@ with `storage`. Without S3, jobs stay on this machine.
 
 ```
 s3://<bucket>/<prefix>/
-  baselines/...                                  reference images (Baselines on S3)
+  baselines/...                                  unchanged
   jobs/
     sha256/<2 chars>/<hash>                      a file's content, never overwritten
     snapshots/<job>/<UTC>-<8 chars>.json         what one push saw, never overwritten
@@ -610,7 +619,7 @@ gate or a round. A failed upload never fails the step: it is a warning, and `fx 
 board and `fx doctor` keep showing the job as not saved.
 
 **On a new machine.** Clone the factory repository, put the read key in this machine's keys
-folder (`fx where` prints it as `keys_folder`), then:
+folder, then:
 
 ```
 fx jobs list
@@ -618,17 +627,15 @@ fx jobs pull --all
 ```
 
 Finished jobs work as before with `fx show`, `fx status`, the board and `fx rework`. An
-unfinished one keeps its stage and asks for a person: each changed repository's branch is
-cloned again if it is on the remote (otherwise `fx new <key> --again`), and each run-only one
-at its base. Code
-that was never pushed is not in a snapshot, because clones are not in `jobs/`, and an agent of
-an earlier session cannot be continued. A restored job's paths, setup and ports are this
-machine's. A job already here
+unfinished one keeps its stage and asks for a person: its branch is cloned again if it is on
+the remote, otherwise `fx new <key> --again`. Code that was never pushed is not in a
+snapshot, because clones are not in `jobs/`, and an agent of an earlier session cannot be
+continued. A restored job's paths, setup and ports are this machine's. A job already here
 is refused, and `--force` moves it to `jobs/_replaced/`.
 
 **What stays behind.** Nothing goes unscanned: without gitleaks, or if it fails, nothing is
 pushed, and a gitleaks too old to open archives is told to upgrade. A file gitleaks finds, or that
-holds a local secret, an S3 key or the token of `jira.env`, stays on the machine, and so do an archive fx cannot read
+holds a local secret or an S3 key, stays on the machine, and so do an archive fx cannot read
 (damaged, with a password), excluded folders, symlinks and files over `max_file_mb`. The snapshot
 lists each with its path and reason, never its value. `_audits/*/sandbox/` is always left out. If
 `job.json` itself has a finding, that job is not pushed at all.
@@ -639,12 +646,12 @@ lists each with its path and reason, never its value. `_audits/*/sandbox/` is al
 alone, and a broken machine loses them. The job still reads `saved`, because pushing again changes
 nothing. Decide for each one: take the secret out of the file so that it goes up with the next push,
 or accept that it stays. gitleaks can be wrong, and a file held back by mistake is still not on S3.
-What you excluded yourself is in `skipped` but not in `held_back`. `held_back: null` means an older fx
+What you excluded yourself is in `skipped` but not in `held_back`. `held_back: null` means fx 1.4.0
 pushed that job and did not note them: `fx jobs push` finds out and uploads nothing. After a restore,
 `not_restored` names what its push left behind, and nothing on the new machine is held back.
 
 **What is looked for, and what is not.** Looked for: gitleaks' rules, inside archives down to 3
-levels; the values of your local env files and the token of `jira.env`; S3 keys in key files and the static keys of
+levels; the values of your local env files; S3 keys in key files and the static keys of
 `storage.*_profile`; a Laravel `APP_KEY` and Sanctum tokens. Not looked for: a password in a sentence
 such as `connecting with password xxx to mariadb`, what is in an image, archives deeper than 3 levels,
 a profile's temporary keys (SSO, a role), and values encoded in base64 or a URL. gitleaks is a filter
@@ -653,8 +660,9 @@ and no guarantee: a job's reports can still hold sensitive data, so keep the buc
 **Audit reports are off by default** (`include_audits`), and `init` asks about them separately:
 they describe holes that are not fixed yet, and anyone with the read key could read them.
 
-**Reviews of merge requests stay out.** `fx jobs` does not push, pull or count
-`jobs/_reviews/` (see **What lives where**).
+**Reviews of colleagues' merge requests are off by default too** (`include_reviews`), for the same
+reason. Turned on, each goes up when it ends and comes back with `fx jobs pull`. Its diffs stay on
+your machine, since they are someone else's code.
 
 **Keys.** Reading uses the read key. Pushing needs a write key on every machine that runs jobs,
 while reference images should only be writable from the machines that upload them, and code
@@ -672,11 +680,39 @@ old snapshots point at files that are gone. There is no client-side encryption: 
 is what protects these files. `qa/test-results`, `node_modules` and `baseline.json` are not
 kept, as they can be made again.
 
+## Mobile apps
+
+A mobile app (Flutter, React Native or native) goes through the same steps as a web: only the way of running
+changes. Where a web opens in a browser, the app is built from the code under test with the project's own commands and
+runs on virtual phones the factory makes for itself, driven by Appium:
+
+- **Asked at set-up, and later**: `/auto-factory:code init` asks whether the project has a mobile app (this
+  repository, another one, not yet, no). An app that comes later is caught when it runs: a repository that has
+  become an app stops its UI check with `next: setup-mobile`.
+- **Command line or a window, asked for each ticket**: the phones run with nothing on the screen (recommended), or in
+  a window (the emulator's, iOS Simulator) to watch the app; `fx new --phones`, `fx review start --phones`.
+- **Versions**: per platform the oldest version the app supports that the machine can run (`mobile.min_os`), the
+  newest, and one in the middle (or the ones `mobile.versions` names). Android system images are installed by the
+  factory after the user agrees; an older iOS runtime is downloaded in Xcode.
+- **Code and review**: the builder's `ui/check.js` (and a reviewer's `review ui` script) drives the app with `t.see`,
+  `t.tap`, `t.type`, `t.swipe`... on the smallest phone with the oldest version and the largest with the newest, per
+  platform, one phone at a time, the app
+  built from the job's commit and pointed at the job's own API. Crashes count as console errors; a control without an
+  accessibility label is an accessibility finding.
+- **The design, measured**: the comparer reads an app's screen from its accessibility tree (boxes, texts, roles) and
+  its colours from the screenshot. A shipped build shows no styles, so fonts, corners, borders and shadows are not
+  measured on an app: the AI look judges them on the two images.
+- **Phones**: iOS simulators (macOS only) and Android emulators, made once and kept (`factory ...`); a phone the user
+  had running is left as it is. On Windows the factory runs in WSL and the Android emulator runs on Windows. How many
+  phones run at once follows the machine's memory. `fx mobile doctor` and `fx mobile devices` show what this machine
+  has; `/auto-factory:code install` installs Appium (3.9.0, uiautomator2 8.7.3, xcuitest 12.22.8, WebdriverIO 9.32.0)
+  and bundletool (1.18.3), and says how to get the Android SDK, a system image and Xcode.
+- **Not yet**: real phones (an iPhone needs Appium's WebDriverAgent signed with an Apple team).
+
 ## Requirements
 
-- Claude Code (terminal or IDE extension). For Jira, Claude's Atlassian connector or a
-  Jira API token in `jira.env`, chosen in init (see **Jira**). Local tasks need neither.
-  Confluence pages are read only through the connector.
+- Claude Code (terminal or IDE extension) with a Jira connection, or a Jira API
+  token (`JIRA_EMAIL`, `JIRA_API_TOKEN`). Not needed for local tasks.
 - `git` 2.38+, `python3` 3.9+, Node.js 20+ (UI checks).
 - Optional: `gh` (GitHub) or `glab` (GitLab), so learning can read review
   comments on the pull requests, and to open them automatically when
@@ -708,145 +744,63 @@ the change, not of the repository.
 
 ```
 /plugin marketplace add <owner>/<this-repo>
-/plugin install code-factory@code-factory
+/plugin install auto-factory@code-factory
 ```
 
-Then check the machine: `/code-factory:factory install` lists what the
+Then check the machine: `/auto-factory:code install` lists what the
 factory uses (git, Python, Node.js, Playwright, gh or glab and their logins,
-gitleaks, osv-scanner, semgrep, Docker, and the Jira mode with whether `jira.env`
-is there and complete), asks which missing tools to install, and installs them without administrator rights
+gitleaks, osv-scanner, semgrep, Docker, the Jira connection), asks which
+missing tools to install, and installs them without administrator rights
 (Homebrew when it is there, otherwise release downloads, pip or npm, into the
-factory's own tools folder, `~/.cache/code-factory/tools`). For what needs an administrator password or a
+factory's own tools folder). For what needs an administrator password or a
 login, it gives you the exact commands to run. Init runs the same check first.
 The tools of the scanners in `security.required` (gitleaks, osv-scanner and semgrep by default) are
 marked required, and `fx doctor` fails without them, because every gate would.
-Run it once on each machine.
 
-The command is `/code-factory:factory`, written in full everywhere in this README.
-Alternatively `bash install.sh` installs it as a personal skill (the command
-is then `/factory`); do not use both. A personal skill and its agents have plain names, so
-a different `factory` skill, or other `factory-*.md` agent files, would be overwritten:
-install.sh stops, and changes nothing, when it finds any that it did not install, or that
-changed since. `bash install.sh --force` replaces them. To keep them, install code-factory
-as a plugin: a plugin's skill and agents carry its name, so nothing clashes.
+There are two commands: `/auto-factory:code` (a job from a ticket, and everything
+around jobs: init, install, status, the board) and `/auto-factory:review` (a colleague's
+merge request). Alternatively `bash install.sh` installs them as personal skills
+(the commands are then `/auto-factory-code` and `/auto-factory-review`); do not use both.
+The plugin has the same name as auto-code-factory's (`auto-factory`): install one of the two, not both.
 
 Update, from a terminal:
 
 ```
 claude plugin marketplace update code-factory
-claude plugin update code-factory@code-factory
+claude plugin update auto-factory@code-factory
 ```
 
-Then open a new session (or run `/reload-plugins`) and run init again in each
-factory repository (quick; it keeps your files and refreshes permissions: the rule for the
-older version's fx goes, and a rule for another plugin's fx stays). A factory set up with
-1.0.0 is converted by that run (see **What changed since 1.0.0**).
+After an update, open a new session (or run `/reload-plugins`) and run init again in each
+factory repository (quick; it keeps your files and refreshes permissions).
 An install only moves when the plugin's version changes: commits pushed under the
 same version never reach it, and update reports it is already at the latest.
-
-## What changed since 1.0.0
-
-Version 2.0.0 makes the factory project-wide.
-
-- **One factory per project, with one or more repositories**, listed under `repos` in
-  `factory.json`, in merge order. A project of one repository works as before.
-- **init** takes `--project-name <name>` and `--repo <name>=<git URL>` (repeatable;
-  `--project <url>` is short for a project of one repository). Run it again with a new
-  `--repo` to add a repository.
-- **Settings per repository.** A repository's entry holds its `name`, `url`,
-  `base_branch` and `app.needs`/`app.env`, and may set others (`setup`, `app`, `e2e`,
-  `*_paths`, `pr.provider`, `security.accepted_rules`…); what it does not set comes from
-  the top level of `factory.json`, and what it sets replaces the project's whole value.
-- **Checks and knowledge per repository**: `checks/<repo>.sh`; shared files at the top of
-  `knowledge/` and each repository's own in `knowledge/<repo>/`, with its own `.ref`.
-  Citations are `repo:path` and `repo:path:lines` once a project has 2 or more
-  repositories. `fx scan`, `fx style-sample`, `fx code open`, `fx selftest`,
-  `fx audit-scan`, `fx setup` and `fx knowledge` take `--repo <name>`.
-- **One job per issue, covering every repository it needs.** Intake names them
-  (`REPOS:`), you choose each one's base branch, and fx clones them
-  (`<factory>-work/<KEY>/<repo>`), all on one branch name. One spec with a part per
-  repository and a shared contract; build and gate per repository; the apps the job needs
-  start in dependency order, each on its own port with its own database. With 2 or more
-  changed repositories, the fit checker joins the reviewers (`round-N/review-fit.md`).
-- **One branch and pull request per changed repository**, linked to each other. `fx pr`
-  checks every repository first (work-in-progress commit, sync with the target, secret
-  scan) and pushes nothing if one has a secret; then pushes each and opens its pull
-  request (with `pr.create` on); then writes the links into every description.
-  `--target` takes `<repo>=<branch>`, repeatable.
-- **Removed:** `/code-factory:factory feature`, `fx feature`, `fx plan`, `fx workspace`
-  and the `--repo <factory folder>` that came before a command (each now stops with exit
-  code 3 and says what to do instead); the scope-writer agent; `fx new --upstream` and
-  `--feature`; `api-notes.md`; intake's `MULTI-REPO` verdict; the per-machine
-  `workspace.json` and `features/` state. A parent issue's children are each a job of
-  their own (`fx jira children <KEY>` lists them).
-- **Version 2.0.0** in `VERSION`, `plugin.json` and `marketplace.json`. `bash install.sh`
-  removes the agent files it installed that this version no longer has.
-
-**An existing factory from 1.0.0** (one `project.url` in `factory.json`) still reads as a
-project of one repository, with its `checks.sh` where it is, so jobs keep working. To bring
-it to the new form, update the plugin and run `/code-factory:factory init` again in the
-factory repository:
-
-- the repository is named after `project.name` (lower case, `-` for anything else; `main`
-  when nothing is left), and gets `project.url` as its `url`, the `base_branch`, and the
-  settings that belong to a repository: `setup`, `dev_server`, `app`, `e2e`,
-  `copy_into_worktree`, `copy_from`, `protected_paths`, `ui_paths`, `pr.provider`,
-  `security.accepted_rules` and `learning.knowledge_map`. Everything else stays at the top
-  as the project's default;
-- `keys_id` is written from the same name and URL as before, so the keys folder stays the
-  same;
-- `checks.sh` moves to `checks/<repo>.sh`, and `architecture.md`, `style.md`, `stack.md`,
-  `api.md`, `ui.md`, `testing.md`, `environment.md` and `.ref` move from `knowledge/` into
-  `knowledge/<repo>/`, with `git mv` when git tracks them. `knowledge/README.md` and the
-  shared files stay; update the index where it names a moved file. init's output lists
-  what moved;
-- a `workspace` block leaves `factory.json`. With merge-request review's `review` key,
-  `project.url` and `base_branch` also stay at the top, for that review.
-
-Commit and push the result. Jobs started with 1.0.0 still load as jobs of that one
-repository.
 
 ## Set up a project: `init`
 
 1. Create an empty private repository for the project's factory (for example
-   `shop-factory`), clone it and open **that folder** in VS Code.
-2. In Claude Code: `/code-factory:factory init`. Give it the project's name and
-   each repository's name and git URL, in merge order (or your local folder of one:
-   the factory then uses its remote and never touches the folder). Init runs
-   `fx init --project-name shop --repo backend=<url> --repo web=<url>`; for a project
-   of one repository, `--project <url>` is short for that.
+   `api-factory` next to `api`), clone it and open **that folder** in VS Code.
+2. In Claude Code: `/auto-factory:code init`. Give it the project's git
+   URL (or your local folder of it: the factory then uses its remote and never
+   touches the folder).
 3. Commit and push the factory repository so the team shares it. A teammate
-   clones it, opens it and runs init once; the repositories are cloned as needed.
-
-**Adding a repository later.** Run init again and give the new one: fx adds it to
-`repos` with its own `checks/<repo>.sh` and `knowledge/<repo>/`, then init learns it as
-below. A name or URL already in the project is refused, and so is the factory's own URL.
+   clones it, opens it and runs init once; the project is cloned as needed.
 
 Init refuses to run inside a project's own repository. If you used an older
 version that kept a `factory/` folder inside the project, init imports it
-(`--import <project folder>`, a project of one repository), leaving alone what belongs
-to merge-request review (see **What lives where**); remove that folder from the project
-afterwards with a normal commit.
-
-Init asks you two things that set how the factory works, each explained before you
-choose: how it reaches Jira (see **Jira**), before it reads any Jira history; and whether
-it uses S3 at all (see **S3 or this machine only**).
+(`--import <project folder>`); remove that folder from the project afterwards
+with a normal commit.
 
 Init detects whether the project already has code.
 
-**Existing code.** For each repository, it inventories the code in a read-only clone
-(`fx code open --repo <name>`, `fx scan --repo <name>`), reads it in depth (module map,
-data model, API, roles and sensitive data, UI, tests and how test data is built), learns
-the **code style** from real files and linter configs (`fx style-sample --repo <name>`)
-into `knowledge/<repo>/style.md` with excerpts, and learns from git
-history, merged PRs, finished Jira issues and the Confluence pages you pick (the Jira
-issues are read by fx in mode `token` and by Claude's Atlassian connector in mode `mcp`;
-Confluence only through the connector, and skipped without it).
+**Existing code.** It inventories the project in a read-only clone (`fx scan`), reads the code
+in depth (module map, data model, API, roles and sensitive data, UI, tests and
+how test data is built), learns the **code style** from real files and linter
+configs (`fx style-sample`) into `style.md` with excerpts, and learns from git
+history, merged PRs, finished Jira issues and the Confluence pages you pick.
 
 **Reading rules.** Every main module is read, however large the project
-(split between parallel agents), and must appear in its repository's module map
-(`knowledge/<repo>/architecture.md`). Every statement in the knowledge cites the code
-(`repo:path:lines`, or `path:lines` in a project of one repository), the database schema,
+(split between parallel agents), and must appear in the module map. Every
+statement in the knowledge cites the code (`path:lines`), the database schema,
 a document or your answer; `fx knowledge check` verifies every cited path,
 line range and excerpt against the code, the module map's coverage, and that
 no secret is copied. The code style is learnt per architectural role
@@ -865,11 +819,10 @@ implements it and the test that covers it (or "no test"), and `fx logic check`
 verifies both and the format. Back-end/front-end differences and anything the
 code does not decide become open points or questions, never guesses. In each
 job the spec is compared with the logic: where the issue says something else,
-the factory comments on the issue (a summary for people, then the technical part)
-and asks you whether it is a change of logic or a mistake in the issue. The
-builder stages the updated logic files with the code; they go into the pull
-request description and are applied to `logic/` once the pull request is merged,
-after your approval, one job at a time. Logic whose cited code
+the factory comments on the issue and asks you whether it is a change of logic
+or a mistake in the issue. The builder stages the updated logic files with the
+code; they go into the pull request description and are applied to `logic/`
+once the pull request is merged, after your approval. Logic whose cited code
 was changed outside the factory is refreshed like the knowledge.
 
 In every job the builder must read, before changing a file, the file itself,
@@ -886,85 +839,82 @@ ending in a PR) or only record the decisions.
 
 Both then interview you (business rules, sensitive data, ASVS level, product
 languages, style and test policy, definition of done, Jira statuses, lessons),
-write `knowledge/` (small files per topic, shared ones at the top and each repository's
-in `knowledge/<repo>/`; each agent reads only its own), record which commit each
-repository's knowledge describes (`fx knowledge mark`), configure each repository's checks,
-paths and running app (`app.up`, `app.needs`) and the UI checks, install the tools, prove
-everything with `fx selftest` (every repository; `--repo` for one), list what is already
-vulnerable with `fx audit-scan` (every repository; `--repo` for one), and optionally run a
-deep security audit. Files every clone needs but git must not hold (such as `.env`) go in
-the factory repository's git-ignored `local/<repo>/` folder (or `local/` for a file every
-repository shares).
+write `knowledge/` (small files per topic; each agent reads only its own),
+configure the checks and paths, set up the running app and UI checks, install
+the tools, prove everything with `fx selftest`, list what is already vulnerable
+with `fx audit-scan`, optionally run a deep security audit, and register the project for multi-repo features. Files every clone
+needs but git must not hold (such as `.env`) go in the factory repository's
+git-ignored `local/` folder.
 
-Commit `factory.json`, `checks/`, `knowledge/`, `logic/`, `lessons.md` and
+Commit `factory.json`, `checks.sh`, `knowledge/`, `lessons.md` and
 `.gitignore` in the factory repository and push them, so the team shares them: the gate
-does not run on changes to `factory.json`, a checks script or scanner rules that are only
+does not run on changes to `factory.json`, `checks.sh` or scanner rules that are only
 on this machine.
 
 ## Commands
 
 ```
-/code-factory:factory <jira link or key> [more]   run issues one after another
-/code-factory:factory task "<what to do>"         a job without Jira
-/code-factory:factory PROJ-123 --best-of 3        3 builders in parallel, a judge picks one
-/code-factory:factory audit                       deep security audit (Cloudflare security-audit skill)
-/code-factory:factory resume PROJ-123             continue a stopped job
-/code-factory:factory rework PROJ-123 "..."       send the PR back to the builder
-/code-factory:factory lessons                     learn now: lessons and knowledge updates
-/code-factory:factory status                      all jobs
-/code-factory:factory cleanup PROJ-123            delete a job's leftover clones (never unpushed work)
-/code-factory:factory init                        set up or refresh the factory, add a repository
-```
+/auto-factory:code <jira link or key> [more]    run issues side by side (space or comma separated)
+/auto-factory:code task "<what to do>"          a job without Jira
+/auto-factory:code PROJ-123 --best-of 3         3 builders in parallel, a judge picks one
+/auto-factory:code feature PROJ-100             one issue across repositories, backend first
+/auto-factory:code audit                        deep security audit (Cloudflare security-audit skill)
+/auto-factory:code resume PROJ-123              continue a stopped job
+/auto-factory:code rework PROJ-123 "..."        send the PR back to the builder
+/auto-factory:code lessons                      learn now: lessons and knowledge updates
+/auto-factory:code status                       all jobs
+/auto-factory:code capacity                     what the machine has, which steps run, which wait and why
+/auto-factory:code cleanup PROJ-123             delete a job's leftover clone (never unpushed work)
+/auto-factory:code init                         set up or refresh a repository
 
-An issue that needs several repositories is still one job (see **A project of several
-repositories**).
+/auto-factory:review [<MR link or KEY>]         review a colleague's merge request against its ticket
+```
 
 `audit` runs Cloudflare's open-source
 [security-audit skill](https://github.com/cloudflare/security-audit-skill)
-over the project's code (it asks before installing it and warns about the
-usage cost), reports the confirmed findings, turns them into lessons, and asks
-you one finding at a time whether to fix it as a factory job, each ending in its
-own PR.
+over the whole repository (it asks before installing it and warns about the
+usage cost), reports the confirmed findings, turns them into lessons, and lets
+you pick findings to fix as factory jobs, each ending in its own PR.
 
 ## How it learns
 
-After each job (or once per run, or only on `/code-factory:factory lessons`: see
+After each job (or once per run, or only on `/auto-factory:code lessons`: see
 `learning.ask_after`) the factory looks at what it can learn from:
 
 - its own reviewers' blocking findings and failed gates;
 - your rework notes;
-- review comments on each of the job's pull requests (GitHub with `gh`, GitLab with
-  `glab`);
-- commits you or a teammate pushed to a PR branch after the factory's last
+- review comments on the pull request (GitHub with `gh`, GitLab with `glab`);
+- from `/auto-factory:review`: what you say it missed; what people said and pushed on the merge
+  request after it, read until the merge request is merged or closed; findings you did not post
+  or the verifier disproved; and those that were posted and then fixed;
+- commits you or a teammate pushed to the PR branch after the factory's last
   push: the corrections a human had to make.
 
 Pull requests of earlier jobs are read again until they are merged or closed,
 so comments and edits made days later still count. From these it proposes new
-lessons, rewordings and removals; you decide on each change, one at a time. Every lesson gets an
+lessons, rewordings and removals; you choose what to keep. Every lesson gets an
 id (`L12`); reviewers cite it when a finding breaks a lesson, so a lesson that
 keeps being broken is flagged (reword it or turn it into a lint rule, semgrep
 rule or test), and one that names files or symbols the code no longer has is
 flagged as possibly obsolete.
 
 `lessons.md` stays short. Each lesson carries topic tags (`[code]`, `[test]`,
-`[security]`, `[ui]`, `[data]`, `[spec]`), and each agent gets only the
-lessons for its topics plus the untagged ones (a lesson tagged `[review]` is left
-alone: see **What lives where**). A lesson no job broke in 10 jobs
+`[security]`, `[ui]`, `[data]`, `[spec]`, and `[review]` for what only the reviewers of a
+colleague's merge request should read), and each agent gets only the
+lessons for its topics plus the untagged ones. A lesson no job broke in 10 jobs
 (`learning.graduate_after_jobs`) is proposed for a move into the knowledge file
-that fits (`fx lessons graduate`; a repository's file is named `<repo>/<file>.md`). Above 40 lessons (`learning.max_lessons`),
+that fits (`fx lessons graduate`). Above 40 lessons (`learning.max_lessons`),
 learning proposes merges first, and `fx doctor` warns.
 
 A short trend (rounds, blocking findings,
 reworks, lines humans changed; last 10 jobs against the 10 before) shows
 whether the factory is getting better.
 
-The project knowledge follows the code: `knowledge/<repo>/.ref` records the
-commit each repository's knowledge describes (`knowledge/.ref` in a factory whose
-knowledge is still flat). When a repository's base branch has moved on in ways that matter
+The project knowledge follows the code: `knowledge/.ref` records the
+commit it describes. When the base branch has moved on in ways that matter
 (dependencies, lint configs, CI, schema, API, auth, environment, tests, UI), a
-librarian agent drafts updated knowledge files for it (`fx knowledge stale`, then
-`fx knowledge ctx --repo <name>`) and you approve each one.
-`/code-factory:factory rework` also brings in commits a human pushed to the PR branches before
+librarian agent drafts updated knowledge files and you approve each one.
+`/auto-factory:code rework` also brings in commits a human pushed to the PR branch before
 the builder starts.
 
 ## Security standards
@@ -980,62 +930,44 @@ and periodically (`audit`).
 
 ```
 <project>-factory/                the factory repository for one project (open this in VS Code)
-  factory.json                    settings, with the project's repositories under repos (commit)
-  checks/<repo>.sh                each repository's checks for the gate (commit)
-  knowledge/*.md                  what init learned that the whole project shares (commit)
-  knowledge/<repo>/               each repository's own knowledge, and .ref, the commit it describes (commit)
+  factory.json, checks.sh         settings (with the project's git URL) and the gate's checks (commit)
+  knowledge/*.md, knowledge/.ref  what init learned, and the commit it describes (commit)
+  knowledge/repos/<name>/*.md     what fx review learn wrote about another repository (commit)
   logic/                          business logic of every feature, the team's source of truth (commit)
   lessons.md                      rules (L1, L2…) learned from reviews, your corrections and audits (commit)
-  jobs/<KEY>/                     each job's files, reports and screenshots (git-ignored; also on S3 when the factory uses S3)
-  local/                          files every clone needs, such as .env (local, git-ignored)
+  jobs/<KEY>/                     each job's files, reports and screenshots (git-ignored; on S3 with a jobs_store)
+  jobs/_reviews/<KEY>-mr<iid>/    each review of a colleague's merge request (git-ignored; on S3 only with include_reviews)
+  jobs/_reviews/_ticket-<KEY>/     several merge requests of one ticket, reviewed together (same)
+  local/                          files every clone needs, such as .env, and baselines keys (local, git-ignored)
   baseline.json                   last selftest (local)
-<project>-factory-work/<KEY>/<repo>/  the job's own clone of each repository, deleted once the job's branches are pushed
-<project>-factory-work/_read-<repo>/  a short-lived read-only clone (init, intake, audit; fx code open)
-each project repository           receives only factory/<KEY>-… branches and pull requests
-~/.cache/code-factory/            the factory's own tools, cloned references, fetched baselines and the board
-~/.config/code-factory/           this machine only, never in git
-  keys/<project>-<hash>/          the keys folder: S3 keys and jira.env (fx where prints it as keys_folder)
+<project>-factory-work/<KEY>/     the job's own clone of the project, deleted once its branch is pushed
+<project> repository              receives only factory/<KEY>-… branches and pull requests
+~/.cache/auto-code-factory/       the factory's own tools, cloned references and fetched baselines
+  overrides/<KEY>.json            what a human allowed for that one job (commit and push)
+~/.cache/auto-code-factory/run/   this machine only: who holds which place and ports, what each kind of step used here
+~/.config/auto-code-factory/      this machine only, never in git: where each repository's factory is, runs across repositories,
+                                  and this machine's own settings for sharing it (machine.json, written by fx capacity --set)
 ```
-
-code-factory keeps what belongs to this machine in these two folders of its own. Run
-`/code-factory:factory install` once on each machine and put the keys in its keys folder.
-`fx where` prints every path, and for each repository its URL, base branch, knowledge
-folder and checks script. The board (`~/.cache/code-factory/board.html`) is a page of its
-own and shows jobs only.
-
-**Merge-request review data.** A factory repository may also hold the data of
-merge-request review, which is not part of code-factory. code-factory leaves it alone:
-
-- **Settings.** The `factory.json` keys only merge-request review uses (`review`,
-  `models.review`, `jira.transitions.review_changes` and `conflict`, `jira.code_owner`,
-  `jira.subtask_type`, `jobs_store.include_reviews` and the `review_*` entries of
-  `learning.sources`) are ignored: never an error, never removed or rewritten.
-- **`jobs/_reviews/`** holds reviews of merge requests, not jobs. `fx status` and the board
-  do not list it, `fx cleanup` does not touch it, and `fx jobs` never pushes, pulls or
-  counts it: not with `--all`, not with `include_reviews` on. Naming one in `fx jobs push`,
-  `fx jobs pull` or any other fx command, by its path or by its folder's name alone, is
-  refused, since code-factory does not handle reviews of merge requests.
-- **Lessons tagged `[review]`** stay in `lessons.md` exactly as written, with their ids. No
-  agent gets them, they are never proposed for a move into the knowledge, and the learning
-  never writes a new one.
-- **`knowledge/repos/`** is ignored: no agent gets it, and `fx knowledge check` does not
-  check it.
 
 ## Repository layout
 
 ```
 .claude-plugin/marketplace.json
-plugins/code-factory/.claude-plugin/plugin.json
-plugins/code-factory/skills/factory/   SKILL.md, fx, factory-ui.js, templates/
-plugins/code-factory/agents/           intake, spec-writer, builder, 4 reviewers,
-                                       security verifier, approver, judge, librarian,
-                                       knowledge reviewer, logic writer, planner,
-                                       fit checker
-install.sh                             alternative install as a personal skill
-tests/                                 fx's tests (standard library only):
-                                       python3 -I -m unittest discover -s tests
+plugins/auto-factory/.claude-plugin/plugin.json
+plugins/auto-factory/skills/code/     SKILL.md (/auto-factory:code), fx, factory-ui.js, templates/
+plugins/auto-factory/skills/review/   SKILL.md (/auto-factory:review): follows the rules of code/SKILL.md
+plugins/auto-factory/skills/code/shared/  what the UI checks measure with: the screen comparer, the app
+                                      runtime, the reading of a design package (auto-code-factory's files)
+plugins/auto-factory/agents/          factory-*: intake, spec-writer, builder, 4 reviewers,
+                                      security verifier, approver, judge, librarian,
+                                      knowledge reviewer, logic writer, planner,
+                                      scope writer, fit checker, review checklist,
+                                      requirement reviewer
+install.sh                            alternative install as personal skills
+tests/                                the tools' tests (standard library only):
+                                      python3 -I -m unittest discover -s tests
 ```
 
-Bump `version` in `plugins/code-factory/.claude-plugin/plugin.json`,
-`skills/factory/VERSION` and `.claude-plugin/marketplace.json` on every change so installs
-pick it up.
+Bump `version` in `plugins/auto-factory/.claude-plugin/plugin.json`,
+`skills/code/VERSION` and `skills/code/shared/VERSION` on every change so
+installs pick it up.

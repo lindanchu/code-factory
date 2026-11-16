@@ -209,75 +209,6 @@ class NoJobsStoreTest(FxTestCase):
         self.assertFalse([c for c in res["checks"] if "jobs store" in c["check"]])
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "state", "jobs-store")))
 
-    def test_where_names_the_keys_folder_without_any_storage(self):
-        code, res = self.fx("where")
-        self.assertEqual(code, 0, res)
-        ctx = self.f.ctx()
-        self.assertIsNone(ctx.c("storage"))
-        self.assertEqual(res["keys_folder"], fx.baselines_key_dir(ctx))
-        self.assertEqual(os.path.dirname(fx.jira_env_path(ctx)), res["keys_folder"])
-        self.assertTrue(res["keys_folder"].startswith(fx.keys_root() + os.sep))
-
-
-class StorageWithoutJobsStoreTest(FxTestCase):
-    """With S3, jobs always go there: a storage block without jobs_store is S3 set up halfway."""
-
-    def setUp(self):
-        super().setUp()
-        self.s3 = FakeS3()
-        self.addCleanup(self.s3.stop)
-        self.settings(storage=True, jobs_store=False)
-
-    def settings(self, storage, jobs_store):
-        path = os.path.join(self.f.factory, "factory.json")
-        cfg = load_json(path)
-        cfg.pop("storage", None)
-        cfg.pop("jobs_store", None)
-        if storage:
-            cfg["storage"] = {"type": "s3", "bucket": BUCKET, "region": "eu-west-1",
-                              "endpoint": "http://127.0.0.1:%d" % self.s3.port, "prefix": PREFIX}
-        if jobs_store:
-            cfg["jobs_store"] = {}
-        write(path, json.dumps(cfg, indent=1))
-
-    def doctor(self):
-        code, res = self.fx("doctor")
-        return res, [c for c in res["checks"] if c["check"] == "jobs store settings"]
-
-    def test_doctor_fails_and_says_what_to_do(self):
-        res, rows = self.doctor()
-        self.assertEqual(len(rows), 1, res["checks"])
-        self.assertFalse(rows[0]["ok"])
-        self.assertFalse(res["ok"])
-        self.assertIn("S3 is set up but jobs are not kept there", rows[0]["detail"])
-        self.assertIn("add jobs_store with /code-factory:factory init, or remove storage", rows[0]["detail"])
-
-    def test_the_jobs_commands_say_so_too(self):
-        for action in ("push", "status"):
-            code, res = self.fx("jobs", action)
-            self.assertEqual(code, 3)
-            self.assertIn("no jobs_store block", res["error"])
-            self.assertIn("S3 is set up but jobs are not kept there", res["error"])
-
-    def test_both_blocks_pass(self):
-        self.settings(storage=True, jobs_store=True)
-        res, rows = self.doctor()
-        self.assertTrue(rows[0]["ok"], rows)
-        self.assertNotIn("S3 is set up", json.dumps(res))
-
-    def test_neither_block_says_nothing_of_it(self):
-        self.settings(storage=False, jobs_store=False)
-        res, rows = self.doctor()
-        self.assertEqual(rows, [])
-        self.assertNotIn("S3 is set up", json.dumps(res))
-        code, res = self.fx("jobs", "push")
-        self.assertEqual(res["error"], "this factory has no jobs_store block in factory.json, so its jobs stay on this "
-                                       "machine")
-
-    def test_where_names_the_folder_the_s3_keys_are_read_from(self):
-        self.assertEqual(self.fx("where")[1]["keys_folder"], fx.baselines_key_dir(self.f.ctx()))
-        self.assertEqual(os.path.dirname(fx.baselines_key_file(self.f.ctx(), "read")), fx.baselines_key_dir(self.f.ctx()))
-
 
 class JobsSettingsTest(JobsStoreCase):
     def problems(self, **block):
@@ -324,7 +255,7 @@ class JobsSettingsTest(JobsStoreCase):
 
     def test_the_sandbox_stays_out_whatever_exclude_says(self):
         self.configure(jobs_store={"exclude": []})
-        self.assertEqual(fx.jobs_store_config(self.f.ctx())["exclude"], ["_audits/*/sandbox/"])
+        self.assertEqual(fx.jobs_store_config(self.f.ctx())["exclude"], ["_audits/*/sandbox/", "_reviews/**/*.patch", "_reviews/**/run/", "_reviews/**/design/", "*/lanes/"])
 
     def test_a_storage_problem_is_named(self):
         cfg = load_json(os.path.join(self.f.factory, "factory.json"))
@@ -1212,6 +1143,10 @@ class OtherMachineCase(PullCase):
         super().setUp()
         self.old_factory, self.old_work = self.f.factory, self.f.ctx().work
         self.old_job = dict(self.f.job())
+        # Some of these say which ports the job gets on the new machine: that must not depend on what happens to listen
+        # on the machine the tests run on (a real job's app, for one), so this machine says that nothing does.
+        machine = os.environ["FACTORY_FAKE_MACHINE"]
+        write(machine, json.dumps(dict(load_json(machine), listening=[])))
 
     def move_to_a_new_machine(self):
         new = os.path.join(self.tmp, "new-home", "proj-factory")
@@ -1229,7 +1164,7 @@ class OtherMachineCase(PullCase):
         self.assertEqual(code, 0, res)
 
     def restored(self):
-        return fx.job_flat_copy(load_json(os.path.join(self.f.jd, "job.json")))
+        return load_json(os.path.join(self.f.jd, "job.json"))
 
 
 class FinishedJobMovesTest(OtherMachineCase):
@@ -1246,7 +1181,7 @@ class FinishedJobMovesTest(OtherMachineCase):
         job = self.restored()
         ctx = self.f.ctx()
         self.assertEqual(job["worktree"], os.path.join(ctx.work, "T-1"))
-        self.assertNotIn("upstream", job)  # an older job's notes from another repository: nothing reads them now
+        self.assertEqual(job["upstream"], [os.path.join(self.new, "jobs", "T-1", "upstream", "1-a.md")])
         self.assertEqual(job["runs"][0]["result"], [os.path.join(self.new, "jobs", "T-1", "build.md")])
         self.assertEqual(job["note_text"], "see %s/jobs for it" % self.old_factory)  # only what starts with the path
         self.assertEqual(job["other_path"], self.old_factory + "-other/x")  # another folder with a similar name
@@ -1290,59 +1225,6 @@ class FinishedJobMovesTest(OtherMachineCase):
         code, res = self.fx("rework", "T-1", "again please")
         self.assertEqual(code, 3)
         self.assertIn("not on the remote", res["error"])
-
-
-class TwoRepoJobMovesTest(OtherMachineCase):
-    """A job over two repositories, pushed from one machine and pulled on another: every repository comes back, the one
-    it changes from its branch, the one it only runs at its base. The factory moved to the new form of factory.json in
-    between, and its keys folder stayed where it was."""
-
-    def setUp(self):
-        super().setUp()
-        seed = os.path.join(self.tmp, "seed-fe")
-        os.makedirs(seed)
-        sh(["git", "init", "-q", "-b", "main"], seed)
-        write(os.path.join(seed, "web.txt"), "web\n")
-        sh(["git", "add", "-A"], seed)
-        sh(["git", "commit", "-q", "-m", "base"], seed)
-        self.fe_origin = os.path.join(self.tmp, "fe.git")
-        sh(["git", "clone", "-q", "--bare", seed, self.fe_origin], self.tmp)
-        keys = fx.baselines_key_dir(self.f.ctx())
-        cfg = load_json(os.path.join(self.f.factory, "factory.json"))
-        url = cfg["project"].pop("url")
-        cfg["repos"] = [{"name": "be", "url": url, "base_branch": "main"},
-                        {"name": "fe", "url": self.fe_origin, "app": {"up": "true", "needs": ["be"]}}]
-        write(os.path.join(self.f.factory, "factory.json"), json.dumps(cfg, indent=1))
-        self.assertEqual(fx.baselines_key_dir(self.f.ctx()), keys)
-        sh(["git", "commit", "-q", "--allow-empty", "-m", "pushed work"], self.f.wt)
-        sh(["git", "push", "-q", "origin", self.f.branch], self.f.wt)
-        job = {k: v for k, v in self.f.job().items() if k not in fx.JOB_REPO_FIELDS}
-        job.update(stage="build", pushed_head=None, repo_order=["be", "fe"], repos={
-            "be": {"role": "change", "branch": self.f.branch, "worktree": os.path.join(self.old_work, "T-1", "be"),
-                   "base_branch": "main", "base_ref": "origin/main", "setup_done": True},
-            "fe": {"role": "run", "worktree": os.path.join(self.old_work, "T-1", "fe"), "base_branch": "main",
-                   "base_ref": "origin/main", "setup_done": True}})
-        write(os.path.join(self.f.jd, "job.json"), json.dumps(job, indent=1))
-        code, res = self.fx("jobs", "push", "T-1")
-        self.assertEqual(code, 0, res)
-        self.new = self.move_to_a_new_machine()
-        code, self.res = self.pull("T-1")
-        self.assertEqual(code, 0, self.res)
-
-    def test_every_repository_comes_back(self):
-        row = self.res["jobs"][0]
-        self.assertIn("Cloned its branch %s of be" % self.f.branch, row["next"])
-        self.assertIn("Cloned fe at its base main", row["next"])
-        raw = load_json(os.path.join(self.f.jd, "job.json"))
-        work = self.f.ctx().work
-        be, fe = raw["repos"]["be"], raw["repos"]["fe"]
-        self.assertEqual((be["worktree"], fe["worktree"]), (os.path.join(work, "T-1", "be"), os.path.join(work, "T-1", "fe")))
-        self.assertFalse(be["setup_done"] or fe["setup_done"])
-        self.assertNotIn("worktree", raw)
-        self.assertEqual(sh(["git", "branch", "--show-current"], be["worktree"]).strip(), self.f.branch)
-        self.assertEqual(sh(["git", "log", "-1", "--format=%s"], be["worktree"]).strip(), "pushed work")
-        self.assertEqual(sh(["git", "branch", "--show-current"], fe["worktree"]).strip(), "")  # detached at its base
-        self.assertTrue(os.path.exists(os.path.join(fe["worktree"], "web.txt")))
 
 
 class UnfinishedJobMovesTest(OtherMachineCase):
@@ -1462,15 +1344,11 @@ class WhatTheFileMaySayTest(OtherMachineCase):
         self.pull("T-1")
         self.assertEqual(self.restored()["candidates"][0]["worktree"], os.path.join(self.f.ctx().work, "T-1") + "-c1")
 
-    def test_an_older_job_s_upstream_and_feature_fields_are_left_out(self):
-        self.push_as(upstream=[os.path.join(self.f.jd, "upstream", "1-a.md"), "/etc/passwd", 7],
-                     feature={"id": "PROJ-9", "repo": "be", "shared": True})
+    def test_an_upstream_file_elsewhere_is_dropped(self):
+        self.push_as(upstream=[os.path.join(self.f.jd, "upstream", "1-a.md"), "/etc/passwd", 7])
         self.new = self.move_to_a_new_machine()
-        code, res = self.pull("T-1")
-        self.assertEqual(code, 0, res)
-        job = self.restored()
-        self.assertNotIn("upstream", job)
-        self.assertEqual(job["worktree"], os.path.join(self.f.ctx().work, "T-1"))
+        self.pull("T-1")
+        self.assertEqual(self.restored()["upstream"], [os.path.join(self.new, "jobs", "T-1", "upstream", "1-a.md")])
 
     def test_the_old_machine_s_process_is_forgotten(self):
         self.write_job("T-1", {"app.json": json.dumps({"pid": os.getpid()})})
@@ -1846,7 +1724,7 @@ class WholeWayTest(JobsStoreCase):
 
         code, res = self.fx("rework", "T-1", "one more thing")
         self.assertEqual(code, 0, res)
-        job = fx.job_flat_copy(load_json(os.path.join(new, "jobs", "T-1", "job.json")))
+        job = load_json(os.path.join(new, "jobs", "T-1", "job.json"))
         self.assertEqual(job["stage"], "build")
         self.assertTrue(job["worktree"].startswith(os.path.join(self.tmp, "other-machine")))
         self.assertTrue(os.path.isdir(os.path.join(job["worktree"], ".git")))
@@ -2472,3 +2350,59 @@ class HeldBackWholeWayTest(PushCase):
         self.assertEqual({r["state"] for r in again["jobs"]}, {"unchanged"})
         self.assertFalse(self.s3.calls("PUT"))
         self.assertEqual(len(self.s3.objects), count)
+
+
+class ReviewsInTheStoreTest(PushCase):
+    REVIEW = "_reviews/PROJ-9-mr7"
+    TICKET = "_reviews/_ticket-PROJ-9"
+
+    def write_reviews(self):
+        job = {"id": self.REVIEW, "kind": "review", "issue_key": "PROJ-9", "stage": "done", "round": 1, "history": []}
+        self.write_job(self.REVIEW, {"job.json": json.dumps(job), "round-1/review.md": "an open hole\n",
+                                     "round-1/diff.patch": "+a colleague's code\n", "followup.patch": "+more of it\n"})
+        self.write_job(self.TICKET, {"ticket.json": json.dumps({"key": "PROJ-9", "members": [self.REVIEW]})})
+
+    def test_they_stay_here_unless_asked_for(self):
+        self.configure(jobs_store={})
+        self.write_reviews()
+        code, res = self.push("--all")
+        self.assertEqual(code, 0, res)
+        self.assertFalse([k for k in self.s3.objects if "_reviews" in k or k.endswith(sha(b"an open hole\n"))])
+        code, res = self.push(self.REVIEW)
+        self.assertEqual(code, 3)
+        self.assertIn("include_reviews", res["error"])
+
+    def test_a_string_is_not_a_yes(self):
+        self.configure(jobs_store={"include_reviews": "false"})
+        with self.assertRaises(fx.FxError):
+            fx.jobs_store_config(self.f.ctx())
+
+    def test_asked_for_they_go_up_without_the_diffs(self):
+        self.configure(jobs_store={"include_reviews": True})
+        self.write_reviews()
+        code, res = self.push("--all")
+        self.assertEqual(code, 0, res)
+        snap = self.snapshot(self.REVIEW)
+        self.assertEqual(sorted(f["path"] for f in snap["files"]), ["job.json", "round-1/review.md"])
+        self.assertFalse([k for k in self.s3.objects if k.endswith(sha(b"+a colleague's code\n"))])
+        self.assertEqual([f["path"] for f in self.snapshot(self.TICKET)["files"]], ["ticket.json"])
+
+    def test_they_come_back(self):
+        self.configure(jobs_store={"include_reviews": True})
+        self.write_reviews()
+        self.push("--all")
+        shutil.rmtree(os.path.join(self.f.factory, "jobs", "_reviews"))
+        code, res = self.fx("jobs", "pull", "--all")
+        self.assertEqual(code, 0, res)
+        self.assertEqual(slurp(os.path.join(self.f.factory, "jobs", self.REVIEW, "round-1", "review.md")), "an open hole\n")
+        self.assertTrue(os.path.isfile(os.path.join(self.f.factory, "jobs", self.TICKET, "ticket.json")))
+
+    def test_pulling_all_leaves_them_when_turned_off(self):
+        self.configure(jobs_store={"include_reviews": True})
+        self.write_reviews()
+        self.push("--all")
+        shutil.rmtree(os.path.join(self.f.factory, "jobs", "_reviews"))
+        self.configure(jobs_store={"include_reviews": False})
+        code, res = self.fx("jobs", "pull", "--all")
+        self.assertEqual(code, 0, res)
+        self.assertFalse(os.path.exists(os.path.join(self.f.factory, "jobs", "_reviews")))

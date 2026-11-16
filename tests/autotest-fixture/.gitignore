@@ -1,0 +1,7 @@
+# made by run.sh: the copy of the skill's runtime and the results of a run
+web/autotest/
+web/results/
+web/test-results/
+edge/web/autotest/
+edge/web/results/
+edge/web/test-results/

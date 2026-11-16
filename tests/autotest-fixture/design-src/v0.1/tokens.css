@@ -1,0 +1,52 @@
+/* Kho sách — token của gói design (tiền tố --ks-). Gói bịa ra cho fixture của auto test, không phải gói thật. */
+:root {
+  /* Màu chính */
+  --ks-color-ink: #1B1F2A;
+  --ks-color-primary: #2457D6;
+  /* Màu ngữ nghĩa */
+  --ks-color-success: #23774A;
+  --ks-success-light: #E3F3EA;
+  --ks-color-danger: #C63B2F;
+  --ks-danger-light: #FBE8E5;
+  /* Chữ */
+  --ks-text-primary: #1B1F2A;
+  --ks-text-secondary: #5B6270;
+  --ks-text-inverse: #F7F6F3;
+  --ks-white: #FFFFFF;
+  /* Nền */
+  --ks-bg-page: #F4F3EF;
+  --ks-bg-card: #FFFFFF;
+  --ks-bg-subtle: #FAF9F6;
+  --ks-bg-dark: #1B1F2A;
+  /* Viền */
+  --ks-border: #E2E0DA;
+  --ks-border-light: #EFEEE9;
+  --ks-border-strong: #D3D0C8;
+  /* Cỡ chữ */
+  --ks-fs-12: 12px;
+  --ks-fs-13: 13px;
+  --ks-fs-14: 14px;
+  --ks-fs-16: 16px;
+  --ks-fs-18: 18px;
+  --ks-fs-24: 24px;
+  /* Khoảng cách */
+  --ks-sp-8: 8px;
+  --ks-sp-12: 12px;
+  --ks-sp-16: 16px;
+  --ks-sp-24: 24px;
+  --ks-sp-32: 32px;
+  --ks-sp-40: 40px;
+  /* Bo góc */
+  --ks-r-md: 8px;
+  --ks-r-lg: 12px;
+  --ks-r-pill: 999px;
+  /* Chiều cao */
+  --ks-h-row: 44px;
+  --ks-h-control: 40px;
+  --ks-h-bar: 56px;
+  /* Token component (trỏ về token gốc) */
+  --ks-btn-primary-bg: var(--ks-color-ink);
+  --ks-btn-radius: var(--ks-r-md);
+  --ks-card-radius: var(--ks-r-lg);
+  --ks-table-head-bg: var(--ks-bg-subtle);
+}

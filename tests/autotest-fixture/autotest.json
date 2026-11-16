@@ -1,0 +1,27 @@
+{
+ "_doc": "Settings of the fixture's test repository, as the auto test skill writes them for a project. The conventions are what a project's owner chose; run.sh checks other choices on copies of this folder.",
+ "version": 1,
+ "project": {
+  "name": "Kho sách (fixture)"
+ },
+ "language": "vi",
+ "platform": "WEB",
+ "web": {
+  "dir": "web"
+ },
+ "design": {
+  "dir": "design-src",
+  "current": "v0.1"
+ },
+ "conventions": {
+  "ui_threshold": {
+   "value": "medium"
+  },
+  "ui_percent_from": {
+   "value": 4
+  },
+  "ui_bad": {
+   "value": "step"
+  }
+ }
+}

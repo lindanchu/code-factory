@@ -1,0 +1,74 @@
+{
+ "WEB-DEM-01": {
+  "name": "Xem Trợ giúp, danh sách và mở hộp thoại Thêm sách",
+  "steps": [
+   { "name": "Mở trang Trợ giúp", "expected": "Thấy tiêu đề \"Trợ giúp\" và link \"Quay lại Kho sách\"" },
+   { "name": "Bấm \"Quay lại Kho sách\"", "expected": "Bảng có 4 đầu sách, dòng \"Tổng số: 4 đầu sách\"" },
+   { "name": "Bấm \"Thêm sách\"", "expected": "Hộp thoại \"Thêm sách\" mở, ba ô còn trống" }
+  ],
+  "ac": [{ "code": "KS-1", "content": "Trang Kho sách liệt kê mọi đầu sách và mở được hộp thoại Thêm sách" }],
+  "preconditions": ["Kho có 4 đầu sách mẫu"],
+  "test_data": [],
+  "state": "ACTIVE"
+ },
+ "WEB-DEM-02": {
+  "name": "Thêm một đầu sách mới",
+  "steps": [
+   { "name": "Mở trang Kho sách", "expected": "Bảng có 4 đầu sách" },
+   { "name": "Bấm \"Thêm sách\", nhập mã <mã mới>, tên \"Lão Hạc\", tác giả \"Nam Cao\"", "expected": "Ba ô giữ đúng giá trị đã nhập" },
+   { "name": "Bấm \"Lưu\"", "expected": "Hộp thoại đóng, bảng có thêm dòng <mã mới>, dòng \"Tổng số: 5 đầu sách\"" }
+  ],
+  "ac": [{ "code": "KS-2", "content": "Thêm đầu sách mới: sách hiện ngay trong bảng, số lượng 0, trạng thái Hết hàng" }],
+  "preconditions": ["Kho có 4 đầu sách mẫu"],
+  "test_data": [{ "label": "Tên sách", "value": "Lão Hạc" }, { "label": "Tác giả", "value": "Nam Cao" }],
+  "state": "ACTIVE"
+ },
+ "WEB-DEM-03": {
+  "name": "Trang Kho sách vẽ đúng design",
+  "steps": [
+   { "name": "Mở trang Kho sách", "expected": "Tiêu đề, nút \"Thêm sách\" và bảng giống design" },
+   { "name": "Bấm \"Thêm sách\"", "expected": "Hộp thoại \"Thêm sách\" giống design" },
+   { "name": "Nhập mã \"KS-900\"", "expected": "Ô Mã sách giữ giá trị \"KS-900\"" }
+  ],
+  "ac": [{ "code": "KS-3", "content": "Giao diện trang Kho sách theo gói design v0.1" }],
+  "preconditions": ["Kho có 4 đầu sách mẫu"],
+  "test_data": [{ "label": "Mã sách", "value": "KS-900" }],
+  "state": "ACTIVE"
+ },
+ "WEB-DEM-04": {
+  "name": "Xem chi tiết một đầu sách",
+  "steps": [
+   { "name": "Mở trang Kho sách", "expected": "Bảng có 4 đầu sách" },
+   { "name": "Bấm dòng \"Tắt đèn\"", "expected": "Hộp thoại chi tiết mở với tên \"Tắt đèn\", mã KS-003, số lượng 7" },
+   { "name": "Xem trạng thái trong hộp thoại", "expected": "Trạng thái \"Còn hàng\"" }
+  ],
+  "ac": [{ "code": "KS-4", "content": "Bấm một dòng mở hộp thoại chi tiết của đúng đầu sách đó" }],
+  "preconditions": ["Kho có 4 đầu sách mẫu"],
+  "test_data": [{ "label": "Đầu sách", "value": "KS-003 Tắt đèn" }],
+  "state": "ACTIVE"
+ },
+ "WEB-DEM-05": {
+  "name": "Không thêm được sách trùng mã",
+  "steps": [
+   { "name": "Mở trang Kho sách, bấm \"Thêm sách\"", "expected": "Hộp thoại \"Thêm sách\" mở" },
+   { "name": "Nhập mã KS-001 đã có, tên \"Bản sao\", bấm \"Lưu\"", "expected": "Báo \"Mã sách này đã có.\" dưới ô Mã sách, hộp thoại vẫn mở" },
+   { "name": "Bấm \"Huỷ\"", "expected": "Bảng vẫn 4 đầu sách" }
+  ],
+  "ac": [{ "code": "KS-5", "content": "Mã sách là duy nhất: nhập mã đã có thì báo lỗi, không lưu" }],
+  "preconditions": ["Kho có sách mã KS-001"],
+  "test_data": [{ "label": "Mã sách", "value": "KS-001" }],
+  "state": "ACTIVE"
+ },
+ "WEB-DEM-08": {
+  "name": "Sắp xếp danh sách theo số lượng",
+  "steps": [
+   { "name": "Mở trang Kho sách", "expected": "Bảng xếp theo mã: KS-001, KS-002, KS-003, KS-004" },
+   { "name": "Bấm \"Sắp xếp\"", "expected": "Menu mở với ba mục: Theo mã, Theo tên sách, Theo số lượng" },
+   { "name": "Chọn \"Theo số lượng\"", "expected": "Menu đóng; bảng xếp theo số lượng giảm dần: KS-001, KS-003, KS-004, KS-002" }
+  ],
+  "ac": [{ "code": "KS-8", "content": "Sắp xếp danh sách theo mã, tên sách hoặc số lượng" }],
+  "preconditions": ["Kho có 4 đầu sách mẫu"],
+  "test_data": [],
+  "state": "ACTIVE"
+ }
+}

@@ -1,0 +1,383 @@
+{
+  "_doc": "Software factory settings for ONE project. This file lives in the project's own factory repository, never inside the project. /auto-factory:code init fills the project-specific parts. Glob patterns use fnmatch: * also matches /.",
+  "project": {
+    "url": "",
+    "name": ""
+  },
+  "_doc_project": "The project's git URL. The factory clones it for each job (deleted after the push) and never touches anyone's own checkout.",
+  "language": "",
+  "base_branch": "main",
+  "work_dir": "../{factory}-work",
+  "_doc_work_dir": "Local folder (outside both repositories) for the clones: <KEY>/ per job, deleted once its branch is pushed; short-lived _read/, _selftest/, _knowledge/ clones.",
+  "clone": {
+    "filter": "blob:none"
+  },
+  "_doc_clone": "filter: partial clone that downloads file contents on demand (faster); empty for full clones.",
+  "copy_into_worktree": [],
+  "copy_from": "",
+  "_doc_copy_into_worktree": "Untracked files every clone needs (for example .env), copied from copy_from (default: local/ in the factory repository, which is git-ignored). Never commit secrets.",
+  "setup": "",
+  "dev_server": "",
+  "max_rounds": 3,
+  "ports": {
+    "base": 5100,
+    "step": 10
+  },
+  "_doc_ports": "Every clone that runs the project's stack (a job, a package of a split build, a candidate, a review's sandbox) gets its own block of `step` ports from `base` up, handed out for the whole machine, so two projects on one machine never share one. FACTORY_PORT is the first port of the block; the rest are the clone's to use.",
+  "_doc_lanes": "Optional: work that must not overlap between jobs, because of files they share in this repository. \"lanes\": [{\"name\": \"ui\", \"surfaces\": [\"ui\"], \"paths\": [\"qa\"], \"why\": \"the UI tests and reference images in qa/ are shared by every job\"}]. A job with one of the surfaces takes the lane when its build starts and keeps it until it is handed off and what it changed under paths is committed; another such job does its intake and spec, then waits. paths are also what every other job reads as committed: a job that does not hold the lane gets its own copy of each such folder, as committed, under its job folder, and the project's commands are told where in FACTORY_LANE_<PATH> (the path in capitals, anything else as _: qa is FACTORY_LANE_QA; the job that holds the lane gets the folder itself there), so no job is checked with another job's half-done tests. A script of the project has to read the variable: until one on the checks' side of this repository names it, fx makes no copy and every job reads the folder itself, and fx lane status says which file names it. fx lane setup writes this; an empty list means the question was asked and the answer was no.",
+  "_doc_overrides": "What a human allows for one job only is not written here but in overrides/<job>.json, by fx override: existing tests it may change (unprotect) and findings accepted for it (accepted_rules), with who allowed it (approved). Committed and pushed like this file.",
+  "gate_timeout_sec": 1800,
+  "reuse": {
+    "_doc": "One run of the checks script for a commit. The builder runs it with fx checks, and fx keeps the result with the commit and a fingerprint of everything else the script reads: the script, this file without what only judges findings afterwards (security.accepted_rules, security.block_severity), every file of this repository the checks could read, committed or not (not jobs/, knowledge/, logic/, lessons.md, overrides/, .claude/), the reference images, and the local files copied into the clone. enabled: the gate and fx pr do not run the script a second time on that same commit with that same fingerprint, and say so in their reports; and after a round that failed at the security scan alone, once a human accepted findings, the next round on the same commit and scan settings judges that round's ZAP reports by the rules as they are now, and only scans again when something in them still blocks. Nothing else is left out: every other step of the gate runs, a failure is never used again, and what fx pr merges and pushes is checked as it is. max_age_hours: for how long a pass, or a scan's reports, are used. Change it with fx reuse --on | --off | --max-age-hours N (the user asks, fx writes), then commit and push this file.",
+    "enabled": true,
+    "max_age_hours": 24
+  },
+  "setup_timeout_sec": 1800,
+  "app": {
+    "_doc": "Optional. One command that starts the app for a job. Placeholders: {port}, {db}, {job}. Env: FACTORY_PORT, FACTORY_DB, FACTORY_JOB, COMPOSE_PROJECT_NAME. It may keep running (a dev server) or exit after starting containers.",
+    "up": "",
+    "down": "",
+    "health": "/",
+    "start_timeout_sec": 180,
+    "db_template": "factory_{job}",
+    "schema": "",
+    "_doc_schema": "Optional. A command that prints the database STRUCTURE ONLY (never rows) of the job's database, for example `mysqldump --no-data {db}` or `pg_dump --schema-only {db}` or the framework's schema dump. fx selftest saves it for init and the agents.",
+    "accounts_file": "knowledge/environment.md"
+  },
+  "e2e": "",
+  "_doc_workspace": "Optional, when this project shares issues with other repositories: \"workspace\": {\"name\": \"be\", \"project\": \"PROJ\", \"components\": [\"backend\"], \"labels\": [], \"order\": 10}. Lower order is merged first. Committed, so a teammate only answers where the folder is on their machine; the folder itself is never in this file.",
+  "_doc_e2e": "Optional e2e command run by the gate against the job's running app; BASE_URL is set. Example: npx playwright test --reporter=line",
+  "e2e_timeout_sec": 1800,
+  "best_of_max": 4,
+  "style_policy": "block-clear",
+  "_doc_style_policy": "How the code reviewer treats code that departs from knowledge/style.md: block-clear (clear departures block, small ones are notes), block-all, or note.",
+  "tests": {
+    "_doc": "Test expectations. test_first: case kinds the builder writes as failing tests before the code. commit_e2e: if-present = add e2e tests to the repo only when it already has an e2e suite; always; never.",
+    "test_first": [
+      "authorization",
+      "data-isolation"
+    ],
+    "commit_e2e": "if-present"
+  },
+  "ui_checks": {
+    "_doc": "Playwright UI checks on the job's running app (needs app.up). The builder writes ui/check.js in the job folder; the gate re-runs it every round. Playwright and axe are installed for the factory, outside the repo (fx tools install). design.test_repo: the git URL of the project's auto test repository; with it, t.design in a check measures a screen against the design package (the ticket's, else the auto test's current one) with the auto test's own comparer, thresholds, screen size and profile, read from a copy fx keeps in this machine's cache. A heavy difference does not fail the gate: the UI reviewer decides each one. look_model: the model of the UI reviewer, who looks at each screen next to its design (never below it, whatever models says).",
+    "enabled": true,
+    "look_model": "opus",
+    "design": {
+      "test_repo": ""
+    },
+    "viewports": [
+      [
+        1280,
+        800
+      ],
+      [
+        390,
+        844
+      ]
+    ],
+    "a11y_block": [
+      "critical",
+      "serious"
+    ],
+    "block_on_console_errors": true,
+    "block_on_status": 500
+  },
+  "mobile": {
+    "_doc": "app: what init asked, whether the project has a mobile app: this (this repository is the app: the rest of this block is filled), elsewhere (the app is another repository, app_repo, with a factory of its own), later (not yet: when this repository becomes an app, the next UI check stops and asks for the rest), no. Only for a mobile app (empty platforms: a web). The UI check of a job, of a review and the auto test then run the app on virtual phones instead of a browser (fx mobile, Appium); everything else stays the same. platforms: android and/or ios (iOS simulators need macOS). build.<p>: the project's command that builds the app from the job's clone, pointed at the job's API: {api_url} in the command, or the FACTORY_API_URL variable (an Android emulator reaches this machine at 10.0.2.2, fx gives it that address). android: the App Bundle (.aab), what every check runs on; android_apk: the APK, the auto test checks it installs and opens; ios: a simulator build (.app). artifact.<p>: the file it makes (a path or glob in the clone). app_id: the Android package and the iOS bundle id. api_path: added to the job's app address (app.up starts the job's own API) to make the app's API address. preset: the screen sizes (ends, standard, full). min_os: the oldest version the app supports (Android API level, iOS version); the phones run the oldest of those this machine can run, the newest and one in the middle, or exactly versions.<platform> when set. The auto test runs every size on every version; code and review run the smallest phone on the oldest version and the largest on the newest.",
+    "app": "",
+    "app_repo": "",
+    "platforms": [],
+    "build": {
+      "android": "",
+      "android_apk": "",
+      "ios": ""
+    },
+    "artifact": {
+      "android": "",
+      "android_apk": "",
+      "ios": ""
+    },
+    "app_id": {
+      "android": "",
+      "ios": ""
+    },
+    "api_path": "",
+    "min_os": {
+      "android": "",
+      "ios": ""
+    },
+    "versions": {
+      "android": [],
+      "ios": []
+    },
+    "preset": "standard"
+  },
+  "security": {
+    "_doc": "Standards the security reviewer applies, and scanners the gate runs (installed for the factory, outside the repo). block_severity: findings at or above it that the job introduced fail the gate; secrets always block; lower ones go to the security reviewer. accepted_rules: a list of {\"rule\": id from security.md, \"path\": glob of the files, or of the site's paths for ZAP and the header check (* stays in one folder, ** crosses them), \"reason\": why a human accepted it}, a false positive say; it stops blocking there but stays in the report; secrets and suppressions cannot be accepted. scanners: a missing block or key means on; only false turns one off, and the gate lists it as skipped. Without Docker (missing or not running) ZAP is only listed as skipped, unless zap is in required. required: scanners that must run, else the gate fails; fx install marks their tools required and fx doctor checks them and fx doctor and fx selftest try semgrep and osv for real (semgrep needs the network for its rules unless semgrep_config points at local ones; osv needs a lockfile to read). The scans never read the clone's .gitleaks.toml, .gitleaksignore, gitleaks:allow or nosemgrep comments or osv-scanner.toml; rules come from gitleaks_config, semgrep_config (one set or a list; empty = fx's list) and osv_config (paths in the factory repository, or for semgrep registry names; empty = the tools' defaults). Suppressions the job adds (nosemgrep, nosem, gitleaks:allow, ignore entries) block unless allow_suppressions is true. semgrep_exclude: folder and file names semgrep skips, in this repository where the builder cannot change them (no slash: at any depth; a slash: from the top); what a job itself changes there is scanned anyway. Findings below high in test code are reported but do not block; when the file has no test's own name, a human must look. zap_image: pin it as name@sha256:<digest>; a moving tag is noted in the gate. zap_mode: baseline only watches the traffic; full also attacks the running app (SQL injection, XSS and the like) for at most zap_minutes, and writes junk through every form it finds: choose it only when app.up gives each job a throw-away database. Run fx selftest again after changing it, zap_openapi, zap_auth or the image. zap_openapi: where the running app serves its OpenAPI description (a path such as /openapi.json); ZAP then also scans those routes. zap_auth: lets ZAP past the login; command prints the header's value for a test account once the app runs (it gets FACTORY_PORT and the like); the value goes only to the ZAP container, which sends it only to the app's host, and is taken out of its reports. strip_env / pass_env: extra variable names or globs to keep from project code, and names it may see after all (fx never passes JIRA_*, GH_TOKEN, GITHUB_TOKEN, GITLAB_TOKEN, GLAB_*, CI_JOB_TOKEN and the like to setup, checks.sh, the app, e2e, seed.sh, ui/check.js or the scanners).",
+    "asvs_level": "L2",
+    "standards": [
+      "OWASP ASVS 5.0",
+      "OWASP Top 10:2025",
+      "OWASP API Security Top 10",
+      "CWE Top 25"
+    ],
+    "block_severity": "medium",
+    "accepted_rules": [],
+    "verify_findings": true,
+    "scanners": {
+      "gitleaks": true,
+      "osv": true,
+      "semgrep": true,
+      "zap": true,
+      "headers": true
+    },
+    "required": [
+      "gitleaks",
+      "osv",
+      "semgrep"
+    ],
+    "allow_suppressions": false,
+    "gitleaks_config": "",
+    "semgrep_exclude": [
+      "node_modules",
+      "vendor",
+      "dist",
+      "build",
+      "*.min.js",
+      "*.bundle.js"
+    ],
+    "semgrep_config": [
+      "p/default",
+      "p/owasp-top-ten",
+      "p/cwe-top-25",
+      "p/phpcs-security-audit",
+      "p/kubernetes"
+    ],
+    "osv_config": "",
+    "zap_image": "ghcr.io/zaproxy/zaproxy:stable",
+    "zap_mode": "baseline",
+    "zap_minutes": 20,
+    "zap_openapi": "",
+    "zap_auth": {
+      "header": "Authorization",
+      "command": ""
+    },
+    "strip_env": [],
+    "pass_env": []
+  },
+  "_doc_review": "Optional, for /auto-factory:review only: other repositories whose merge requests this factory reviews, as well as the project. Each: {\"name\": \"fe\", \"url\": \"git@gitlab.com:group/fe.git\", \"ui_paths\": [], \"setup\": \"\", \"app\": {\"up\": \"\", \"down\": \"\", \"health\": \"/\"}} (ui_paths empty means the ones above; setup and app say how to start it in the throw-away sandbox every review runs the code in, in a container, since the code is a colleague's; without them a review of that repository stops and asks you). Their knowledge is in knowledge/repos/<name>/, written with fx review learn <name>. Jobs are still for the project alone. A repository's own \"checks\", like [\"pnpm ds:check\"], run in the sandbox and go to the reviewers (for the project: review.checks here). design_parent: the ticket a sub-task for the design or the Spec goes under, when not next to the reviewed one. design_max_mb: the largest design package fx downloads with a Jira token (default 200). In the jira block, subtask_type names your sub-task type (default Sub-task), and code_owner links the codes other tickets define, like {\"MSG\": \"ABC-1\", \"API-01\": \"ABC-24\"}.",
+  "review": {
+    "repos": []
+  },
+  "models": {
+    "review": {
+      "checklist": "sonnet",
+      "requirement": "opus",
+      "code": "sonnet",
+      "security": "opus",
+      "ux": "sonnet",
+      "ui": "opus",
+      "verifier": "opus"
+    },
+    "_doc": "Never below sonnet: fx raises anything lower to sonnet. high = intake rated the issue high risk.",
+    "floor": "sonnet",
+    "low": {
+      "intake": "sonnet",
+      "spec": "sonnet",
+      "builder": "sonnet",
+      "security": "sonnet",
+      "code": "sonnet",
+      "ux": "sonnet",
+      "ui": "opus",
+      "approver": "opus"
+    },
+    "high": {
+      "intake": "sonnet",
+      "spec": "opus",
+      "builder": "opus",
+      "security": "opus",
+      "code": "sonnet",
+      "ux": "sonnet",
+      "ui": "opus",
+      "approver": "opus"
+    },
+    "builder_last_round": "opus",
+    "judge": "opus",
+    "verifier": "opus",
+    "librarian": "opus",
+    "knowledge_reviewer": "opus",
+    "logic_writer": "opus",
+    "planner": "opus"
+  },
+  "reviewers": {
+    "always": [
+      "security",
+      "code"
+    ],
+    "ui": [
+      "ux",
+      "ui"
+    ]
+  },
+  "frozen_paths": [
+    ".claude/*",
+    "AGENTS.md",
+    "CLAUDE.md"
+  ],
+  "protected_paths": [],
+  "sensitive_paths": [
+    "*migrations/*",
+    "*migrate/*",
+    "*/schema.*",
+    "*.sql",
+    "package.json",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "composer.json",
+    "composer.lock",
+    "requirements*.txt",
+    "pyproject.toml",
+    "poetry.lock",
+    "Pipfile*",
+    "go.mod",
+    "go.sum",
+    "Cargo.toml",
+    "Cargo.lock",
+    "Gemfile*",
+    "pom.xml",
+    "build.gradle*",
+    "*.csproj",
+    "pubspec.yaml",
+    "pubspec.lock",
+    ".env*",
+    "*secret*",
+    "*credential*",
+    "*auth*",
+    "*permission*",
+    "*polic*",
+    ".github/*",
+    ".gitlab-ci.yml",
+    "bitbucket-pipelines.yml",
+    "Jenkinsfile",
+    "azure-pipelines.yml",
+    "Dockerfile*",
+    "*/Dockerfile*",
+    "docker-compose*",
+    "*.tf",
+    "infra/*",
+    "terraform/*",
+    "k8s/*",
+    "helm/*",
+    "deploy/*",
+    ".gitleaks.toml",
+    "*/.gitleaks.toml",
+    ".gitleaksignore",
+    "*/.gitleaksignore",
+    ".semgrepignore",
+    "*/.semgrepignore",
+    "osv-scanner.toml",
+    "*/osv-scanner.toml"
+  ],
+  "artifact_paths": [
+    "*__pycache__*",
+    "*.pyc",
+    "coverage/*",
+    "*.log",
+    ".DS_Store",
+    "dist/*",
+    "build/*",
+    "out/*",
+    "target/*",
+    "test-results/*",
+    "playwright-report/*",
+    "blob-report/*",
+    "shots/*"
+  ],
+  "ui_paths": [
+    "*.html",
+    "*.css",
+    "*.scss",
+    "*.less",
+    "*.vue",
+    "*.jsx",
+    "*.tsx",
+    "*.svelte",
+    "*.blade.php",
+    "*.erb",
+    "*.twig"
+  ],
+  "jira": {
+    "_doc": "base_url is set from the first Jira link (or by /auto-factory:code init). transitions: status names to move the issue to when work starts and when the PR is open; empty = do not move it. review_changes and conflict are for /auto-factory:review: where a ticket goes back to a dev after findings or a merge conflict, once the reviewer agrees; empty = it keeps its status.",
+    "mode": "auto",
+    "base_url": "",
+    "transitions": {
+      "start": "",
+      "review": "",
+      "review_changes": "",
+      "conflict": ""
+    },
+    "comment": true,
+    "download_attachments": true,
+    "max_attachment_mb": 5
+  },
+  "pr": {
+    "_doc_create": "true: fx pr opens or updates the pull request with gh/glab after pushing. false: it only pushes the branch and a human opens the pull request; learning still reads its comments when gh/glab can find it.",
+    "create": false,
+    "provider": null,
+    "labels": [
+      "factory"
+    ],
+    "needs_human_label": "factory:needs-human",
+    "draft_when_incomplete": true
+  },
+  "_doc_language": "Language the factory uses to talk to people (questions, Jira comments). Empty = the language the user writes in.",
+  "_doc_protected_paths": "Existing tests: a job may add tests but not modify or delete these. /auto-factory:code init fills it from the repo's test layout.",
+  "_doc_sensitive_paths": "Changing these always needs a human (data, dependencies, auth, CI, infrastructure). /auto-factory:code init adds the repo's own.",
+  "_doc_storage": "Optional: this project's own place on S3 for the factory's files. /auto-factory:code init always asks the user which one: never guess it or reuse another project's. {\"storage\": {\"type\": \"s3\", \"bucket\": \"\", \"region\": \"\", \"endpoint\": \"\", \"prefix\": \"\"}}. endpoint: empty for AWS, else an S3-compatible service such as MinIO. prefix: the project's folder, empty when the bucket is only this project's. Each part of the factory has its own folder under it: <prefix>/baselines/ today, more later. Keys never go here or in git: s3-read.env and s3-write.env (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, optional AWS_SESSION_TOKEN) in the machine's keys folder that fx baselines status prints as keys_folder, or read_profile and write_profile here naming AWS profiles. The read key needs s3:GetObject and s3:ListBucket, the write key s3:PutObject. A jobs_store may have its own write key: s3-jobs-write.env or jobs_write_profile, with s3:PutObject only on <prefix>/jobs/*.",
+  "_doc_baselines": "Optional: the UI's reference images (pixel comparison baselines) in this project's storage instead of in git. Without this key they are ordinary files. Add {\"baselines\": {\"dir\": \"qa/ui-qa/baselines\", \"manifest\": \"qa/ui-qa/baselines.lock.json\"}}. manifest: the list of path, sha256 and size in git, which is the source of truth; dir: the git-ignored folder, any binary files. folder: its folder in the storage (default baselines). repo: factory (default, both in this repository) or project (both in the project, so each job's branch carries its own list). Objects are <prefix>/<folder>/sha256/<2 chars>/<hash>, never overwritten or deleted. See fx baselines status | sync | record | push | migrate | diff.",
+  "_doc_jobs_store": "Optional: each job's folder in this project's storage, so a broken machine does not lose its specs, reviews, decisions and history, and another machine can carry on. Without this key jobs stay on this machine and nothing changes. Add {\"jobs_store\": {\"folder\": \"jobs\", \"auto\": true, \"include_audits\": false, \"include_reviews\": false, \"exclude\": [\"_audits/*/sandbox/\", \"**/node_modules/\", \"**/vendor/\", \"**/composer-cache/\"], \"max_file_mb\": 50}}. folder: its folder in the storage (default jobs). auto: push after fx pr and fx audit-import. include_audits: also push jobs/_audits, off by default because audit reports describe holes that are not fixed yet; /auto-factory:code init asks separately. exclude: paths under jobs/ to leave out, with a slash at the end for a folder, * inside one folder and ** across folders; _audits/*/sandbox/ is always left out. max_file_mb: larger files stay behind. Files found by gitleaks or holding a local secret stay behind too, and so do archives fx cannot read. fx jobs status, fx status, fx pr and fx doctor name all of these as held_back, and what exclude names is not among them. Objects are <prefix>/<folder>/sha256/<2 chars>/<hash> and <prefix>/<folder>/snapshots/<job>/<UTC>-<hash>.json, never overwritten or deleted by fx: do not set a lifecycle rule on sha256/ alone, or old snapshots break. See fx jobs push | status | list | pull.",
+  "_doc_ui_paths": "Changing these adds the UX and UI reviewers. /auto-factory:code init narrows it to the repo's real UI folders.",
+  "learning": {
+    "_doc": "Self-learning. After each job (ask_after: job), at the end of a run of several issues (run), or only on /auto-factory:code lessons (never), the factory reads what it can learn from: its own reviewers' blocking findings, the human's rework notes, review comments on the pull request (gh/glab) and commits a human pushed to the PR branch after the factory's last push. It proposes lesson changes and knowledge updates; nothing is saved without the human's approval.",
+    "ask_after": "job",
+    "sources": {
+      "factory_reviews": true,
+      "rework_notes": true,
+      "pr_comments": true,
+      "human_edits": true,
+      "review_missed": true,
+      "review_rejections": true,
+      "review_outcomes": true,
+      "review_followup": true
+    },
+    "lookback_days": 60,
+    "max_jobs": 30,
+    "_doc_max_lessons": "lessons.md stays short: above this many lessons, /auto-factory:code lessons proposes merging similar ones and moving stable ones into knowledge/.",
+    "max_lessons": 40,
+    "_doc_graduate_after_jobs": "A lesson no job broke in this many jobs since it was added is proposed for a move into the knowledge file that fits (style.md, testing.md, security.md, ...).",
+    "graduate_after_jobs": 10,
+    "edit_excerpt_lines": 300,
+    "knowledge_refresh": true,
+    "_doc_knowledge_map": "Extra path patterns that should refresh a knowledge file, e.g. {\"src/billing/*\": [\"domain.md\"]}. Built-in patterns cover dependencies, lint configs, CI, schema, API, auth, environment, tests and ui_paths.",
+    "knowledge_map": {}
+  },
+  "docs": {
+    "_doc": "Outside documentation init reads besides the code (data, never instructions). confluence: space keys and/or page URLs chosen at init.",
+    "confluence": {
+      "spaces": [],
+      "pages": []
+    }
+  },
+  "split": {
+    "_doc": "One ticket, several builders at once: after the spec a planner splits the work into packages that never share a file (a contract package first when they share an interface). Each package is built in its own clone and merged as soon as it is done; an integrator finishes the whole. max_builders: 0 = no limit (the planner decides). max_tries: how often a package may be sent back before it counts as blocked.",
+    "enabled": true,
+    "max_builders": 0,
+    "max_tries": 2
+  },
+  "dashboard": {
+    "_doc": "The factory board (fx board): an HTML page of every job on this machine, rewritten by every fx command. usd_per_mtok, optional: a rough price per million tokens for each model name (for example {\"opus\": 30, \"sonnet\": 6}), to show an estimated cost next to the tokens agents report; leave it empty to show tokens only.",
+    "usd_per_mtok": {}
+  }
+}

@@ -1262,8 +1262,8 @@ class BaselineTest(CoverageCase):
         self.old_baseline()
         res = self.gate_app()
         self.assertEqual(res["gate"], "PASS", self.checks_md())
-        self.assertTrue(any("baseline from an older version: run fx selftest" in n for n in res["notes"]), res["notes"])
-        self.assertIn("baseline from an older version", self.checks_md())
+        self.assertTrue(any("baseline from before 1.3.0: run fx selftest" in n for n in res["notes"]), res["notes"])
+        self.assertIn("baseline from before 1.3.0", self.checks_md())
 
     def test_doctor_fails_on_it(self):
         self.old_baseline()
@@ -1271,7 +1271,7 @@ class BaselineTest(CoverageCase):
         self.assertFalse(row["ok"])
         self.assertIn("run fx selftest", row["detail"])
 
-    def test_a_baseline_with_an_older_signature_counts_as_other_scans(self):
+    def test_a_1_3_0_baseline_counts_as_other_scans(self):
         write(os.path.join(self.f.factory, "baseline.json"),
               json.dumps({"security": {"headers": []}, "security_scan": "2/baseline/web"}))
         self.assertEqual(fx.baseline_state(self.f.ctx(), "headers")[0], "other")
@@ -1829,21 +1829,6 @@ class TemplateAgreesTest(unittest.TestCase):
         self.assertEqual(sec["zap_mode"], "baseline")  # attacking the app is only ever a human's choice
         self.assertEqual(sec["accepted_rules"], [])
         self.assertEqual(sec["semgrep_exclude"], fx.SEMGREP_EXCLUDE)
-
-    def test_the_jira_mode_is_left_to_init(self):
-        cfg = load_json(TEMPLATE)
-        self.assertEqual(cfg["jira"]["mode"], "")  # init writes mcp or token; until then fx reads it as no mode
-        self.assertNotIn(cfg["jira"]["mode"], fx.JIRA_MODES)
-        for words in ("mcp", "token", fx.JIRA_ENV, "JIRA_EMAIL", "JIRA_API_TOKEN", "keys_folder",
-                      "fx jira children, finished and statuses", "Confluence is read through the connector"):
-            self.assertIn(words, cfg["jira"]["_doc"])
-
-    def test_the_s3_rule_is_described(self):
-        cfg = load_json(TEMPLATE)
-        self.assertNotIn("storage", cfg)
-        self.assertNotIn("jobs_store", cfg)  # a factory without S3 keeps its jobs on its machine
-        self.assertIn("fx where prints it as keys_folder", cfg["_doc_storage"])
-        self.assertIn("fx doctor fails on storage without jobs_store", cfg["_doc_jobs_store"])
 
 
 if __name__ == "__main__":

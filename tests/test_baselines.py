@@ -331,9 +331,8 @@ class NewMachineTest(BaselinesCase):
 
     def test_parallel_sessions_do_not_collide(self):
         env = self.f.env()
-        cmd = [sys.executable, "-I", FX_PATH, "baselines", "sync"]
-        procs = [subprocess.Popen(cmd, env=env, cwd=self.f.factory, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                 for _ in range(4)]
+        cmd = [sys.executable, "-I", FX_PATH, "--repo", self.f.factory, "baselines", "sync"]
+        procs = [subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) for _ in range(4)]
         for p in procs:
             out_, _ = p.communicate(timeout=60)
             self.assertEqual(p.returncode, 0, out_)
@@ -895,8 +894,8 @@ class NoBaselinesTest(FxTestCase):
         write(os.path.join(self.f.factory, "checks.sh"), 'env > "$FX_TEST_OUT/checks.env"\nexit 0\n')
         self.f.commit({"app.py": "x = 1\n"})
         code, res = self.gate()
-        self.assertEqual(sorted(res), ["flags", "gate", "job", "models", "next", "notes", "report", "reviewers",
-                                       "round", "rounds_left", "skipped"])
+        self.assertEqual(sorted(res), ["checks", "flags", "gate", "job", "models", "next", "notes", "report", "reviewers",
+                                       "round", "rounds_left", "skipped"])  # checks: since 1.9, whether the script ran
         self.assertEqual(res["gate"], "PASS", self.checks_md())
         self.assertNotIn("Baselines", self.checks_md())
         self.assertNotIn("FACTORY_BASELINES", slurp(os.path.join(self.f.out, "checks.env")))
@@ -932,17 +931,6 @@ class NoBaselinesTest(FxTestCase):
     def test_local_secret_values_ignore_key_files_without_the_block(self):
         write(os.path.join(self.f.factory, "local", "s3-read.env"), "AWS_SECRET_ACCESS_KEY=abcdef123456\n")
         self.assertEqual(fx.local_secret_values(self.f.ctx()), set())
-
-
-class ImagesWithoutJobsTest(BaselinesCase):
-    """Reference images on S3 and no jobs_store: with S3, jobs always go there too."""
-
-    def test_doctor_asks_for_the_jobs_store(self):
-        code, res = self.fx("doctor")
-        self.assertTrue(self.check(res, "baselines settings")["ok"])
-        row = self.check(res, "jobs store settings")
-        self.assertFalse(row["ok"])
-        self.assertIn("S3 is set up but jobs are not kept there", row["detail"])
 
 
 class SettingsLostTest(BaselinesCase):

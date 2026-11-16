@@ -1,0 +1,10 @@
+{
+  "books": [
+    { "id": "b1", "code": "KS-101", "name": "Những ngày thơ ấu", "author": "Nguyên Hồng", "qty": 5, "status": "in" },
+    { "id": "b2", "code": "KS-102", "name": "Chí Phèo", "author": "Nam Cao", "qty": 0, "status": "out" },
+    { "id": "b3", "code": "KS-103", "name": "Vang bóng một thời", "author": "Nguyễn Tuân", "qty": 9, "status": "in" }
+  ],
+  "demo": {
+    "newBook": { "code": "KS-104", "name": "Bỉ vỏ", "author": "Nguyên Hồng" }
+  }
+}

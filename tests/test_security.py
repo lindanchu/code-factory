@@ -1,4 +1,4 @@
-"""Security tests for fx (code-factory 2.0.0).
+"""Security tests for fx (auto-code-factory 1.8.0).
 
 Standard library only. Run from the repository root:
     python3 -I -m unittest discover -s tests
@@ -15,19 +15,19 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import stat
 import subprocess
 import sys
 import tempfile
-import time
 import unicodedata
 import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SKILL = os.path.join(ROOT, "plugins", "code-factory", "skills", "factory")
+SKILL = os.path.join(ROOT, "plugins", "auto-factory", "skills", "code")
 FX_PATH = os.path.join(SKILL, "fx")
 TEMPLATE = os.path.join(SKILL, "templates", "config.json")
 
@@ -108,7 +108,11 @@ elif name == "semgrep":
     if mode == "old" and "--x-ignore-semgrepignore-files" in args:
         sys.stderr.write("Error: No such option: --x-ignore-semgrepignore-files\n")
         sys.exit(2)
-    print(os.environ.get("STUB_SEMGREP_OUT", json.dumps({"results": [], "errors": []})))
+    canned = os.environ.get("STUB_SEMGREP_FILE")
+    if canned and os.path.exists(canned):
+        print(open(canned).read())
+    else:
+        print(os.environ.get("STUB_SEMGREP_OUT", json.dumps({"results": [], "errors": []})))
 elif name == "osv-scanner":
     if "--version" in args:
         print("osv-scanner version: %%s" %% os.environ.get("STUB_OSV_VERSION", "2.7.0"))
@@ -252,9 +256,8 @@ class Factory:
         return job
 
     def job(self):
-        """job.json with its first changed repository's fields at the top as well, as fx shows it."""
         with open(os.path.join(self.jd, "job.json")) as f:
-            return fx.job_flat_copy(json.load(f))
+            return json.load(f)
 
     def commit(self, files, msg="change"):
         for rel, text in files.items():
@@ -295,7 +298,10 @@ class FxTestCase(unittest.TestCase):
                 "GIT_COMMITTER_EMAIL": "t@example.com",
                 "FACTORY_STATE_DIR": os.path.join(self.tmp, "state"),  # fx writes its board here, not in ~/.cache
                 "FACTORY_TOOLS_DIR": os.path.join(self.tmp, "tools"),  # a machine's installed tools are not on PATH
-                "FACTORY_WORKSPACE": os.path.join(self.tmp, "machine", "workspace.json")}  # nor its keys or workspace
+                "FACTORY_WORKSPACE": os.path.join(self.tmp, "machine", "workspace.json"),  # nor its keys or workspace
+                "FACTORY_SAMPLE_SEC": "0",  # a step does not measure this machine while a test runs it,
+                "FACTORY_FAKE_MACHINE": os.path.join(self.tmp, "machine.json")}  # nor wait for room on it: see below
+        write(base["FACTORY_FAKE_MACHINE"], json.dumps({"cpus": 256, "host": {"total_mb": 4096000}}))
         p = mock.patch.dict(os.environ, base)
         p.start()
         self.addCleanup(p.stop)
@@ -310,9 +316,7 @@ class FxTestCase(unittest.TestCase):
         code = 0
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
             try:
-                if not (os.getcwd() + os.sep).startswith(self.f.factory + os.sep):  # fx runs in its factory
-                    os.chdir(self.f.factory)
-                fx.main(list(argv))
+                fx.main(["--repo", self.f.factory] + list(argv))
             except SystemExit as e:
                 code = e.code
         os.chdir(self.cwd)
@@ -455,7 +459,7 @@ class EnvStripTest(FxTestCase):
         env = fx.project_env(ctx)
         self.assertIn("GITHUB_TOKEN", env)
         self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
-        # only what project code gets is stripped: fx's own environment is as it was
+        # fx's own Jira calls still see the token
         self.assertEqual(os.environ["JIRA_API_TOKEN"], "jira-secret-value")
 
     def test_checks_setup_seed_and_scanners_get_no_tokens(self):
@@ -478,7 +482,7 @@ class EnvStripTest(FxTestCase):
         ctx = self.f.ctx()
         captured = {}
 
-        def fake_run(cmd, cwd=None, check=True, capture=True, env=None, timeout=None, input_text=None):
+        def fake_run(cmd, cwd=None, check=True, capture=True, env=None, timeout=None, input_text=None, group=False):
             captured["env"] = env
             return subprocess.CompletedProcess(cmd, 0, "", "")
         with mock.patch.object(fx, "playwright_ok", return_value=(True, "ok")), \
@@ -733,17 +737,27 @@ class FactorySettingsTest(FxTestCase):
               'cd "%s"\necho "# later" >> factory.json\ngit add factory.json\ngit commit -q -m tune\nexit 0\n' % self.fac)
         self.commit_all("checks that commit")
         code, res = self.gate()
-        self.assertEqual(res["gate"], "FAIL", res)
-        self.assertIn("changed while it ran", self.checks_md())
-        self.assertIn("factory.json", self.checks_md())
+        self.assert_the_round_did_not_count(code, res)
+        self.assertIn("factory.json", res["error"])
+
+    def assert_the_round_did_not_count(self, code, res):
+        """Settings that changed under a gate never let it pass, and a human hears of it (exit 3). It is nobody's
+        failed round either: another job's commit to the factory repository does the same to a job whose code is fine."""
+        self.assertEqual(code, 3, res)
+        self.assertTrue(res["void"], res)
+        self.assertIn("changed while it ran", res["error"])
+        job = self.f.job()
+        self.assertEqual((job["round"], job["stage"], job.get("gate")), (0, "build", None), job)
+        self.assertFalse(os.path.exists(os.path.join(self.f.jd, "round-1")))
+        self.assertTrue(os.path.isdir(os.path.join(self.f.jd, "round-1-void-1")))
+        self.assertEqual(res["next"], "gate")
 
     def test_what_checks_runs_cannot_change_them_unnoticed(self):
         write(os.path.join(self.fac, "checks.sh"),
               'echo "# later" >> "%s/factory.json"\nexit 0\n' % self.fac)
         self.commit_all("checks that reach out")
         code, res = self.gate()
-        self.assertEqual(res["gate"], "FAIL", res)
-        self.assertIn("changed while it ran", self.checks_md())
+        self.assert_the_round_did_not_count(code, res)
 
 
 class FactoryRulesTest(FactorySettingsTest):
@@ -859,8 +873,11 @@ class SomethingElseOnThePortTest(FxTestCase):
             self.f.save_job(port=other.getsockname()[1])
             self.f.commit({"app.py": "x = 1\n"})
             code, res = self.gate()
-        self.assertEqual(res["gate"], "FAIL", self.checks_md())
-        self.assertIn("already answers", self.checks_md())
+        # Never taken for the app, so never a PASS; and not the job's failed round either: its code may be fine.
+        self.assertEqual(code, 3, res)
+        self.assertIn("already answers", res["error"])
+        self.assertTrue(res["void"], res)
+        self.assertEqual((self.f.job()["round"], self.f.job().get("gate")), (0, None))
         self.assertFalse(os.path.exists(fx.app_state_path(self.f.ctx(), self.f.job())))
 
     def test_a_free_port_is_tried_as_usual(self):
@@ -873,47 +890,6 @@ class SomethingElseOnThePortTest(FxTestCase):
             info = fx.app_start(self.f.ctx(), self.f.job())
         self.assertEqual(info["reused"], False)
         os.killpg(load_json(fx.app_state_path(self.f.ctx(), self.f.job()))["pid"], 15)
-
-
-APP_SERVER = r'''
-import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
-class H(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
-    def log_message(self, *a): pass
-HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
-'''
-
-
-class AppUpThatExitsTest(FxTestCase):
-    """app.up may start the app and exit, as `docker compose up -d` does: the app is still the one fx started."""
-
-    def test_a_later_fx_finds_it_running(self):
-        server = os.path.join(self.tmp, "server.py")
-        write(server, APP_SERVER)
-        with socket.socket() as free:
-            free.bind(("127.0.0.1", 0))
-            port = free.getsockname()[1]
-        self.f.save_job(port=port)
-        cfg = load_json(os.path.join(self.f.factory, "factory.json"))
-        cfg["app"] = {"up": "(nohup %s %s {port} >/dev/null 2>&1 &)" % (sys.executable, server), "health": "/health",
-                      "down": "pkill -f '%s {port}' ; true" % server, "start_timeout_sec": 15}
-        write(os.path.join(self.f.factory, "factory.json"), json.dumps(cfg))
-        self.addCleanup(subprocess.run, ["pkill", "-f", "%s %d" % (server, port)])
-        ctx, job = self.f.ctx(), self.f.job()
-        self.assertFalse(fx.app_start(ctx, job)["reused"])
-        self.assertTrue(load_json(fx.app_state_path(ctx, job))["detached"])
-        # app.up's shell has exited, so its pid says nothing: without the mark the port would look taken by a stranger
-        self.assertTrue(fx.app_start(ctx, job)["reused"])
-        fx.app_stop(ctx, job)
-        for _ in range(50):
-            with socket.socket() as s:
-                if s.connect_ex(("127.0.0.1", port)) != 0:
-                    break
-            time.sleep(0.1)
-        else:
-            self.fail("the app still answers after app.down")
 
 
 class WhatTheGateMeasuresFromTest(FxTestCase):
@@ -1141,7 +1117,7 @@ class ZapWithoutDockerTest(FxTestCase):
             self.assertIn("note", self.approve())
 
     def test_headers_failing_still_counts_as_missed(self):
-        self.headers = lambda ctx, job, url: ([], "the app did not answer")  # on the instance: never bound
+        self.headers = staticmethod(lambda ctx, job, url: ([], "the app did not answer"))
         code, res = self.gate_with_app()
         self.assertEqual(self.f.job()["security_missed"], ["headers"])
 
@@ -1692,7 +1668,7 @@ class VerifierTest(FxTestCase):
 
 class OutgoingTextTest(FxTestCase):
     base_files = {"README.md": "project\n"}
-    cfg = {"copy_into_worktree": [".env"], "jira": {"mode": "mcp"}, "security": {"required": []}}
+    cfg = {"copy_into_worktree": [".env"], "jira": {"mode": "agent"}, "security": {"required": []}}
 
     def setUp(self):
         super().setUp()
@@ -1788,9 +1764,37 @@ class ScriptTest(unittest.TestCase):
     def test_versions_agree(self):
         with open(os.path.join(SKILL, "VERSION")) as f:
             v = f.read().strip()
-        with open(os.path.join(ROOT, "plugins", "code-factory", ".claude-plugin", "plugin.json")) as f:
+        with open(os.path.join(ROOT, "plugins", "auto-factory", ".claude-plugin", "plugin.json")) as f:
             self.assertEqual(json.load(f)["version"], v)
-        self.assertEqual(v, "2.0.0")
+        with open(os.path.join(ROOT, "plugins", "auto-factory", "skills", "code", "shared", "VERSION")) as f:
+            self.assertEqual(f.read().strip(), v)  # the two skills ship together
+        self.assertEqual(v, "1.10.0")
+
+    def test_three_commands(self):
+        """/auto-factory:code and /auto-factory:review (no auto test here): a plugin skill's command is
+        <plugin>:<skill>, and its folder carries the same name as its frontmatter."""
+        plugin = os.path.join(ROOT, "plugins", "auto-factory")
+        with open(os.path.join(plugin, ".claude-plugin", "plugin.json")) as f:
+            self.assertEqual(json.load(f)["name"], "auto-factory")
+        with open(os.path.join(ROOT, ".claude-plugin", "marketplace.json")) as f:
+            entry = json.load(f)["plugins"][0]
+        self.assertEqual((entry["name"], entry["source"]), ("auto-factory", "./plugins/auto-factory"))
+        heads = {}
+        for name in sorted(os.listdir(os.path.join(plugin, "skills"))):
+            with open(os.path.join(plugin, "skills", name, "SKILL.md"), encoding="utf-8") as f:
+                text = f.read()
+            self.assertTrue(text.startswith("---\nname: %s\n" % name), name)  # install.sh renames line 2
+            heads[name] = text
+        self.assertEqual(sorted(heads), ["code", "review"])
+        # the review follows the code command's own rules, from the file next to it
+        self.assertIn("${CLAUDE_SKILL_DIR}/../code/SKILL.md", heads["review"])
+        self.assertIn("`review $ARGUMENTS`", heads["review"])
+        self.assertIn("### `/auto-factory:review [<MR link or Jira key>]`", heads["code"])
+        # fx's own messages name the new commands
+        with open(FX_PATH, encoding="utf-8") as f:
+            fx_text = f.read()
+        self.assertIsNone(re.search(r"(?<![\w.-])/(factory|autotest)\b(?![/\w-])", fx_text.replace(
+            "skills/factory", "")))
 
 
 if __name__ == "__main__":
