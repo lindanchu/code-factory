@@ -5,6 +5,3 @@ Not a command. `fx` takes from this folder what a UI check needs to measure a sc
 - `runtime/uicheck/`: the comparer of a screen with its design package (web pages and app screens);
 - `runtime/app.js`: how a UI check drives a mobile app on a virtual phone (Appium);
 - `txlib/design.py` (with `txlib/core.py`): the reading of a design package into its state table.
-
-They are the same files as in auto-code-factory, so that both measure a screen the same way. Change them there,
-then copy them here again.

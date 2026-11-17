@@ -85,6 +85,9 @@ def load(path):
     return json.loads(slurp(path))
 
 
+# Settings fx init writes in each repository entry of factory.json (a value there replaces the top level's).
+REPO_KEYS = ("setup", "app", "e2e", "copy_into_worktree", "protected_paths")
+
 class Box:
     """One machine, as far as fx can tell: its own HOME, state, tools and PATH. Every fx is a separate process."""
 
@@ -189,9 +192,12 @@ class Box:
         conf["security"] = {"required": [], "scanners": {"zap": False, "headers": False}}
         conf["learning"] = {"ask_after": "never"}
         conf["ports"] = {"base": PORT_BASE, "step": 10}
+        for key in REPO_KEYS:  # a repository's own settings (init writes them in its entry, where they win)
+            if key in conf_changes and conf.get("repos"):
+                conf["repos"][0][key] = conf_changes.pop(key)
         conf.update(conf_changes)
         write(path, json.dumps(conf, indent=1))
-        write(os.path.join(factory, "checks.sh"), checks)
+        write(self.checks_script(factory), checks)
         kdir = os.path.join(factory, "knowledge")
         for fname in os.listdir(kdir):
             p = os.path.join(kdir, fname)
@@ -201,6 +207,12 @@ class Box:
         sh(["git", "add", "-A"], factory, self.env)
         sh(["git", "commit", "-q", "-m", "factory"], factory, self.env)
         return factory
+
+    @staticmethod
+    def checks_script(factory):
+        """The checks script of the factory's repository: checks/<repo>.sh (checks.sh for a factory without repos)."""
+        repos = load(os.path.join(factory, "factory.json")).get("repos")
+        return os.path.join(factory, "checks", "%s.sh" % repos[0]["name"]) if repos else os.path.join(factory, "checks.sh")
 
     def issue_file(self, factory, key, summary="Do the thing"):
         self.n += 1
@@ -222,7 +234,10 @@ class Box:
         return os.path.join(factory, "jobs", job, "job.json")
 
     def job(self, factory, job):
-        return load(self.job_path(factory, job))
+        """job.json with its first changed repository's fields at the top as well, as fx shows it (edit writes them
+        back at the top, where fx takes them for that repository's)."""
+        from test_security import fx
+        return fx.job_flat_copy(load(self.job_path(factory, job)))
 
     def edit(self, factory, job, **changes):
         j = self.job(factory, job)
@@ -416,7 +431,7 @@ class NewJobTest(BoxCase):
 
     def test_a_branch_of_the_issue_already_on_the_remote_is_said(self):
         f = self.box.factory("twice")
-        origin = load(os.path.join(f, "factory.json"))["project"]["url"]
+        origin = load(os.path.join(f, "factory.json"))["repos"][0]["url"]
         sh(["git", "branch", "factory/TWO-1-from-another-machine", "main"], origin, self.box.env)
         res = self.box.new(f, "TWO-1")
         self.assertTrue(any("factory/TWO-1-from-another-machine" in n for n in res["notes"]), res)
@@ -570,7 +585,7 @@ class SettingsChangeUnderAGateTest(BoxCase):
         self.wait_for(lambda: os.path.exists(os.path.join(self.box.out, "checks-run")), what="the gate's checks to run")
         path = os.path.join(f, "factory.json")
         conf = load(path)
-        conf["protected_paths"] = ["tests/unlocked-for-another-job.txt"]
+        conf["repos"][0]["protected_paths"] = ["tests/unlocked-for-another-job.txt"]
         write(path, json.dumps(conf, indent=1))
         sh(["git", "commit", "-q", "-am", "Unlock a test for OTHER-9 (user approved)"], f, self.box.env)
         code, res = self.box.result(gate)

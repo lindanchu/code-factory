@@ -93,7 +93,7 @@ def _run(cmd, timeout=600, env=None, cwd=None, check=False):
 
 
 def cache_dir():
-    d = os.path.expanduser(os.environ.get("FACTORY_MOBILE_DIR") or "~/.cache/auto-code-factory/mobile")
+    d = os.path.expanduser(os.environ.get("FACTORY_MOBILE_DIR") or "~/.cache/code-factory/mobile")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -278,7 +278,7 @@ class Host:
 
     def win_dir(self):
         """A folder on Windows for the files Windows programs read (WSL only)."""
-        d = os.path.join(self.win_var("LOCALAPPDATA"), "auto-code-factory", "mobile")
+        d = os.path.join(self.win_var("LOCALAPPDATA"), "code-factory", "mobile")
         os.makedirs(d, exist_ok=True)
         return d
 

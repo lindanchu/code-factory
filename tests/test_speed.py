@@ -928,7 +928,7 @@ class PackageChecksTest(SplitCase):
     def test_the_whole_checks_script_is_not_run_for_a_package(self):
         f, job = self.split(checks=self.COUNT)
         self.box.fx(f, "wp", "next", job)
-        script = os.path.join(f, "checks.sh")
+        script = self.box.checks_script(f)
         for argv in (["run", "--job", job, "--wp", "wp0", "--", "bash", script], ["checks", job, "--wp", "wp0"]):
             p = self.run_fx(f, *argv)
             res = json.loads(p.stdout)
@@ -1232,14 +1232,14 @@ class WaitsTest(BoxCase):
 # 6. a job that does not hold a lane reads the lane's folders as committed
 
 READS_THE_VARIABLE = """#!/usr/bin/env bash
-QA="${FACTORY_LANE_QA:-$(cd "$(dirname "$0")" && pwd)/qa}"
+QA="${FACTORY_LANE_QA:-$(cd "$(dirname "$0")" && git rev-parse --show-toplevel)/qa}"  # the factory repository's qa/
 echo "$QA" > "$FX_TEST_OUT/dir-$FACTORY_JOB.txt"
 cat "$QA"/*.spec.ts > "$FX_TEST_OUT/seen-$FACTORY_JOB.txt"
 echo ran >> "$FX_TEST_OUT/ran-$FACTORY_JOB"
 exit 0
 """
 READS_THE_FOLDER = """#!/usr/bin/env bash
-QA="$(cd "$(dirname "$0")" && pwd)/qa"
+QA="$(cd "$(dirname "$0")" && git rev-parse --show-toplevel)/qa"
 env | grep '^FACTORY_LANE_' | cut -d= -f2- > "$FX_TEST_OUT/dir-$FACTORY_JOB.txt"  # what it is told; it reads none of it
 cat "$QA"/*.spec.ts > "$FX_TEST_OUT/seen-$FACTORY_JOB.txt"
 exit 0
@@ -1318,9 +1318,9 @@ class LaneCopyTest(BoxCase):
         write(os.path.join(f, "README.md"), "Scripts read FACTORY_LANE_QA to find the QA suite.\n")  # a text reads nothing
         code, res = self.box.fx(f, "lane", "status")
         folder = res["lanes"][0]["folders"][0]
-        self.assertEqual((folder["variable"], folder["named_in"]), ("FACTORY_LANE_QA", ["checks.sh"]), res)
+        self.assertEqual((folder["variable"], folder["named_in"]), ("FACTORY_LANE_QA", ["checks/lane.sh"]), res)
         rows = {c["check"]: c for c in self.box.fx(f, "doctor")[1]["checks"]}
-        self.assertIn("qa: FACTORY_LANE_QA is read by checks.sh", rows["other jobs read a lane's folder as committed (advice)"]["detail"])
+        self.assertIn("qa: FACTORY_LANE_QA is read by checks/lane.sh", rows["other jobs read a lane's folder as committed (advice)"]["detail"])
         self.assertIn("for 24 hours", rows["a pass of the checks script is used again (reuse)"]["detail"])
         other = self.factory(READS_THE_FOLDER, name="notyet")
         rows = {c["check"]: c for c in self.box.fx(other, "doctor")[1]["checks"]}
@@ -1401,7 +1401,7 @@ class LaneCopyTest(BoxCase):
     def test_setup_and_the_builders_own_commands_read_the_same_copy(self):
         f = self.factory(name="same")
         conf = load(os.path.join(f, "factory.json"))
-        conf["setup"] = 'echo "$FACTORY_LANE_QA" > "$FX_TEST_OUT/setup-dir.txt"; cat "$FACTORY_LANE_QA/suite.spec.ts" > "$FX_TEST_OUT/setup-seen.txt"'
+        conf["repos"][0]["setup"] = 'echo "$FACTORY_LANE_QA" > "$FX_TEST_OUT/setup-dir.txt"; cat "$FACTORY_LANE_QA/suite.spec.ts" > "$FX_TEST_OUT/setup-seen.txt"'
         write(os.path.join(f, "factory.json"), json.dumps(conf, indent=1))
         self.commit(f, "setup")
         api = self.box.new(f, "API-1")["job"]

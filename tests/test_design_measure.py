@@ -311,7 +311,7 @@ class VietnameseNamesTest(unittest.TestCase):
 
 
 def node_modules():
-    for d in (os.environ.get("FACTORY_TEST_NODE_PATH"), os.path.expanduser("~/.cache/auto-code-factory/tools/node_modules")):
+    for d in (os.environ.get("FACTORY_TEST_NODE_PATH"), os.path.expanduser("~/.cache/code-factory/tools/node_modules")):
         if d and os.path.isdir(os.path.join(d, "playwright")):
             return d
     return None

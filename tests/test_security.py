@@ -1,4 +1,4 @@
-"""Security tests for fx (auto-code-factory 1.8.0).
+"""Security tests for fx.
 
 Standard library only. Run from the repository root:
     python3 -I -m unittest discover -s tests
@@ -256,8 +256,9 @@ class Factory:
         return job
 
     def job(self):
+        """job.json with its first changed repository's fields at the top as well, as fx shows it."""
         with open(os.path.join(self.jd, "job.json")) as f:
-            return json.load(f)
+            return fx.job_flat_copy(json.load(f))
 
     def commit(self, files, msg="change"):
         for rel, text in files.items():
@@ -1768,7 +1769,7 @@ class ScriptTest(unittest.TestCase):
             self.assertEqual(json.load(f)["version"], v)
         with open(os.path.join(ROOT, "plugins", "auto-factory", "skills", "code", "shared", "VERSION")) as f:
             self.assertEqual(f.read().strip(), v)  # the two skills ship together
-        self.assertEqual(v, "3.0.0")
+        self.assertEqual(v, "3.0.1")
 
     def test_three_commands(self):
         """/auto-factory:code and /auto-factory:review (no auto test here): a plugin skill's command is
