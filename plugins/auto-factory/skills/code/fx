@@ -935,7 +935,7 @@ def job_repos(ctx, job, default_name=None):
     flat = {k: job.pop(k) for k in JOB_REPO_FIELDS if k in job}
     if flat:
         name = job_primary(dict(job, repos=repos)) or default_name or (
-            ctx.repos[0]["name"] if ctx is not None and ctx.repos else "main")
+            old_job_repo(ctx, flat) if ctx is not None and ctx.repos else "main")
         repos.setdefault(name, {"role": "change"}).update(flat)
     for e in repos.values():
         if isinstance(e, dict):
@@ -943,6 +943,25 @@ def job_repos(ctx, job, default_name=None):
     job["repos"] = {n: e for n, e in repos.items() if isinstance(e, dict)}
     job["repo_order"] = job_order(job)
     return job_learn_split(job)
+
+
+def old_job_repo(ctx, flat):
+    """The repository an old job (its fields at the top, no repos{}) was made for: the one its clone's origin names, else
+    the one of factory.json's project.url (a factory where an older version wrote both project.url and repos), else
+    the first."""
+    if len(ctx.repos) > 1:
+        urls = [(ctx.cfg.get("project") or {}).get("url")]
+        wt = flat.get("worktree")
+        if isinstance(wt, str) and os.path.isdir(wt):
+            p = subprocess.run(["git", "-C", wt, "remote", "get-url", "origin"], stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, text=True, check=False)
+            if p.returncode == 0:
+                urls.insert(0, p.stdout.strip())
+        for url in urls:
+            for r in ctx.repos:
+                if same_repo(r.get("url"), url):
+                    return r["name"]
+    return ctx.repos[0]["name"]
 
 
 def job_show_flat(job):
@@ -2278,6 +2297,13 @@ def cmd_init(ctx, a):
             os.rmdir(os.path.join(knowledge_dir(ctx), "repos"))
     if old_form:
         proj.pop("url", None)
+    elif proj.get("url") or os.path.isfile(os.path.join(ctx.factory, "checks.sh")):
+        notes.append("%s at the top of the factory repository came from an older version that ran one repository per "
+                     "factory; this factory reads only repos and checks/<repo>.sh. Jobs of that version still find "
+                     "their repository. Remove them in a commit once none of those jobs is open" % " and ".join(
+                         x for x, there in (("factory.json's project.url", proj.get("url")),
+                                            ("checks.sh", os.path.isfile(os.path.join(ctx.factory, "checks.sh"))))
+                         if there))
     cfg["repos"] = repos
     if added:  # room in each job's block of ports for every repository's app, the agents' 3 and the candidates' apps
         ports = cfg.get("ports") if isinstance(cfg.get("ports"), dict) else {}

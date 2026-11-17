@@ -941,10 +941,14 @@ Commit and push the result. Jobs started before still load as jobs of that one r
 a whole project and its repositories (`repos` in `factory.json`, `checks/<repo>.sh`, `knowledge/<repo>/`, one job
 per issue across its repositories). It adds the review of a colleague's merge request (`/auto-factory:review`), UI
 checks of mobile apps on virtual phones, and several jobs at once on one machine. Its commands are
-`/auto-factory:code` and `/auto-factory:review` (2.0: `/code-factory:factory`). Once per machine, then once per
-factory repository:
+`/auto-factory:code` and `/auto-factory:review` (2.0: `/code-factory:factory`).
 
-1. **Finish the jobs that are running on 2.0** (or close them) before you switch.
+**Jobs in progress carry over**: a job started on 2.0 or 3.0.0 goes on with 3.0.2 from the stage it reached, in
+the clones it has. Once per machine, then once per factory repository:
+
+1. **Let what is running end.** Wait until no gate, checks or pull request command of a job is running, then close
+   every Claude Code session that runs jobs: a session keeps the plugin it started with. Apps a job left running
+   keep their ports; jobs started afterwards take others.
 2. **Replace the plugin**, from a terminal:
 
    ```
@@ -958,14 +962,26 @@ factory repository:
 3. **Check the tools again**, in a new session: `/auto-factory:code install`. This machine's keys stay where 2.0
    kept them (`~/.config/code-factory/keys/<keys_id>/`, from `keys_id` in `factory.json`).
 4. **Jira**: 3.x reads Jira through the Atlassian connector of Claude, or `JIRA_EMAIL` and `JIRA_API_TOKEN` in
-   the environment; 2.0's `jira.env` file is not read.
+   the environment; 2.0's `jira.env` file is not read. Jira steps a job left waiting are done when it resumes.
 5. **In each factory repository**: `/auto-factory:code init`. It keeps `factory.json`, `checks/`, `knowledge/`,
-   `logic/` and `lessons.md` as they are and refreshes this machine's settings; then `fx doctor`, and commit what
-   it changed.
+   `logic/` and `lessons.md` as they are and refreshes this machine's settings (at most it adds `keys_id`, lays
+   out `factory.json` again and makes the checks scripts executable); then `fx doctor`. Commit and push what it
+   changed: the gate refuses to run while the factory's settings are not committed.
+6. **Carry on with each job**, in a new session: `/auto-factory:code status` lists them, and
+   `/auto-factory:code resume <KEY>` continues one from its stage.
 
-**Installed 3.0.0?** It ran one repository per factory; 3.0.1 brings back the factory of a whole project. Update
-with `claude plugin marketplace update code-factory` and `claude plugin update auto-factory@code-factory`, then run
-`/auto-factory:code init` again in each factory repository.
+**Installed 3.0.0?** It ran one repository per factory. Update the plugin first on every machine that uses the
+factory (`claude plugin marketplace update code-factory`, then `claude plugin update auto-factory@code-factory`),
+since 3.0.0 cannot read a factory once it is converted. Then, in each factory repository, run
+`/auto-factory:code init` again, commit and push:
+
+- a factory 3.0.0 made for one repository (`project.url`, `checks.sh`) converts in place: `checks.sh` becomes
+  `checks/<repo>.sh` and the repository's knowledge moves into `knowledge/<repo>/`. Its open jobs carry on;
+- a 2.0 factory on which 3.0.0's init ran keeps its `repos`. Init then says that `project.url` and `checks.sh` at
+  the top are not read any more: remove them in a commit once no job made by 3.0.0 is open. Each such job carries
+  on in the repository it was cloned from (3.0.2 and later).
+
+Then step 6 above.
 
 ## Set up a project: `init`
 

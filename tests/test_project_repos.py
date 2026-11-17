@@ -433,6 +433,45 @@ class OldJobTest(ProjectCase):
         self.assertEqual(v["repos"][0]["name"], "shop")
 
 
+class OldJobInSeveralTest(ProjectCase):
+    """A job of an older version (fields at the top) in a factory of several repositories: it belongs to the
+    repository it was cloned from, not to whichever comes first."""
+
+    def old_job(self, wt=None):
+        write(os.path.join(self.factory, "jobs", "T-1", "job.json"), json.dumps({
+            "id": "T-1", "issue_key": "T-1", "stage": "build", "round": 0, "round_start": 0, "max_rounds": 3,
+            "branch": "factory/T-1-x", "worktree": wt or self.work("T-1"), "base_branch": "main",
+            "base_ref": "origin/main", "candidates": [], "history": []}))
+
+    def test_the_repository_its_clone_comes_from(self):
+        wt = self.work("T-1")
+        sh(["git", "clone", "-q", self.origin["fe"], wt], self.tmp)
+        self.old_job(wt)
+        job = self.ctx().load_exact("T-1")
+        self.assertEqual((job["repo_order"], job["worktree"]), (["fe"], wt))
+
+    def test_without_its_clone_the_one_project_url_names(self):
+        cfg = self.config()
+        cfg["project"]["url"] = self.origin["fe"]  # an older version's init wrote it next to repos
+        self.write_config(cfg)
+        self.old_job()
+        self.assertEqual(self.ctx().load_exact("T-1")["repo_order"], ["fe"])
+
+    def test_else_the_first(self):
+        self.old_job()
+        self.assertEqual(self.ctx().load_exact("T-1")["repo_order"], ["be"])
+
+    def test_init_says_what_the_older_version_left(self):
+        cfg = self.config()
+        cfg["project"]["url"] = self.origin["fe"]
+        self.write_config(cfg)
+        write(os.path.join(self.factory, "checks.sh"), CHECKS)
+        self.commit_factory()
+        res = self.ok("init")
+        self.assertTrue(any("project.url and checks.sh" in n for n in res["notes"]), res["notes"])
+        self.assertEqual(load_json(os.path.join(self.factory, "factory.json"))["project"]["url"], self.origin["fe"])
+
+
 # --------------------------------------------------------------------------
 # fx new
 
