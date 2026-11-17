@@ -113,7 +113,7 @@ REPO_KEY_GLOBS = ("setup", "copy_into_worktree", "copy_from", "clone", "clone.*"
                   "*_paths", "security.semgrep_exclude", "security.accepted_rules", "security.zap_*", "security.scanners",
                   "security.scanners.*", "ui_checks", "ui_checks.*", "pr.provider", "baselines", "baselines.*",
                   "learning.knowledge_map", "ports", "ports.*", "*_timeout_sec", "mobile", "mobile.*",
-                  "review.checks") + REPO_ONLY_KEYS
+                  "desktop", "desktop.*", "review.checks") + REPO_ONLY_KEYS
 # What a job keeps for each of its repositories (job.json's repos{}); everything else of a job is project-wide.
 JOB_REPO_FIELDS = ("branch", "worktree", "base_branch", "base_ref", "target_branch", "setup_done", "checks_passed_at",
                    "pushed_head", "pr_url", "pr_hint", "secret_reset_to", "secret_bounces", "clone_removed_at",
@@ -701,7 +701,7 @@ class Ctx:
             return v
         if key in REPO_ONLY_KEYS:
             return default
-        if (key == "mobile" or key.startswith("mobile.")) and len(self.repos) > 1:
+        if (key.split(".")[0] in ("mobile", "desktop")) and len(self.repos) > 1:
             return default  # with several repositories, only the app's own entry says it is an app
         return dotted_get(self.cfg, key, default)
 
@@ -2276,7 +2276,7 @@ def cmd_init(ctx, a):
         while any(x["name"] == name for x in repos):
             name = (name + "-2")[:31] if not name.endswith("-2") else name[:-2] + "-3"
         entry = {"name": name, "url": url}
-        for k in ("setup", "app", "ui_paths", "mobile", "copy_into_worktree", "protected_paths"):
+        for k in ("setup", "app", "ui_paths", "mobile", "desktop", "copy_into_worktree", "protected_paths"):
             if r.get(k) not in (None, "", [], {}):
                 entry[k] = r[k]
         if r.get("checks"):
@@ -3169,6 +3169,8 @@ def cmd_ctx(ctx, a):
                          ", ".join(uctx.c("ui_checks.a11y_block", ["critical", "serious"]) or []) or "none"))
         if mobile_conf(uctx):
             lines.append(mobile_line(uctx))
+        elif desktop_conf(uctx):
+            lines.append(desktop_line(uctx))
         if "ui" in (job.get("surfaces") or []) and agent in ("builder", "ui"):
             lines.append(design_line(uctx, job))
         if several:
@@ -8829,6 +8831,22 @@ def machine_status(ctx):
                 "xcode-simulators": "iOS simulators (Xcode)"}.get(row["name"], row["name"]),
                 "ok": row["ok"], "version": None, "path": None, "detail": row.get("detail") or "",
                 "auto": None, "manual": row.get("manual") or []})
+    if desktop_real_wanted(ctx):
+        # what the real desktop app needs on Windows, which fx cannot install itself (an installer, administrator rights)
+        purpose = {"rust-windows": "builds the desktop app on Windows (Rust, MSVC toolchain)",
+                   "msvc-build-tools": "Rust's linker on Windows (Visual Studio Build Tools, C++)",
+                   "webview2": "the web view the desktop app runs in (WebView2 Runtime)",
+                   "node-windows": "builds the app's front end on Windows, and carries the check to the app on NAT",
+                   "wsl-network": "how the check reaches the app (mirrored: straight; NAT: through node.exe)",
+                   "windows": "the real desktop app"}
+        try:
+            rows = DESK().WinHost().status()
+        except DESK().DesktopError as e:
+            rows = [{"name": "windows", "ok": False, "detail": str(e), "manual": []}]
+        for row in rows:
+            tools.append({"name": row["name"], "need": "recommended" if row["name"] == "wsl-network" else "required",
+                          "purpose": purpose.get(row["name"], row["name"]), "ok": row["ok"], "version": None,
+                          "path": None, "detail": row.get("detail") or "", "auto": None, "manual": row.get("manual") or []})
     required_ok = all(t["ok"] for t in tools if t["need"] == "required")
     res = {"ok": required_ok, "platform": "%s %s" % (osn, arch), "tools_bin": tools_bin(), "tools": tools,
            "factory": ctx.factory if ctx and ctx.cfg else None, "project_host": prov,
@@ -12994,15 +13012,20 @@ def job_design_unpack(ctx, job):
 # --------------------------------------------------------------------------
 # UI checks with Playwright
 
-def ui_run(ctx, job, script, out_dir):
+def ui_run(ctx, job, script, out_dir, real_app=True):
     """Run a Playwright check script against the job's running apps: BASE_URL is the app of ui_repo, and the script runs
     in that repository's clone with every app's URL (FACTORY_URL_<NAME>). Returns the parsed report. A repository that
-    is a mobile app runs the same script on its virtual phones instead (ui_run_mobile): only the way of running differs."""
+    is a mobile app runs the same script on its virtual phones instead (ui_run_mobile): only the way of running differs.
+    A desktop app runs it as its website and its window in the browser, then (real_app, when desktop.build.windows is
+    set) on the real app built for Windows (desktop_app_run)."""
     name = ui_repo(ctx, job) if is_whole_job(job) else job.get("repo")
     rctx, v = one_app(ctx, job, name)
     if mobile_conf(rctx):
         return ui_run_mobile(rctx, v, script, out_dir, mobile_conf(rctx))
     mobile_missing(rctx, v.get("worktree"))
+    dconf = desktop_conf(rctx)
+    if not dconf:
+        desktop_missing(rctx, v.get("worktree"))
     ok, why = playwright_ok()
     if not ok:
         return {"skipped": "Playwright is not available (%s): run /auto-factory:code install" % why}
@@ -13014,6 +13037,12 @@ def ui_run(ctx, job, script, out_dir):
     report_path = os.path.join(out_dir, "ui-report.json")
     if os.path.exists(report_path):
         os.remove(report_path)
+    desk_env, desk_notes = {}, []
+    if dconf:
+        # a desktop app: the same script also runs as the app's window, Tauri's IPC answered by mocks (desktop.py)
+        dsetup, desk_notes = DESK().check_setup(dconf, v["worktree"])
+        desk_env["FACTORY_UI_DESKTOP"] = os.path.join(out_dir, "desktop.json")
+        write_atomic(desk_env["FACTORY_UI_DESKTOP"], json.dumps(dsetup, indent=1, ensure_ascii=False) + "\n")
     try:
         denv, dtmp, dinfo = design_setup(rctx, v)
     except (OSError, ValueError, FxError) as e:  # measuring is an addition: without it the check still runs
@@ -13027,7 +13056,7 @@ def ui_run(ctx, job, script, out_dir):
                       FACTORY_UI_SHOTS=os.path.join(out_dir, "shots"),
                       FACTORY_UI_VIEWPORTS=json.dumps(rctx.c("ui_checks.viewports", [[1280, 800], [390, 844]])),
                       FACTORY_UI_BLOCK_STATUS=str(rctx.c("ui_checks.block_on_status", 500)),
-                      FACTORY_UI_DESIGN=denv["FACTORY_UI_DESIGN"])
+                      FACTORY_UI_DESIGN=denv["FACTORY_UI_DESIGN"], **desk_env)
     try:
         p = run(["node", script], cwd=v["worktree"], check=False, env=env,
                 timeout=int(rctx.c("e2e_timeout_sec", 1800)), group=True)
@@ -13037,12 +13066,21 @@ def ui_run(ctx, job, script, out_dir):
     finally:
         shutil.rmtree(dtmp, ignore_errors=True)
     write_atomic(os.path.join(out_dir, "ui.log"), log)
+    real = None
+    if dconf and real_app and ((dconf.get("build") or {}).get("windows")) and os.path.exists(report_path):
+        real = desktop_app_run(rctx, v, script, out_dir, dconf, env, report_path)
     try:
         rep_ = json.loads(read(report_path, "") or "")
     except ValueError:
         rep_ = {"error": "the check script wrote no report; see ui.log:\n" + "\n".join(log.splitlines()[-20:])}
     rep_["design_info"] = {"why": dinfo.get("why"), "viewport": dinfo.get("viewport"), "thresholds": dinfo.get("thresholds"),
                            "packages": ["%s (%d states)" % (p_["version"], len(p_["codes"])) for p_ in dinfo.get("packages") or []]}
+    if dconf and isinstance(rep_.get("desktop"), dict):
+        rep_["desktop"]["notes"] = desk_notes
+        if real is not None:
+            rep_["desktop"]["real"] = dict(rep_["desktop"].get("real") or {}, **real)
+        elif not (dconf.get("build") or {}).get("windows"):
+            rep_["desktop"]["notes"].append("the real app was not run: desktop.build.windows is not set")
     if not rep_.get("error"):
         write_atomic(report_path, json.dumps(rep_, indent=1, ensure_ascii=False) + "\n")
     return ui_judge(rctx, rep_)
@@ -13076,29 +13114,36 @@ def mobile_missing(ctx, root):
     """A repository that is a mobile app (it became one after init, or init was told "later") while the factory has no
     mobile set-up: its screens are not a web's, so the check stops and asks for the set-up instead of opening a browser
     on nothing. Init's answer "no" (this repository is not the app) is kept."""
+    app_missing(ctx, root, "mobile")
+
+
+def app_missing(ctx, root, kind):
+    """A repository that is an app of `kind` (mobile, desktop) by its files, while the factory has no set-up of that
+    kind for it: stop with next: setup-<kind> and where the set-up goes, unless init was told it is not one (<kind>.app
+    = no)."""
     if not root or not os.path.isdir(root):
         return
-    m = ctx.c("mobile") if ctx and getattr(ctx, "cfg", None) else None
+    m = ctx.c(kind) if ctx and getattr(ctx, "cfg", None) else None
     if isinstance(m, dict) and str(m.get("app") or "").lower() == "no":
         return
-    kind = MOB().app_kind(root)
-    if kind:
-        if isinstance(ctx, ReviewBoxCtx) and (ctx._repo.get("legacy") or not ctx._repo.get("primary")
-                                               and "repo" not in ctx._repo):
-            raise FxError("this repository looks like a mobile app (%s) and the factory has no mobile set-up for it: ask "
-                          "the user whether it is one (init's **Is there a mobile app?**); a yes goes through **A mobile "
-                          "app** into the mobile block of this repository's entry in review.repos. Commit and push the "
-                          "factory repository, then run this check again" % kind, code=3,
-                          extra={"next": "setup-mobile", "app": kind, "where": "review.repos[].mobile"})
-        name = ctx._repo.get("repo") if isinstance(ctx, ReviewBoxCtx) else getattr(ctx, "scope", None)
-        own = len(getattr(ctx, "repos", None) or ()) > 1 and name
-        raise FxError("this repository looks like a mobile app (%s) and the factory has no mobile set-up for it: ask the "
-                      "user whether it is one (init's **Is there a mobile app?**); a no is saved as mobile.app=no and "
-                      "nothing is asked again; a yes goes through **A mobile app** into %s. Commit and push the factory "
-                      "repository, then run this check again" % (
-                          kind, "the mobile block of %s's entry in repos" % name if own else "factory.json's mobile block"),
-                      code=3, extra={"next": "setup-mobile", "app": kind, "repo": name,
-                                     "where": "repos[%s].mobile" % name if own else "mobile"})
+    found = (MOB() if kind == "mobile" else DESK()).app_kind(root)
+    if not found:
+        return
+    ask = ("this repository looks like a %s app (%s) and the factory has no %s set-up for it: ask the user whether it "
+           "is one (init's **Is there a %s app?**); " % (kind, found, kind, kind))
+    if isinstance(ctx, ReviewBoxCtx) and (ctx._repo.get("legacy") or not ctx._repo.get("primary")
+                                           and "repo" not in ctx._repo):
+        raise FxError(ask + "a yes goes through **A %s app** into the %s block of this repository's entry in "
+                      "review.repos. Commit and push the factory repository, then run this check again" % (kind, kind),
+                      code=3, extra={"next": "setup-" + kind, "app": found, "where": "review.repos[].%s" % kind})
+    name = ctx._repo.get("repo") if isinstance(ctx, ReviewBoxCtx) else getattr(ctx, "scope", None)
+    own = len(getattr(ctx, "repos", None) or ()) > 1 and name
+    raise FxError(ask + "a no is saved as %s.app=no and nothing is asked again; a yes goes through **A %s app** into "
+                  "%s. Commit and push the factory repository, then run this check again" % (
+                      kind, kind, "the %s block of %s's entry in repos" % (kind, name) if own else
+                      "factory.json's %s block" % kind),
+                  code=3, extra={"next": "setup-" + kind, "app": found, "repo": name,
+                                 "where": "repos[%s].%s" % (name, kind) if own else kind})
 
 
 def mobile_devices(conf, host, preset):
@@ -13367,6 +13412,291 @@ def mobile_apk_check(M, host, a):
             M.shutdown(host, h)
 
 
+# --------------------------------------------------------------------------
+# a desktop app: its front end in the browser, Tauri's IPC answered by mocks (desktop.py, factory-desktop.js)
+
+_DESKTOP = []
+
+
+def DESK():
+    """The factory's desktop app helpers (desktop.py, next to this file)."""
+    if not _DESKTOP:
+        if SKILL_DIR not in sys.path:
+            sys.path.insert(0, SKILL_DIR)
+        import desktop as d  # noqa: E402
+        _DESKTOP.append(d)
+    return _DESKTOP[0]
+
+
+def desktop_conf(ctx):
+    """The project's desktop block (factory.json → desktop), when the repository is a desktop app: its framework
+    (tauri), the folder of its configuration (dir), the mocks file of its IPC (mocks), whether the front end is also
+    shipped as a website (web, default true) and the window sizes to check (viewports, default the main window's)."""
+    m = ctx.c("desktop") if ctx and getattr(ctx, "cfg", None) else None
+    return m if isinstance(m, dict) and str(m.get("framework") or "").lower() in DESK().FRAMEWORKS else None
+
+
+def desktop_real_wanted(ctx):
+    """Does this factory run the real desktop app on this machine (desktop.build.windows set for the project or one of
+    its repositories, the factory in WSL)?"""
+    if not ctx or not getattr(ctx, "cfg", None):
+        return False
+    try:
+        ctxs = [repo_ctx(ctx, n) for n in ctx.repo_names()] if len(getattr(ctx, "repos", None) or ()) > 1 else [ctx]
+        wanted = any(((desktop_conf(c) or {}).get("build") or {}).get("windows") for c in ctxs)
+    except Exception:  # noqa: BLE001 -- a check of the machine never fails on settings
+        wanted = False
+    return bool(wanted) and DESK().WinHost().wsl
+
+
+def cmd_desktop(ctx, a):
+    """fx desktop doctor: what this machine has for the real desktop app (Windows, from WSL) and how the check reaches it;
+    fx desktop clean: the factory's builds and copies of the code on Windows removed (they are made again)."""
+    D = DESK()
+    host = D.WinHost()
+    if a.action == "doctor":
+        try:
+            rows = host.status()
+            mode, why = host.runner() if host.wsl else (None, "not WSL")
+        except D.DesktopError as e:
+            out({"ok": False, "error": str(e)})
+            return
+        conf = desktop_conf(ctx) if ctx and getattr(ctx, "cfg", None) else None
+        out({"ok": all(r["ok"] for r in rows), "wsl": host.wsl, "rows": rows,
+             "reaches_the_app": {"direct": "straight (mirrored network)",
+                                 "tunnel": "through node.exe on Windows (NAT network)"}.get(mode), "cannot_run": why,
+             "project": {"framework": (conf or {}).get("framework"),
+                         "build": ((conf or {}).get("build") or {}).get("windows")} if conf else None})
+        return
+    if a.action == "build":
+        out(desktop_build_cli(ctx, a, host))
+        return
+    if not host.wsl:
+        out({"ok": True, "removed": [], "note": "not WSL: nothing of the factory's on Windows"})
+        return
+    try:
+        home = host.home()
+    except D.DesktopError as e:
+        out({"ok": False, "error": str(e)})
+        return
+    # never under a build or a check that runs now: every build's lock is taken (or the clean stops), and only the
+    # folders of runs that ended long ago (a run removes its own when it ends) go
+    locks = []
+    try:
+        names = sorted(f for f in os.listdir(D.lock_dir()) if f.endswith(".lock")) if os.path.isdir(D.lock_dir()) else []
+        for f in names:
+            lk = D._Lock(os.path.join(D.lock_dir(), f), wait_sec=0)
+            lk.__enter__()
+            locks.append(lk)
+    except D.DesktopError:
+        for lk in locks:
+            lk.__exit__(None, None, None)
+        out({"ok": False, "error": "a build of a desktop app is running: run fx desktop clean when it is done"})
+        return
+    removed = []
+    try:
+        for sub_ in ("builds", "src"):
+            d = os.path.join(home, sub_)
+            if os.path.isdir(d):
+                shutil.rmtree(d, ignore_errors=True)
+                removed.append(host.winpath(d))
+        runs = os.path.join(home, "runs")
+        for r in sorted(os.listdir(runs)) if os.path.isdir(runs) else []:
+            d = os.path.join(runs, r)
+            if time.time() - os.path.getmtime(d) > 6 * 3600:
+                shutil.rmtree(d, ignore_errors=True)
+                removed.append(host.winpath(d))
+    finally:
+        for lk in locks:
+            lk.__exit__(None, None, None)
+    out({"ok": True, "removed": removed})
+
+
+def desktop_build_cli(ctx, a, host):
+    """fx desktop build, for the auto test: the app built on Windows from a folder of code, pointed at an API. Answers
+    the .exe (kept by commit), and what a test needs to open it: the folder of runs and the tunnel (node.exe on NAT)."""
+    D = DESK()
+    conf = desktop_conf(ctx) if ctx and getattr(ctx, "cfg", None) else None
+    if a.conf:
+        try:
+            conf = json.loads(read(a.conf, "") or "{}")
+        except ValueError as e:
+            raise FxError("--conf is not JSON: %s" % e, code=2)
+    if not conf or not (conf.get("build") or {}).get("windows"):
+        raise FxError("no desktop.build.windows: the project's command that builds the app on Windows", code=2)
+    code = os.path.abspath(a.code or ".")
+    if not host.wsl:
+        return {"ok": False, "error": "the real app runs on Windows: run this in WSL there", "exit_code": 3}
+    try:
+        mode, why = host.runner()
+        why = why or (None if host.cargo() else "Rust is not installed on Windows") or \
+            (None if host.msvc() else "the MSVC build tools are not installed on Windows")
+        if why:
+            return {"ok": False, "error": why + " (fx desktop doctor)", "exit_code": 3}
+        api = a.api_url or ""
+        bconf = dict(conf, build=dict(conf.get("build") or {}))
+        bconf["build"]["windows"] = bconf["build"]["windows"].replace("{api_url}", api)
+        out_dir = os.path.abspath(a.out or os.path.join(code, ".factory-desktop"))
+        os.makedirs(out_dir, exist_ok=True)
+        log = os.path.join(out_dir, "app-build.log")
+        commit = a.commit or job_commit(code)
+        key = a.key or re.sub(r"[^A-Za-z0-9_-]", "_", os.path.basename(code.rstrip("/")))[:50]
+        exe, cached = host.build(bconf, code, key, "%s-%s" % (commit, hashlib.sha1(api.encode()).hexdigest()[:8]),
+                                 {"FACTORY_API_URL": api} if api else {}, log,
+                                 timeout=int(conf.get("build_timeout_sec") or 3600))
+        runs = os.path.join(host.home(), "runs")
+        os.makedirs(runs, exist_ok=True)
+        return {"ok": True, "exe": exe, "cached": cached, "log": None if cached else log, "commit": commit, "runs": runs,
+                "tunnel": host.node_exe() if mode == "tunnel" else None, "webview2": host.webview2(),
+                "reaches_the_app": "straight" if mode == "direct" else "through node.exe"}
+    except D.DesktopError as e:
+        return {"ok": False, "error": str(e), "kind": e.kind, "exit_code": 1 if e.kind == "build" else 3,
+                **({"log": e.extra.get("log")} if e.extra.get("log") else {})}
+
+
+def desktop_missing(ctx, root):
+    """A repository that is a desktop app (it became one after init, or init was told "later") while the factory has no
+    desktop set-up: its desktop screens call a Rust side a browser does not have, so the check stops and asks for the
+    set-up. Init's answer "no" (this repository is not the app) is kept."""
+    app_missing(ctx, root, "desktop")
+
+
+def desktop_line(ctx):
+    """The prompt line of an agent that writes or reads a UI check of a desktop app."""
+    conf = desktop_conf(ctx) or {}
+    web = conf.get("web", True)
+    mocks = conf.get("mocks")
+    real = bool((conf.get("build") or {}).get("windows"))
+    return ("This project is a desktop app (Tauri 2). The same `ui.run(async (t) => { ... })` runs %s: `t.variant` "
+            "says which. `desktop`: its front end in Chromium at the window's size%s, window.isTauri true and Tauri's "
+            "IPC answered by mocks, the real Rust side never running. %s"
+            "`t.desktop` is null on the website and { name, version, os: 'windows', real } in the app, so guard "
+            "desktop-only steps with `if (t.desktop)`, and steps that need a mocked answer with `if (t.ipc.mocked)`. "
+            "In the mocked app: `t.ipc.handle(cmd, (args, ctx) => value)` answers a command (before the mocks file; "
+            "throw for the command's Err), `t.ipc.emit(event, payload)` sends an event from the Rust side; a handler's "
+            "ctx has state (kept for the run), emit and channel(args.onX).send(message). In both apps "
+            "`t.ipc.calls(cmd)` lists the calls made ({ cmd, args, answered_by }) and `t.restart()` closes and opens the "
+            "app with its data kept. The mocks file is %s: a CommonJS module of { command: handler or value }, in the "
+            "repository, written and kept with the code: every #[tauri::command] the front end calls gets an answer "
+            "shaped like the Rust one, from the Rust code. Tauri's window, app, os, opener, notification and log "
+            "plugins answer by themselves, as on Windows; any other call with no answer fails the check (ipc.missing). "
+            "`cargo test` in checks.sh covers the Rust side" % (
+                ("as the website, as the mocked app (`desktop`)" if web else "as the mocked app (`desktop`)")
+                + (" and on the real app (`app`)" if real else ""),
+                " (Windows' WebView2 is a Chromium)",
+                ("`app`: the real app built on Windows from the job's code and started for the check, its Rust side "
+                 "answering, at its own window's size; the gate and `review ui` always run it, `fx ui --app` when you "
+                 "ask (it builds the app: minutes the first time, kept by commit). " if real else
+                 "The real app is not run (desktop.build.windows is not set): the window's CSP, CORS from "
+                 "http://tauri.localhost and WebView2 itself are not checked. "),
+                "`%s` (desktop.mocks)" % mocks if mocks else "not set (desktop.mocks): until it is, only t.ipc.handle and "
+                "the built-in answers reply"))
+
+
+def job_commit(worktree):
+    """The commit a build is made from, with a hash of what is not committed yet (a builder checks before it commits):
+    the changes to tracked files, and the content of every new file that is not ignored."""
+    commit = git(["rev-parse", "HEAD"], worktree, check=False).stdout.strip()
+    h = hashlib.sha1()
+    h.update(git(["diff", "HEAD", "--binary"], worktree, check=False).stdout.encode("utf-8", "replace"))
+    new = [f for f in git(["ls-files", "-z", "--others", "--exclude-standard"], worktree, check=False).stdout.split("\0") if f]
+    for f in sorted(new):
+        h.update(b"\0" + f.encode("utf-8", "replace") + b"\0")
+        try:
+            with open(os.path.join(worktree, f), "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+        except OSError:
+            pass   # gone meanwhile, or not a file: its name is in the hash
+    if new or git(["status", "--porcelain", "--untracked-files=no"], worktree, check=False).stdout.strip():
+        commit += "+" + h.hexdigest()[:12]
+    return commit
+
+
+def desktop_app_run(ctx, job, script, out_dir, conf, env, report_path):
+    """The real app: built on Windows from the job's clone (kept by commit), started with WebView2's DevTools port, and
+    the same script run on it as the variant `app`, adding to the report; Playwright reaches it straight when WSL shares
+    Windows' network, else through node.exe (factory-desktop.js). What this machine lacks is a note (the real app not
+    run); a build that fails is the job's. Returns what goes into the report's desktop.real."""
+    D = DESK()
+    host = D.WinHost()
+    if not host.wsl:
+        return {"skipped": "the real app runs on Windows: run the factory in WSL there"}
+    try:
+        mode, why = host.runner()
+        if not why and not host.cargo():
+            why = "Rust is not installed on Windows"
+        if not why and not host.msvc():
+            why = "the MSVC build tools are not installed on Windows"
+        if why:
+            return {"skipped": why + " (fx desktop doctor)"}
+        # the build points the app at the job's own apps: every FACTORY_URL_<NAME>, and {url:<repo>}, {port}... in the
+        # command; Windows reaches WSL's 127.0.0.1
+        urls = {k: v for k, v in env.items() if k.startswith("FACTORY_URL_") or k in ("FACTORY_APP_URLS", "BASE_URL")}
+        api = conf.get("api_repo")
+        if api and url_env_name(api) in urls:
+            urls["FACTORY_API_URL"] = urls[url_env_name(api)] + (conf.get("api_path") or "")
+        bconf = dict(conf, build=dict(conf.get("build") or {}))
+        bconf["build"]["windows"] = app_fill(bconf["build"]["windows"], job, app_db(ctx, job))
+        os.makedirs(out_dir, exist_ok=True)
+        log = os.path.join(out_dir, "app-build.log")
+        key = "%s-%s" % (re.sub(r"[^A-Za-z0-9_-]", "_", os.path.basename(getattr(ctx, "factory", None) or "factory")),
+                         job.get("repo") or "app")
+        # a build is the code and where it points: the same commit built for another job's (or sandbox's) addresses is
+        # another build
+        where = hashlib.sha1(json.dumps([bconf["build"]["windows"], sorted(urls.items())]).encode()).hexdigest()[:8]
+        t0 = time.time()
+        try:
+            exe, cached = host.build(bconf, job["worktree"], key, "%s-%s" % (job_commit(job["worktree"]), where), urls, log,
+                                     timeout=int(conf.get("build_timeout_sec") or 3600),
+                                     extra_files=ctx.c("copy_into_worktree", []) or [])
+        except D.DesktopError as e:
+            if e.kind == "build":
+                return {"build_error": str(e), "build_log": log}
+            return {"skipped": "the app could not be built here: %s" % e}
+        info = {"mode": "straight (mirrored network)" if mode == "direct" else "through node.exe (NAT network)",
+                "build": exe, "cached": cached, "build_log": log if not cached else None,
+                "build_sec": None if cached else int(time.time() - t0)}
+        run_ = host.new_run(exe)
+        try:
+            port = host.free_port(9300 + int(job.get("port") or 0) % 400)
+            setup, _ = D.check_setup(conf, job["worktree"])
+            setup["variants"] = ["app"]
+            setup["app_run"] = {"exe": run_["exe"], "port": port, "data": run_["data_win"], "wslenv": True,
+                                "tunnel": host.node_exe() if mode == "tunnel" else None,
+                                "stop_ps": D.ps_encoded(D.stop_script(run_["exe_win"], run_["data_win"])),
+                                "env": {k: str(v) for k, v in (conf.get("run_env") or {}).items()},
+                                "timeout_sec": int(conf.get("start_timeout_sec") or 90)}
+            setup_path = os.path.join(out_dir, "desktop-app.json")
+            write_atomic(setup_path, json.dumps(setup, indent=1, ensure_ascii=False) + "\n")
+            timeout = int(ctx.c("e2e_timeout_sec", 1800))
+            renv = dict(env, FACTORY_UI_DESKTOP=setup_path, FACTORY_UI_APPEND="1")
+            timed_out = False
+            try:
+                p = run(["node", script], cwd=job["worktree"], check=False, env=renv, timeout=timeout, group=True)
+                applog = p.stdout or ""
+            except subprocess.TimeoutExpired:
+                timed_out, applog = True, "the check on the real app timed out after %ss" % timeout
+            write_atomic(os.path.join(out_dir, "ui-app.log"), applog)
+        finally:
+            host.end_run(run_)
+        try:
+            rep_ = json.loads(read(report_path, "") or "")
+        except ValueError:
+            rep_ = None
+        real = ((rep_ or {}).get("desktop") or {}).get("real") or {}
+        if real.get("launch_error"):
+            # the app ran but its DevTools port never opened: this machine's (WebView2, Windows), not the code's
+            info["skipped"] = "the real app did not open for the check here: %s" % real["launch_error"]
+        elif timed_out:
+            info["error"] = "the check on the real app did not finish within %ss (see ui-app.log)" % timeout
+        elif not real.get("finished") and "[app]" not in str((rep_ or {}).get("error") or ""):
+            info["error"] = "the check on the real app stopped before its end (see ui-app.log)"
+        return info
+    except D.DesktopError as e:   # Windows did not answer as expected: this machine's, not the job's
+        return {"skipped": "the real app could not be run here: %s" % e}
+
+
 def ui_judge(ctx, rep_):
     block_a11y = set(ctx.c("ui_checks.a11y_block", ["critical", "serious"]) or [])
     if rep_.get("browser_missing"):
@@ -13381,20 +13711,40 @@ def ui_judge(ctx, rep_):
     for st in rep_.get("steps", []):
         if not st.get("ok"):
             blocking.append("UI step failed: %s: %s" % (st.get("name"), (st.get("error") or "")[:300]))
+    way = lambda x: "[%s] " % x["variant"] if x.get("variant") else ""   # a desktop app's website or window
     if ctx.c("ui_checks.block_on_console_errors", True):
         for c in rep_.get("console", [])[:10]:
-            blocking.append("browser console error on %s: %s" % (c.get("url"), c.get("text", "")[:200]))
+            blocking.append("%sbrowser console error on %s: %s" % (way(c), c.get("url"), c.get("text", "")[:200]))
     for r in rep_.get("requests", []):
         if r.get("blocking") or r.get("failure"):
-            blocking.append("request %s %s -> %s" % (r.get("method"), r.get("url"), r.get("status") or r.get("failure")))
+            blocking.append("%srequest %s %s -> %s" % (way(r), r.get("method"), r.get("url"), r.get("status") or r.get("failure")))
+    ipc, desk = rep_.get("ipc") or {}, rep_.get("desktop") or {}
+    real = desk.get("real") or {}
+    if desk.get("error"):
+        blocking.append("desktop: %s" % desk["error"][:300])
+    if real.get("build_error"):
+        blocking.append("desktop: the app did not build on Windows from this code: %s" % real["build_error"][:300])
+    if real.get("error"):
+        blocking.append("desktop: %s" % real["error"][:300])
+    if ipc.get("mocks_error"):
+        blocking.append("desktop: the mocks file %s cannot be loaded: %s" % (desk.get("mocks"), ipc["mocks_error"][:300]))
+    for cmd in ipc.get("missing") or []:
+        # the real app's Rust side answers it: with no answer here, the screen is not the one users see
+        blocking.append("desktop: the app called the command %s, which nothing answers here: add it to %s (or "
+                        "t.ipc.handle in the check), shaped like the Rust command's answer" % (
+                            cmd, desk.get("mocks") or "a mocks file (desktop.mocks)"))
     for v in rep_.get("a11y", []):
         if v.get("impact") in block_a11y:
             blocking.append("accessibility (%s) %s on %s: %s" % (v.get("impact"), v.get("id"), v.get("page"),
                                                                  v.get("help")))
     notes = ["accessibility (%s) %s on %s" % (v.get("impact"), v.get("id"), v.get("page"))
              for v in rep_.get("a11y", []) if v.get("impact") not in block_a11y]
-    notes += ["request %s %s -> %s" % (r.get("method"), r.get("url"), r.get("status"))
+    notes += ["%srequest %s %s -> %s" % (way(r), r.get("method"), r.get("url"), r.get("status"))
               for r in rep_.get("requests", []) if not r.get("blocking") and not r.get("failure")]
+    notes += ["desktop: %s" % n for n in desk.get("notes") or []]
+    if real.get("skipped"):
+        notes.append("desktop: the real app was not run: %s" % real["skipped"][:300])
+    notes += ["desktop: %s" % n for n in ipc.get("notes") or []]
     # Measured against the design: a heavy difference can be the package's own way of drawing, which no builder can
     # change, so it never fails the check; the UI reviewer decides each one (design_table_problems).
     for d in rep_.get("design") or []:
@@ -13420,9 +13770,50 @@ def ui_markdown(rep_, repo=None):
     body += ["## Steps", ""] + ["- %s %s" % ("PASS" if st["ok"] else "FAIL", st["name"]) for st in rep_.get("steps", [])]
     body += ["", "## Screenshots (open them to look)", ""] + ["- %s (%s): %s" % (sh["name"], sh["viewport"], sh["file"])
                                                              for sh in rep_.get("shots", [])]
+    body += desktop_markdown(rep_)
     body += design_markdown(rep_)
     md += (["## Repo: %s" % repo, ""] + md_demote(body)) if repo else body
     return "\n".join(md) + "\n"
+
+
+def desktop_markdown(rep_):
+    """A desktop app's part of ui.md: how its window was checked, and every IPC call the front end made."""
+    desk, ipc = rep_.get("desktop"), rep_.get("ipc") or {}
+    if not isinstance(desk, dict):
+        return []
+    app = desk.get("app") or {}
+    md = ["", "## Desktop app", "",
+          "%s %s (Tauri), ran as %s. In the app's window the front end ran in Chromium at %s, Tauri's IPC answered by "
+          "mocks (%s): the Rust side, the window's CSP, CORS from http://tauri.localhost and WebView2 itself were not "
+          "checked here." % (
+              app.get("name") or "app", app.get("version") or "", " and ".join(desk.get("variants") or ["desktop"]),
+              ", ".join("%sx%s" % tuple(v) for v in desk.get("viewports") or []) or "its window's size",
+              desk.get("mocks") or "no mocks file")]
+    real = desk.get("real") or {}
+    if real.get("origin"):
+        md += ["", "The real app, built for Windows%s, ran at %s in a window of %s, driven from %s; its IPC was "
+               "answered by its Rust side." % (
+                   " (a build kept from before)" if real.get("cached") else
+                   (" in %ss" % real["build_sec"] if real.get("build_sec") else ""), real["origin"],
+                   "x".join(map(str, real.get("window") or [])) or "its size", real.get("mode") or "Node")]
+    elif real.get("skipped"):
+        md += ["", "The real app was not run: %s." % real["skipped"]]
+    elif real.get("build_error"):
+        md += ["", "The real app did not build: %s." % real["build_error"]]
+    calls = ipc.get("calls") or []
+    if calls:
+        seen = {}
+        for c in calls:
+            k = (c.get("cmd"), c.get("answered_by"))
+            seen[k] = seen.get(k, 0) + 1
+        md += ["", "| Command | Answered by | Calls |", "|---|---|---|"]
+        cell = lambda v: str(v or "").replace("|", "\\|")   # plugin:app|version
+        md += ["| %s | %s | %d |" % (cell(k[0]), cell(k[1]), n) for k, n in sorted(seen.items(), key=lambda x: str(x[0]))]
+        if ipc.get("calls_dropped"):
+            md += ["", "%d more calls were not kept." % ipc["calls_dropped"]]
+    else:
+        md += ["", "The front end made no IPC call."]
+    return md
 
 
 def design_markdown(rep_):
@@ -13492,7 +13883,7 @@ def cmd_ui(ctx, a):
                  "blocking": ["ui seed.sh failed, see %s" % os.path.join(out_dir, "seed.log")], "notes": [],
                  "shots": [], "report": None})
             return
-    rep_ = ui_run(ctx, job, script, out_dir)
+    rep_ = ui_run(ctx, job, script, out_dir, real_app=bool(getattr(a, "app", False)))
     several = len(job_order(job)) > 1
     name = ui_repo(ctx, job)
     write_atomic(os.path.join(out_dir, "ui.md"), ui_markdown(rep_, name if several else None))
@@ -19126,6 +19517,9 @@ def review_ctx(ctx, a):
         if agent in ("runner", "ux", "ui") and mobile_conf(review_box_ctx(ctx, repo)):
             lines.append(mobile_line(review_box_ctx(ctx, repo)) + ". In a review the script is the one you give `review ui` "
                          "with --script: the sandbox's API at BASE_URL, the app built from the merge request's code")
+        elif agent in ("runner", "ux", "ui") and desktop_conf(review_box_ctx(ctx, repo)):
+            lines.append(desktop_line(review_box_ctx(ctx, repo)) + ". In a review the script is the one you give `review ui` "
+                         "with --script: the merge request's front end at BASE_URL")
         if agent in ("ux", "ui") and review_box_up(ctx, job):
             lines += ["The sandbox is still running at %s" % job["sandbox"]["url"],
                       "To look at it in a real browser: %s review ui %s --req R<n> --case \"<what>\" --script <a Playwright "
@@ -19209,17 +19603,18 @@ class ReviewBoxCtx:
         return self._ctx.rc(name, dotted, default)  # its entry in repos, else the project's default (ctx.rc)
 
     def _legacy(self, dotted, default):
-        """A repository of an older review.repos: its own app, setup, checks and mobile, else the factory's."""
+        """A repository of an older review.repos: its own app, setup, checks, mobile and desktop, else the factory's."""
         if dotted == "setup":
             return self._repo.get("setup") or default
         if dotted == "review.checks":
             return self._repo.get("checks") or default
         if dotted.startswith("app."):
             return (self._repo.get("app") or {}).get(dotted[4:], default)
-        if dotted == "mobile" or dotted.startswith("mobile."):
-            # an app or not by its own settings (review.repos[].mobile), never the project's
-            m = self._repo.get("mobile")
-            if dotted == "mobile":
+        if dotted.split(".")[0] in ("mobile", "desktop"):
+            # an app or not by its own settings (review.repos[].mobile, .desktop), never the project's
+            top = dotted.split(".")[0]
+            m = self._repo.get(top)
+            if dotted == top:
                 return m if m is not None else default
             for k in dotted.split(".")[1:]:
                 m = m.get(k) if isinstance(m, dict) else None
@@ -23008,6 +23403,15 @@ def build_parser():
     s.add_argument("--app-id", help="apk-check: the app's id")
     s.add_argument("--cmd-json", help="session: the command to run with the phones started, as a JSON list")
     s.set_defaults(fn=cmd_mobile)
+    s = sub.add_parser("desktop", help="the real desktop app on Windows: what this machine has, and its builds")
+    s.add_argument("action", choices=["doctor", "build", "clean"])
+    s.add_argument("--conf", help="build: a JSON file with the desktop block (default: factory.json's)")
+    s.add_argument("--code", help="build: the folder of the app's code (a git clone)")
+    s.add_argument("--commit", help="build: the commit it is at (default: its HEAD)")
+    s.add_argument("--api-url", help="build: the address of the API the app talks to (FACTORY_API_URL, {api_url})")
+    s.add_argument("--out", help="build: where its log goes")
+    s.add_argument("--key", help="build: the name its copy and builds are kept under on Windows (default: the code's folder)")
+    s.set_defaults(fn=cmd_desktop)
     s = sub.add_parser("override", help="what a human allows for one job only: an existing test it may change, a finding")
     s.add_argument("job")
     s.add_argument("--unprotect", action="append", metavar="PATH", help="an existing test (one of protected_paths) this job may change")
@@ -23108,6 +23512,8 @@ def build_parser():
     s.add_argument("--out")
     s.add_argument("--seed", action="store_true", help="run the job's ui/seed.sh first")
     s.add_argument("--candidate", type=int, help="best-of-N: check candidate K's worktree and ui-cK/ files")
+    s.add_argument("--app", action="store_true",
+                   help="a desktop app: also build the real app on Windows and run the check on it (the gate always does)")
     s.set_defaults(fn=cmd_ui)
     s = sub.add_parser("security", help="run the security scanners on a job now")
     s.add_argument("job")
@@ -23252,7 +23658,7 @@ def main(argv=None):
             if not os.path.isdir(target):
                 raise FxError("factory repository %s not found" % a.repo, code=3)
             os.chdir(target)
-        if a.fn in (cmd_install, cmd_tools, cmd_board, cmd_capacity, cmd_run, cmd_mobile):
+        if a.fn in (cmd_install, cmd_tools, cmd_board, cmd_capacity, cmd_run, cmd_mobile, cmd_desktop):
             try:
                 ctx = Ctx(require_config=False)  # a factory repository is optional here
             except FxError:

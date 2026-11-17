@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Report tool</title>
+</head>
+<body>
+<main>
+  <h1>Report tool</h1>
+  <p id="mode"></p>
+  <p id="settings"></p>
+  <p id="os"></p>
+  <p id="ver"></p>
+  <p id="size"></p>
+  <p id="sync">no sync</p>
+  <p id="progress"></p>
+  <p id="err"></p>
+  <button id="save">Save</button>
+  <button id="help">Help</button>
+  <button id="load">Load</button>
+  <button id="broken">Broken</button>
+</main>
+<script>
+// A made-up Tauri 2 front end. It calls the IPC exactly the way @tauri-apps/api 2.x does (core.js, event.js, app.js,
+// window.js, plugin-os, plugin-opener), written out here so the test needs no package: what the factory's page script
+// must provide is what this page reads.
+(async () => {
+  const $ = (id) => document.getElementById(id);
+  const isTauri = () => !!(globalThis || window).isTauri;
+  const invoke = (cmd, args = {}, options) => window.__TAURI_INTERNALS__.invoke(cmd, args, options);
+  const transformCallback = (cb, once = false) => window.__TAURI_INTERNALS__.transformCallback(cb, once);
+  const listen = (event, handler) => invoke('plugin:event|listen', { event, target: { kind: 'Any' },
+                                                                      handler: transformCallback(handler) });
+  const emit = (event, payload) => invoke('plugin:event|emit', { event, payload });
+  class Channel {   // the ordering of @tauri-apps/api's Channel, kept short
+    constructor() {
+      this.next = 0;
+      this.onmessage = () => {};
+      this.id = transformCallback((raw) => {
+        if ('end' in raw) { window.__TAURI_INTERNALS__.unregisterCallback(this.id); return; }
+        if (raw.index === this.next) { this.next += 1; this.onmessage(raw.message); }
+      });
+    }
+    toJSON() { return `__CHANNEL__:${this.id}`; }
+  }
+  $('mode').textContent = isTauri() ? 'desktop' : 'web';
+  if (!isTauri()) {
+    $('settings').textContent = 'theme from the browser';
+    return;
+  }
+  const s = await invoke('load_settings');
+  $('settings').textContent = 'theme ' + s.theme;
+  $('os').textContent = 'os ' + window.__TAURI_OS_PLUGIN_INTERNALS__.platform;
+  $('ver').textContent = 'version ' + await invoke('plugin:app|version');
+  const label = window.__TAURI_INTERNALS__.metadata.currentWindow.label;
+  const size = await invoke('plugin:window|inner_size', { label });
+  $('size').textContent = 'size ' + size.width;
+  await listen('sync-done', (e) => { $('sync').textContent = 'synced ' + e.payload.count; });
+  await listen('local', (e) => { $('sync').textContent = 'local ' + e.payload; });
+  $('save').onclick = async () => {
+    await invoke('save_settings', { settings: { theme: 'dark' } });
+    await emit('local', 'saved');
+  };
+  $('help').onclick = () => invoke('plugin:opener|open_url', { url: 'https://example.test/help' });
+  $('load').onclick = async () => {
+    const ch = new Channel();
+    ch.onmessage = (m) => { $('progress').textContent = 'progress ' + m; };
+    const r = await invoke('load_report', { onProgress: ch });
+    $('progress').textContent += ' rows ' + r.rows;
+  };
+  $('broken').onclick = async () => {
+    try { await invoke('fails'); } catch (e) { $('err').textContent = 'error ' + e; }
+  };
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Real Tauri</title></head>
+<body><main>
+<h1>Real Tauri</h1>
+<p id="mode"></p><p id="greet"></p><p id="sync">no sync</p><p id="err"></p>
+<button id="again">Greet again</button>
+</main>
+<script>
+const T = window.__TAURI__;
+const $ = (id) => document.getElementById(id);
+$('mode').textContent = window.isTauri ? 'desktop' : 'web';
+T.core.invoke('greet', { name: 'Linh' }).then((r) => { $('greet').textContent = r; });
+T.event.listen('ping', (e) => { $('sync').textContent = 'got ' + e.payload; });
+$('again').onclick = () => T.core.invoke('greet', { name: 'again' }).then((r) => { $('greet').textContent = r; });
+T.core.invoke('fails').catch((e) => { $('err').textContent = 'error ' + e; });
+</script>
+</body></html>

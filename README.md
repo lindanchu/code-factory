@@ -807,6 +807,41 @@ runs on virtual phones the factory makes for itself, driven by Appium:
   and bundletool (1.18.3), and says how to get the Android SDK, a system image and Xcode.
 - **Not yet**: real phones (an iPhone needs Appium's WebDriverAgent signed with an Apple team).
 
+## Desktop apps
+
+A desktop app built with Tauri 2 is a web front end in a window of the system's web view, with a Rust core the
+front end calls through Tauri's IPC. The usual way is to build the web first and wrap the same front end as the app,
+so a desktop app goes through the web's steps, with one more way of running its UI check:
+
+- **Asked at set-up, and later**: `/auto-factory:code init` asks whether the project has a desktop app (this
+  repository, another one, not yet, no) and fills the `desktop` block (`framework: tauri`, where `tauri.conf.json`
+  is, the mocks file, whether the front end is also a website). A repository that has become one stops its UI check
+  with `next: setup-desktop`.
+- **Twice, in Chromium**: the builder's `ui/check.js` (and a reviewer's `review ui` script) runs once as the website
+  and once as the app's window: the front end served by `app.up`, at the window's size from `tauri.conf.json`, with
+  `window.isTauri` set and Tauri's IPC answered here. On Windows the web view is WebView2, a Chromium, so what the
+  front end draws is close to what users see. Steps, screenshots and errors are named `[web]` or `[desktop]`.
+- **The IPC, answered by mocks**: the repository keeps a mocks file (for example `ui/desktop-mocks.js`), one answer
+  per Rust command the front end calls, written by the builder with the command; a check can answer its own cases
+  (`t.ipc.handle`), see what was asked (`t.ipc.calls`) and send events from the Rust side (`t.ipc.emit`). Events,
+  channels and errors behave as in Tauri (checked against `@tauri-apps/api` 2.12). Tauri's window, app, os,
+  opener, notification and log plugins answer by themselves, as on Windows. A command nothing answers fails the
+  check; `ui.md` lists every command called and what answered it.
+- **The real app on Windows**: with `desktop.build.windows` set, the gate and `review ui` also run the script on the
+  real app (`[app]`): built on Windows from the job's code with the project's command (a copy of the code on Windows
+  keeps `node_modules` and Rust's `target` between builds; each build is kept by commit), started with its own
+  WebView2 data and driven over WebView2's DevTools protocol, its Rust side answering. So its window's CSP, CORS from
+  `http://tauri.localhost` and the IPC to the real Rust code are checked too; `t.restart()` closes and opens the app
+  with its data kept. The factory runs in WSL: with WSL's mirrored network Playwright reaches the app straight, with
+  NAT through a small `node.exe` that carries each connection (Windows' firewall blocks the other ways). A Windows
+  program outlives the WSL process that started it, so the app is stopped by the path of its own copy and its data
+  folder, never by name. `fx desktop doctor` says what the machine has (Rust and the Visual Studio Build Tools on
+  Windows, the WebView2 Runtime, Node.js on Windows); `fx desktop clean` removes the builds and copies on Windows. A
+  machine without them notes that the real app was not run; a build that fails fails the check.
+- **The Rust side** is tested by `cargo test` in the repository's `checks.sh`.
+- **Not yet**: installers and auto-update; macOS and Linux builds of the app. Electron, .NET and Flutter desktop apps
+  are not supported.
+
 ## Requirements
 
 - Claude Code (terminal or IDE extension) with a Jira connection, or a Jira API
@@ -1178,7 +1213,7 @@ each project repository           receives only factory/<KEY>-… branches and p
 ```
 .claude-plugin/marketplace.json
 plugins/auto-factory/.claude-plugin/plugin.json
-plugins/auto-factory/skills/code/     SKILL.md (/auto-factory:code), fx, factory-ui.js, templates/
+plugins/auto-factory/skills/code/     SKILL.md (/auto-factory:code), fx, mobile.py, desktop.py, factory-ui.js, factory-desktop.js, templates/
 plugins/auto-factory/skills/review/   SKILL.md (/auto-factory:review): follows the rules of code/SKILL.md
 plugins/auto-factory/skills/code/shared/  what the UI checks measure with: the screen comparer, the app
                                       runtime, the reading of a design package

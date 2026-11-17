@@ -1246,6 +1246,46 @@ Windows the emulator runs on Windows and the factory in WSL drives it) with Appi
 Then `fx install` (Phase 9) offers Appium and bundletool, and says how to get what it cannot install (Android Studio's
 SDK and a system image, Xcode). `python3 ${CLAUDE_SKILL_DIR}/fx mobile doctor` shows what this machine has.
 
+**Is there a desktop app?** Always ask, in plain words, with AskUserQuestion, even when the scan answers it (say
+what the scan saw): "Dự án có app desktop (Windows) không?": this repository is the app (`this`); the app is another
+repository of the project (`elsewhere`: ask which one, add it the same way as above, set `desktop.app_repo`, and its
+own `desktop` block goes in its entry in `repos`); not yet, but there will be one (`later`); no (`no`). Save the
+answer as `desktop.app` (a "no" too). Only `this` goes on below. With `later`, nothing more now: when this repository
+becomes an app, the next UI check stops with `next: setup-desktop` and the rest of this part is asked then.
+
+**A desktop app** (`desktop.app` is `this`; the scan shows `src-tauri/tauri.conf.json` or `@tauri-apps/cli`): only
+Tauri 2 is supported. The app's front end is a web, usually the same one the project ships as a website, so jobs,
+gates, reviews and their UI checks stay the web's, with one more way of running the same `ui/check.js`: as the app's
+window, in Chromium at the window's size, with `window.isTauri` set and Tauri's IPC answered by mocks (the real Rust
+side does not run). On Windows the app's web view is WebView2, a Chromium, so this is close to what users see. Then,
+when the build is set, the same script runs on the real app: built on Windows from the job's code (the factory runs in
+WSL; the app's build and window are Windows'), started for the check and driven over WebView2's DevTools protocol, its
+Rust side answering. Fill the `desktop` block (in the app repository's entry in `repos` when the project has several),
+asking one thing at a time what the code does not show:
+- `framework`: `tauri`. `dir`: the folder of `tauri.conf.json` when it is not `src-tauri`.
+- `app.up` starts the front end's dev server on the job's port (the command `beforeDevCommand` runs, with the port
+  passed, for example `npm run dev -- --port {port} --strictPort`), and `app.health` a path of it.
+- `web`: is the front end also shipped as a website? (yes: the check runs twice, as the website and as the app).
+- `mocks`: where the IPC mocks file lives in the repository (suggest `ui/desktop-mocks.js`). It is a CommonJS module
+  `{ command: (args, ctx) => answer }`, one entry per `#[tauri::command]` the front end calls and per plugin command it
+  uses beyond window, app, os, opener, notification and log (dialog, fs, store, http, sql...), each answer shaped like
+  the Rust one. When it does not exist yet, the first builder whose screens call the Rust side writes it.
+- `viewports`: the window sizes to check, when not only the main window's size in `tauri.conf.json`.
+- `checks.sh` runs `cargo test` (and `cargo clippy` when the team uses it) in that folder, for the Rust side.
+- The real app (recommended): `build.windows`, the project's command that builds it on Windows from the root of the
+  code (run by cmd.exe in a copy of the job's code on Windows that keeps node_modules and Rust's target between
+  builds), for example `npm ci && npm run tauri build -- --debug --no-bundle` (a debug build without an installer is
+  the fastest); `artifact.windows` when the .exe is not in `<dir>/target/debug|release/`. The app is pointed at the
+  job's own API by `{url:<repo>}` or `{port}` in the command, or by the variables the build gets: every
+  `FACTORY_URL_<NAME>`, and `FACTORY_API_URL` when `api_repo` (with `api_path`) names the API's repository (for
+  example a command that writes it into the front end's `.env` first); Windows reaches WSL's 127.0.0.1. `run_env`:
+  variables the app itself reads when it starts. Then `python3 ${CLAUDE_SKILL_DIR}/fx desktop doctor` says what the
+  machine has: Rust and the Visual Studio Build Tools (C++) on Windows, the WebView2 Runtime, Node.js on Windows, and
+  WSL's network (mirrored reaches the app straight; NAT reaches it through node.exe, which needs nothing more). Tell the
+  user, in plain words, what is missing and the commands it gives (they need Windows' PowerShell, some as
+  administrator). Without the build, or on a machine without them, the real app is not run and the check says so.
+Nothing more to install in WSL: the check uses the factory's Playwright.
+
 **Phase 8b · Keeping the jobs.** Ask with AskUserQuestion whether to keep each job's
 folder on S3 (**Jobs on S3**), so a broken machine loses nothing and another can carry
 on. If yes, use this project's place on S3: ask for it if **Baselines on S3** did not,
@@ -1785,7 +1825,13 @@ largest virtual phone of each platform, the app built from the job's commit and 
 at a time, and a build that fails fails the check; when the repository looks like an app and the factory has no
 mobile set-up for it, the gate (or `review ui`) stops with `next: setup-mobile`: ask the user init's **Is there a
 mobile app?** for it (a no is saved as `mobile.app` = `no` and the check runs as before), and on a yes the **A
-mobile app** part, into the block `where` names (`mobile`, or that repository's entry in `repos`); commit and push the factory repository, then run it again); finally the security
+mobile app** part, into the block `where` names (`mobile`, or that repository's entry in `repos`); commit and push the factory repository, then run it again; on a desktop app
+(Tauri) the same script runs as the website, when the front end is shipped as one too, as the app's window with
+Tauri's IPC answered by the repository's mocks file, a command nothing answers failing the check, and, when
+`desktop.build.windows` is set, on the real app built on Windows from the job's code (a build that fails fails the
+check; a machine without Rust or the build tools only notes that the real app was not run); when the repository
+looks like a desktop app and the factory has no desktop set-up for it, the check stops with `next: setup-desktop`
+the same way: init's **Is there a desktop app?**, then **A desktop app**); finally the security
 scanners per changed repository, with that repository's settings and baseline
 (gitleaks, osv-scanner, semgrep, security headers and ZAP on its running app),
 blocking secrets and new findings at or above the configured
