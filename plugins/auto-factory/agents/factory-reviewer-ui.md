@@ -186,7 +186,12 @@ that alone is not a reason for CHANGES unless a criterion cannot be verified
 any other way.
 
 - Matches the attached design where one exists: layout, hierarchy, spacing,
-  states.
+  states. Every state the package draws for a changed screen (its state table,
+  and the Spec's state matrix when it has one: the network lost, no right,
+  loading, empty, failed to load, a server error, not found…) is compared, with
+  `t.design('<code>')` once the page shows it. A state the screen must have that
+  the package does not draw is a note for the design side (in colleague mode,
+  `Type: spec`).
 - Uses the project's component library and design tokens (colours,
   typography, spacing) instead of one-off styles.
 - Consistent with neighbouring screens: buttons, forms, tables, dialogs,

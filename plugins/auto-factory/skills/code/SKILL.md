@@ -1946,6 +1946,15 @@ first and then decides every measured screen in its `## Design` table: `code` (a
 not be measured says why, and the reviewer compares it by eye. When `ui.md` says why nothing could be measured (no
 package, no auto test repository, no thresholds chosen yet), tell the user in one line.
 
+**The Spec's own coverage.** A package made with design-qa 2.25 or later answers the edge questions of each screen
+(Câu hỏi biên), lists the states each screen must have (Ma trận trạng thái) and what each button leads to (Luồng).
+The spec writer turns the rows of the screens the issue touches into criteria and cases. A row the design has not
+settled (an OI, no answer, no drawn state) is never filled in by an agent: when the issue needs it, the spec asks
+(NEEDS-INFO) whether to wait for the next package or go on with what the issue gives. Every spec of a visible change
+lists the states each screen must have (by what it holds: the network lost, no right, loading, empty, failed to load,
+saving, a server error, not found…) and every text word for word (`## UI text`, a text with a number in both its
+forms); the builder builds them, and the UX reviewer brings each state about and compares each text (`## Text`).
+
 ### Review
 
 1. Spawn every reviewer listed by the gate **in one message** so they run in
@@ -1962,6 +1971,10 @@ package, no auto test repository, no thresholds chosen yet), tell the user in on
    with `retry_agent: ui`: `review-ui.md` leaves a measured screen out of its
    `## Design` table, calls a heavy difference `ok`, or says `code` without
    CHANGES (**The design, measured**). Respawn the UI reviewer once with fx's
+   error, then run `fx verdicts` again. Exit code 6 with `retry_agent: ux`:
+   `review-ux.md` has no `## Text` table (every text the change shows, against
+   the spec's UI text, the ticket and the design), or marks a text `no` without
+   CHANGES and a blocking finding. Respawn the UX reviewer once with fx's
    error, then run `fx verdicts` again.
 3. Follow `next`:
    - `wait` → the listed reviewers have no file yet. If they are still

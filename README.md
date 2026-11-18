@@ -204,6 +204,13 @@ fits one gate, two gates overlap only where one's checks fit beside the other's 
   since it can be the package's own way of drawing: the UI reviewer, on Opus, first looks at each pair of images,
   then decides each measured screen in a `## Design` table (`code`, `design`, `different data`), and fx refuses a
   review that leaves one out or calls a heavy difference fine.
+- A text on a changed screen that is not the one the spec quotes (`## UI text`: every text word for word, where it
+  shows, a text with a number in its form for one and for many), and a state the screen must have that the app does
+  not handle (the network lost, no right, a failed load shown as an empty list, a server error, not found...). The
+  UX reviewer brings each state about and compares each text in a `## Text` table; fx refuses a review without it,
+  and a text marked `no` makes it CHANGES. When the design package's Spec answers its own edge questions, lists the
+  states each screen must have and what each button leads to (design-qa 2.25 and later), the spec turns those rows
+  into criteria; a row the design has not settled is asked about, never filled in.
 - A secret in a commit (checked every round, and again right before the push:
   the factory never pushes a branch with a secret in its history); a
   vulnerability the job introduced at or above the blocking severity (default:
@@ -334,6 +341,9 @@ Project code never sees fx's credentials: setup, the checks scripts, the apps, e
 `seed.sh`, `ui/check.js` and the scanners run without `JIRA_*`, `GH_TOKEN`,
 `GITHUB_TOKEN`, `GITLAB_TOKEN`, `GLAB_*`, `CI_JOB_TOKEN`, model API keys and the
 like (`security.strip_env` adds names, `security.pass_env` lets one through).
+They run in a login shell, for your PATH; a profile that exports a token again (a
+`~/.bashrc` that sources a key file) does not hand it back: fx unsets those names once
+more after the profile, before the command.
 fx never commits the `copy_into_worktree` files or `.env*` files when it saves
 left-over work (names ending in `.example`, `.sample`, `.dist` or `.template`,
 such as `.env.example`, are ordinary files), and redacts well-known key formats and local env secrets (the

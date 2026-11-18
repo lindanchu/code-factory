@@ -227,6 +227,46 @@ class DesignTableTest(DesignCase):
         self.assertEqual(code, 0, res)
 
 
+class UxTextTableTest(DesignCase):
+    """A job's UX reviewer compares every text the change shows with its source in a `## Text` table, as in a review of
+    a colleague's merge request: a word wrong on a screen that looks right is still a defect."""
+
+    def setUp(self):
+        super().setUp()
+        self.rdir = os.path.join(self.f.jd, "round-1")
+        self.f.save_job(stage="review", round=1, surfaces=["ui"], reviewers=["ux"], reviews={},
+                        models={"ux": "sonnet"})
+
+    def review(self, verdict, rows, findings=""):
+        table = "" if rows is None else "## Text\n| String | Where it should come from | What is shown | Match |\n" \
+            "|---|---|---|---|\n" + "".join("| %s | spec UI text | shots-ux/a.png | %s |\n" % r for r in rows)
+        write(os.path.join(self.rdir, "review-ux.md"), "VERDICT: %s\n\n## Findings\n%s\n%s" % (verdict, findings, table))
+        return self.fx("verdicts", "T-1")
+
+    def test_no_table_goes_back_to_the_reviewer(self):
+        code, res = self.review("PASS", None)
+        self.assertEqual((code, res["retry_agent"]), (6, "ux"))
+        self.assertIn("## Text", res["error"])
+
+    def test_each_row_says_whether_it_matches(self):
+        code, res = self.review("PASS", [("Lưu", "yes"), ("1 dòng cần sửa.", "maybe")])
+        self.assertEqual((code, res["retry_agent"]), (6, "ux"))
+        self.assertIn("yes, no, cannot tell", res["error"])
+
+    def test_a_text_that_does_not_match_means_changes(self):
+        code, res = self.review("PASS", [("Lưu", "yes"), ("1 dòng cần sửa.", "no (finding 1)")])
+        self.assertEqual((code, res["retry_agent"]), (6, "ux"))
+        code, res = self.review("CHANGES", [("Lưu", "yes"), ("1 dòng cần sửa.", "**no**")],
+                                "1. [blocking] import, one row to fix: shows “1 dòng cần sửa” · screenshot: shots-ux/a.png\n")
+        self.assertEqual(code, 0, res)
+        self.assertEqual(res["next"], "build")
+
+    def test_every_text_matching_passes(self):
+        code, res = self.review("PASS", [("Lưu", "yes"), ("{n} dòng cần sửa.", "yes"), ("Xoá dòng", "cannot tell")])
+        self.assertEqual(code, 0, res)
+        self.assertEqual(res["next"], "approve")
+
+
 class TicketPackageTest(DesignCase):
     """A job's ticket attaches its design package: it is unpacked in the job folder and gets its state table."""
 

@@ -463,6 +463,49 @@ class EnvStripTest(FxTestCase):
         # fx's own Jira calls still see the token
         self.assertEqual(os.environ["JIRA_API_TOKEN"], "jira-secret-value")
 
+    def test_a_login_profile_cannot_hand_a_token_back(self):
+        # fx runs a project's commands in a login shell (the user's PATH), and a profile that sources a key file exports
+        # the token again there: it is unset once more before the command, but for one the factory lets through
+        home = os.path.join(self.tmp, "home")
+        write(os.path.join(home, ".bash_profile"), "export JIRA_API_TOKEN=from-profile JIRA_EMAIL=a@b.test\n"
+              "export GH_TOKEN=from-profile GITHUB_TOKEN=from-profile AWS_SECRET_ACCESS_KEY=x PROFILE_READ=1\n")
+        os.environ["HOME"] = home
+        cfg = load_json(os.path.join(self.f.factory, "factory.json"))
+        cfg["security"] = {"pass_env": ["GITHUB_TOKEN"], "strip_env": ["AWS_*"]}
+        write(os.path.join(self.f.factory, "factory.json"), json.dumps(cfg))
+        self.f.save_job(setup_done=False)
+        code, res = self.fx("setup", "T-1")
+        self.assertEqual(code, 0, res)
+        names = {l.split("=", 1)[0] for l in slurp(os.path.join(self.f.out, "setup.env")).splitlines() if "=" in l}
+        self.assertIn("PROFILE_READ", names)  # the profile was read: the user's PATH still reaches the command
+        for k in ("JIRA_API_TOKEN", "JIRA_EMAIL", "GH_TOKEN", "AWS_SECRET_ACCESS_KEY"):
+            self.assertNotIn(k, names)
+        self.assertIn("GITHUB_TOKEN", names)
+        # a name fx sets for the command on purpose (an app.env entry pointing at a mock Jira) is kept; a strip_env
+        # pattern with a character class is honoured too
+        write(os.path.join(home, ".bash_profile"), "export JIRA_API_TOKEN=from-profile DEPLOY_PROD_KEY=k PROFILE_READ=1\n")
+
+        class Rules:
+            def c(self, key, default=None):
+                return ["DEPLOY_[A-Z]*_KEY"] if key == "security.strip_env" else default
+        env = {"PATH": os.environ["PATH"], "HOME": home, "JIRA_URL": "http://127.0.0.1:9/mock-jira"}
+        argv = fx.login_shell(Rules(), 'echo "$JIRA_URL|$JIRA_API_TOKEN|$DEPLOY_PROD_KEY|$PROFILE_READ"', env)
+        self.assertEqual(argv[:2], ["bash", "-lc"])
+        p = subprocess.run(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60)
+        self.assertEqual(p.stdout.strip(), "http://127.0.0.1:9/mock-jira|||1")
+
+    def test_strip_env_is_a_list_of_names(self):
+        class Rules:
+            def __init__(self, value):
+                self.value = value
+
+            def c(self, key, default=None):
+                return self.value if key == "security.strip_env" else default
+        self.assertEqual(fx.strip_env_globs(Rules("AWS_*")), ["AWS_*"])  # one name alone, not its letters
+        self.assertEqual(fx.strip_env_globs(Rules(["*", "?*", "MY_[AB]_KEY"])), ["MY_[AB]_KEY"])
+        self.assertFalse(fx.secret_env_name(Rules(["*"]), "PATH"))  # a wildcard alone never strips PATH and HOME
+        self.assertTrue(fx.secret_env_name(Rules(["MY_[AB]_KEY"]), "MY_A_KEY"))
+
     def test_checks_setup_seed_and_scanners_get_no_tokens(self):
         self.f.save_job(setup_done=False)
         code, res = self.fx("setup", "T-1")
@@ -1769,7 +1812,7 @@ class ScriptTest(unittest.TestCase):
             self.assertEqual(json.load(f)["version"], v)
         with open(os.path.join(ROOT, "plugins", "auto-factory", "skills", "code", "shared", "VERSION")) as f:
             self.assertEqual(f.read().strip(), v)  # the two skills ship together
-        self.assertEqual(v, "3.1.0")
+        self.assertEqual(v, "3.2.0")
 
     def test_three_commands(self):
         """/auto-factory:code and /auto-factory:review (no auto test here): a plugin skill's command is

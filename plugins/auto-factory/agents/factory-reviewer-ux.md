@@ -96,7 +96,9 @@ section overrides anything below that says otherwise:
 - Say under `## Checked` what could not be run: the real backend if a mock answered, screen
   readers, other browsers, a production build.
 - **Compare every text, character by character,** with the ticket and the Spec, including what the
-  backend returns (the sandbox's calls show that). Under `## Text` write one row per string, the
+  backend returns (the sandbox's calls show that), placeholders, tooltips (`title`), accessible
+  names (`aria-label`) and texts the code builds from pieces. A text with a number gets one row
+  for its form for one and one for many. Under `## Text` write one row per string, the
   last column `yes`, `no` or `cannot tell`, and fx refuses a review without it:
 
   ```markdown
@@ -136,7 +138,7 @@ finding reaches the right repository.
 ## Read
 
 1. `<job folder>/spec.md` (acceptance criteria, Test data cases for UI states,
-   UI check plan), `<job folder>/round-<N>/build.md`, `<job folder>/round-<N>/ui.md`
+   UI check plan, UI text), `<job folder>/round-<N>/build.md`, `<job folder>/round-<N>/ui.md`
    (the gate's run of the builder's UI check).
 2. The design images in `<job folder>/attachments/`, if any.
 3. The change: `git diff <base>...HEAD` in each changed repository's worktree,
@@ -159,7 +161,7 @@ prompt; Playwright is installed for the factory, not the project):
    loaded the spec's Test data scenario, and the other UI reviewer may be
    using the app at the same time.
 2. Write your own script, `<job folder>/round-<N>/ux/check.js`, for what the
-   builder's check does not cover: every user-visible acceptance criterion as a flow, each UI state the spec lists (empty, few, many, loading, error), keyboard-only use of the changed controls, and run it with
+   builder's check does not cover: every user-visible acceptance criterion as a flow, each UI state the spec lists for each changed screen (below), every text with its count of one, keyboard-only use of the changed controls, and run it with
    `--script <that file> --out <job folder>/round-<N>/ux/own`.
 3. Open the screenshots (Read shows images) and look at them.
 
@@ -171,8 +173,25 @@ any other way.
 - States, UI text (verbatim) and navigation match the logic files of the
   feature (and the staged logic in the job folder when the job changes it);
   a difference is **blocking**.
-- Empty, loading and error states exist; validation errors show per field and
-  say how to fix the input.
+- **Every text, character by character**, against the spec's `## UI text`, the
+  ticket and the design package: the text on each control, placeholders,
+  tooltips (`title`), accessible names (`aria-label`), messages, and texts the
+  code builds from pieces. A text with a number gets one row for its form for
+  one and one for many; reach the count of one. Write them under `## Text`
+  (below): fx refuses a review without it, and a row that says `no` is a
+  blocking finding.
+- **Every state the screen must have.** For each changed screen, bring about in
+  your script each state the spec lists (the network lost, no right, loading,
+  empty, failed to load, nothing matches, saving, saved, a server error, not
+  saved yet, leaving before saving, not found, read only, a delete asked and
+  refused, each error of a chosen file, an export that fails), and look at it.
+  A state the app does not handle (a failed load shown as an empty list, a lost
+  network that leaves a blank or frozen screen, a missing record that shows a
+  broken page) is **blocking**. Validation errors show per field and say how to
+  fix the input.
+- **Every button's result.** When the design package's Spec lists what each
+  button leads to (Luồng), press every button of the changed screens and check
+  its result, on success and on failure.
 - User-facing text goes through the i18n layer when the project has one; keys
   exist for every supported language.
 - Destructive actions ask for confirmation; success is confirmed.
@@ -205,9 +224,17 @@ VERDICT: PASS | CHANGES
 1. [blocking] screen, step: the problem, what to do · screenshot: <path>
 2. [note] …
 
+## Text
+| String | Where it should come from | What is shown (screenshot or path:line) | Match |
+|---|---|---|---|
+| 1 dòng cần sửa. | spec UI text, the count of one | shots-ux/import-one.png "1 dòng cần sửa" | no |
+
 ## Walked through
 Each criterion and state you exercised, the result, and the screenshot path.
 ```
+
+The last column of `## Text` is `yes`, `no` or `cannot tell`. A `no` makes the
+verdict CHANGES, with a blocking finding for it.
 
 Write the prose in the human language from your prompt. Keep the required
 first line, headings, code, identifiers and file paths exactly as shown.

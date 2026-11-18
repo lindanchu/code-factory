@@ -2522,9 +2522,35 @@ SECRET_ENV_GLOBS = ["JIRA_*", "GLAB_*", "ATLASSIAN_*", "CONFLUENCE_*", "GH_*TOKE
                     "GITLAB_*TOKEN*", "BITBUCKET_*TOKEN*"]
 
 
-def secret_env_name(ctx, name):
+def strip_env_globs(ctx):
+    """security.strip_env: names or globs to strip besides fx's own. One name given alone counts as a list of one (it is
+    not read letter by letter), and a pattern of wildcards alone is left out: it would strip every variable, PATH and
+    HOME with them."""
     extra = (ctx.c("security.strip_env", []) if ctx else []) or []
-    return name in SECRET_ENV_NAMES or any(fnmatch.fnmatchcase(name, g) for g in SECRET_ENV_GLOBS + list(extra))
+    extra = [extra] if isinstance(extra, str) else extra
+    return [g for g in (extra if isinstance(extra, list) else [])
+            if isinstance(g, str) and re.match(r"^[A-Za-z0-9_*?\[\]!-]+$", g) and re.search(r"[A-Za-z0-9_]", g)]
+
+
+def secret_env_name(ctx, name):
+    return name in SECRET_ENV_NAMES or any(fnmatch.fnmatchcase(name, g) for g in SECRET_ENV_GLOBS + strip_env_globs(ctx))
+
+
+def login_shell(ctx, cmd, env):
+    """The argv that runs a project's own command (setup, checks.sh, app.up, e2e, seed.sh...) in a login shell, as the
+    user's own terminal would: with their PATH (nvm, pyenv). A login shell reads the user's profile, and a profile may
+    export again a token project_env took out (a ~/.bashrc that sources a key file does). So, after the profile and
+    before the command, every name fx took out of its own environment for this command, and every name that looks
+    like a credential (secret_env_name), is unset once more; a name env holds on purpose (security.pass_env, or one
+    fx sets for the command, such as an app.env entry) is kept."""
+    env = env if env is not None else os.environ
+    name = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    pats = sorted(SECRET_ENV_NAMES) + SECRET_ENV_GLOBS + strip_env_globs(ctx)
+    gone = sorted(k for k in os.environ if k not in env and name.match(k))
+    keep = sorted(k for k in env if name.match(k) and secret_env_name(ctx, k))
+    case = ("%s) ;; " % "|".join(keep) if keep else "") + '%s) unset "$__fx_v" 2>/dev/null ;; ' % "|".join(gone + pats)
+    return ["bash", "-lc", 'for __fx_v in $(compgen -v 2>/dev/null); do case "$__fx_v" in %sesac; done; '
+            "unset __fx_v\n%s" % (case, cmd)]
 
 
 def project_env(ctx, **extra):
@@ -3666,8 +3692,9 @@ def cmd_setup(ctx, a):
                 try:
                     # The repository's own port, id and database name, as its checks script gets them: a setup that
                     # starts the project's stack must not start it on the ports of another job.
-                    p = run(["bash", "-lc", cmd], cwd=e["worktree"], check=False, env=checks_env(*one_app(ctx, job, n)),
-                            timeout=timeout, group=True)
+                    env = checks_env(*one_app(ctx, job, n))
+                    p = run(login_shell(ctx, cmd, env), cwd=e["worktree"], check=False, env=env, timeout=timeout,
+                            group=True)
                 except subprocess.TimeoutExpired as ex:
                     write_atomic(log, (ex.output or "") if isinstance(ex.output, str) else "")
                     raise FxError("setup%s timed out after %ss; see %s" % (" of %s" % n if several else "", timeout, log),
@@ -4011,7 +4038,7 @@ def gate_round_repos(ctx, job, a, place):
         log = "e2e-%s.log" % n
         timeout = int(rc_.c("e2e_timeout_sec", 1800) or 1800)
         try:
-            p = run(["bash", "-lc", app_fill(rc_.c("e2e"), views[n], db)], cwd=views[n]["worktree"], check=False,
+            p = run(login_shell(rc_, app_fill(rc_.c("e2e"), views[n], db), env), cwd=views[n]["worktree"], check=False,
                     env=env, timeout=timeout, group=True)
             per[n]["e2e_out"] = p.stdout or ""
             if p.returncode != 0:
@@ -4424,7 +4451,7 @@ def gate_round_one(ctx, job, a, place):
         env, db = app_env(ctx, job)
         env["BASE_URL"] = app_url_.rstrip("/")
         try:
-            p = run(["bash", "-lc", app_fill(ctx.c("e2e"), job, db)], cwd=wt, check=False, env=env,
+            p = run(login_shell(ctx, app_fill(ctx.c("e2e"), job, db), env), cwd=wt, check=False, env=env,
                     timeout=int(ctx.c("e2e_timeout_sec", 1800)), group=True)
             e2e_out = p.stdout or ""
             if p.returncode != 0:
@@ -4629,6 +4656,23 @@ def verify_verdict(job, rdir, verdict):
     return verdict
 
 
+def ux_text_problems(md, verdict):
+    """The UX reviewer compares every text the change shows with where it should come from (`## Text`), as in a review
+    of a colleague's merge request: a screen can look right with a word wrong, and a text that does not match is a
+    defect of the build."""
+    title, values, wrong = REVIEW_TABLES["ux"]
+    rows, said = review_table(md, title, values)
+    if not rows:
+        return ["has no table with a row under `## %s`: every text the change shows (on its controls, placeholders, "
+                "tooltips, accessible names, messages), against the spec's UI text, the ticket and the design" % title]
+    if None in said:
+        return ["the last column under `## %s` says one of %s" % (title, ", ".join(values))]
+    if wrong in said and (verdict != "CHANGES" or not any(FINDING_RE.match(l) for l in md.splitlines())):
+        return ["says under `## %s` that a text does not match, so its verdict is CHANGES, with a [blocking] finding "
+                "for it" % title]
+    return []
+
+
 def cmd_verdicts(ctx, a):
     job = ctx.load(a.job)
     if job["stage"] != "review":
@@ -4661,6 +4705,11 @@ def cmd_verdicts(ctx, a):
             if problems:
                 raise FxError("round-%d/review-ui.md %s" % (job["round"], "; ".join(problems)), code=6,
                               extra={"retry_agent": "ui"})
+        if r == "ux":
+            problems = ux_text_problems(read(os.path.join(rdir, "review-ux.md"), "") or "", verdict)
+            if problems:
+                raise FxError("round-%d/review-ux.md %s" % (job["round"], "; ".join(problems)), code=6,
+                              extra={"retry_agent": "ux"})
         if r == "security" and verdict == "CHANGES" and ctx.c("security.verify_findings", True):
             vline = first_line(os.path.join(rdir, "verify-security.md"))
             if vline is None:
@@ -6745,8 +6794,8 @@ def cmd_candidates(ctx, a):
                         c["k"], "-%s" % name if len(names) > 1 else ""))
                     where = "candidate %d%s" % (c["k"], " (%s)" % name if len(names) > 1 else "")
                     try:
-                        p = run(["bash", "-lc", cmd], cwd=c["worktree"], check=False,
-                                env=checks_env(*one_app(ctx, candidate_job(ctx, job, c["k"]), name)),
+                        env = checks_env(*one_app(ctx, candidate_job(ctx, job, c["k"]), name))
+                        p = run(login_shell(ctx, cmd, env), cwd=c["worktree"], check=False, env=env,
                                 timeout=int(ctx.rc(name, "setup_timeout_sec", 1800) or 1800), group=True)
                     except subprocess.TimeoutExpired:
                         ctx.save(job, "setup timed out in %s" % where)
@@ -14883,7 +14932,8 @@ def zap_auth(ctx, job):
     env, db = app_env(ctx, job)
     why = "security.zap_auth.command printed no value, so ZAP would only see pages that need no login"
     try:
-        r = run_sep(["bash", "-lc", app_fill(auth["command"], job, db)], cwd=job["worktree"], env=env, timeout=120)
+        r = run_sep(login_shell(ctx, app_fill(auth["command"], job, db), env), cwd=job["worktree"], env=env,
+                    timeout=120)
     except subprocess.TimeoutExpired:
         return None, None, why
     lines = (r.stdout or "").strip().splitlines()
@@ -15902,7 +15952,7 @@ def audit_scan(ctx, a, names):
                 try:
                     if rctx.c("setup"):
                         env, _db = app_env(rctx, repo_view(ctx, job, n))
-                        p = run(["bash", "-lc", rctx.c("setup")], cwd=wt, check=False, env=env,
+                        p = run(login_shell(rctx, rctx.c("setup"), env), cwd=wt, check=False, env=env,
                                 timeout=int(rctx.c("setup_timeout_sec", 1800)), group=True)
                         if p.returncode != 0:
                             raise FxError("setup exited %s" % p.returncode)
@@ -16005,7 +16055,8 @@ def selftest(ctx, a, names):
             done_setup.add(n)
             cmd = ctx.rc(n, "setup", "")
             if cmd:
-                p = run(["bash", "-lc", cmd], cwd=clones[n][0], check=False, env=project_env(ctx),
+                env = project_env(ctx)
+                p = run(login_shell(ctx, cmd, env), cwd=clones[n][0], check=False, env=env,
                         timeout=int(ctx.rc(n, "setup_timeout_sec", 1800) or 1800), group=True)
                 if p.returncode != 0:
                     raise FxError("setup of %s (its app is needed) exited %s" % (n, p.returncode))
@@ -20066,7 +20117,8 @@ def review_sandbox(ctx, a):
             cmd = bctx.c("setup", "")
             if cmd:
                 try:
-                    p = run(["bash", "-lc", cmd], cwd=wt, check=False, env=checks_env(bctx, review_box(ctx, job)),
+                    env = checks_env(bctx, review_box(ctx, job))
+                    p = run(login_shell(bctx, cmd, env), cwd=wt, check=False, env=env,
                             timeout=int(ctx.c("setup_timeout_sec", 1800)), group=True)
                 except subprocess.TimeoutExpired:
                     raise FxError("setup timed out", code=3)
@@ -20091,7 +20143,7 @@ def review_repo_checks(ctx, job, bctx):
     env, _ = app_env(bctx, review_box(ctx, job))
     for cmd in bctx.c("review.checks", []) or []:
         try:
-            p = run(["bash", "-lc", cmd], cwd=job["sandbox"]["dir"], check=False, env=env,
+            p = run(login_shell(bctx, cmd, env), cwd=job["sandbox"]["dir"], check=False, env=env,
                     timeout=int(ctx.c("setup_timeout_sec", 1800)), group=True)
             code, text = p.returncode, p.stdout or ""
         except subprocess.TimeoutExpired:
@@ -20215,7 +20267,8 @@ def review_exec(ctx, a):
     box = review_box(ctx, job)
     env, _ = app_env(review_box_ctx(ctx, review_repo(ctx, job)), box)
     try:
-        p = run(["bash", "-lc", a.command], cwd=box["worktree"], check=False, env=env, timeout=REVIEW_EXEC_TIMEOUT)
+        p = run(login_shell(ctx, a.command, env), cwd=box["worktree"], check=False, env=env,
+                timeout=REVIEW_EXEC_TIMEOUT)
         code, text = p.returncode, p.stdout or ""
     except subprocess.TimeoutExpired:
         code, text = -1, "timed out after %ds" % REVIEW_EXEC_TIMEOUT
@@ -20489,6 +20542,13 @@ def review_table_rows(md):
     return rows[1:]
 
 
+def review_table(md, title, values):
+    """A reviewer's `## <title>` table: its rows, and what the last column of each says (one of values, or None).
+    "wrong (see finding 4)" is fine, and helps the person reading it."""
+    rows = review_table_rows(section(md or "", title))
+    return rows, [next((v for v in values if re.match(r"%s\b" % v, c[-1].strip("* `").lower())), None) for c in rows]
+
+
 def review_check_tables(ctx, job, findings):
     """A screen can look right and be built wrong, so looking is not enough: the UI reviewer lists each element and what
     the code uses for it, and the UX reviewer each text against its source. A row that is wrong has to be raised."""
@@ -20496,11 +20556,9 @@ def review_check_tables(ctx, job, findings):
         if r not in job["reviewers"]:
             continue
         retry = {"retry_agent": r}
-        rows = review_table_rows(section(read(os.path.join(review_rdir(ctx, job), "review-%s.md" % r), ""), title))
+        rows, said = review_table(read(os.path.join(review_rdir(ctx, job), "review-%s.md" % r), ""), title, values)
         if not rows:
             raise FxError("round-%d/review-%s.md has no table with a row under `## %s`" % (job["round"], r, title), code=6, extra=retry)
-        # "wrong (see finding 4)" is fine, and helps the person reading it
-        said = [next((v for v in values if re.match(r"%s\b" % v, c[-1].strip("* `").lower())), None) for c in rows]
         if None in said:
             raise FxError("round-%d/review-%s.md: the last column under `## %s` says one of %s" % (
                 job["round"], r, title, ", ".join(values)), code=6, extra=retry)
@@ -21542,7 +21600,7 @@ def app_start_one(ctx, job):
     fh = open(log, "ab")
     fh.write(("\n==== %s starting: %s\n" % (now(), app_fill(up, job, db))).encode())
     fh.flush()
-    p = subprocess.Popen(["bash", "-lc", app_fill(up, job, db)], cwd=job["worktree"], env=env,
+    p = subprocess.Popen(login_shell(ctx, app_fill(up, job, db), env), cwd=job["worktree"], env=env,
                          stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     write_atomic(app_state_path(ctx, job), json.dumps({"pid": p.pid, "started": now(), "log": log, "db": db}))
     limit = int(ctx.c("app.start_timeout_sec", 180))
@@ -21588,7 +21646,8 @@ def app_stop_one(ctx, job):
     down = ctx.c("app.down")
     if down and os.path.isdir(job.get("worktree") or ""):
         try:
-            run(["bash", "-lc", app_fill(down, job, db)], cwd=job["worktree"], check=False, env=env, timeout=180)
+            run(login_shell(ctx, app_fill(down, job, db), env), cwd=job["worktree"], check=False, env=env,
+                timeout=180)
         except subprocess.TimeoutExpired:
             pass
     pid = st.get("pid")
@@ -22442,7 +22501,7 @@ def needed_clones(ctx, job, prefix, made, notes=None):
         cmd = ctx.rc(m, "setup", "")
         if cmd:
             env, _db = app_env(repo_ctx(ctx, m), repo_view(ctx, job, m))
-            p = run(["bash", "-lc", cmd], cwd=wt, check=False, env=env,
+            p = run(login_shell(ctx, cmd, env), cwd=wt, check=False, env=env,
                     timeout=int(ctx.rc(m, "setup_timeout_sec", 1800) or 1800))
             if p.returncode != 0:
                 raise FxError("setup of %s (its app is needed) exited %s" % (m, p.returncode))
@@ -23044,7 +23103,8 @@ def selftest_repo(ctx, a, n, port, logdir, clone_of, bl_cfg, bl_pre, first):
         env = project_env(rctx, FACTORY_JOB="_selftest", FACTORY_PORT=str(job_port(ctx, job, n)),
                           **dict(baselines_env(rctx, wt), **extra_env))
         try:
-            p, secs = timed(lambda: run(["bash", "-lc", cmd], cwd=wt, check=False, env=env, timeout=timeout, group=True))
+            p, secs = timed(lambda: run(login_shell(rctx, cmd, env), cwd=wt, check=False, env=env, timeout=timeout,
+                                        group=True))
             write_atomic(log, p.stdout or "")
             tail = "\n".join((p.stdout or "").splitlines()[-25:])
             res["steps"][name] = {"ok": p.returncode == 0, "exit": p.returncode, "seconds": secs, "log": log,
@@ -23090,7 +23150,7 @@ def selftest_repo(ctx, a, n, port, logdir, clone_of, bl_cfg, bl_pre, first):
             if rctx.c("app.schema"):
                 env, db = app_env(rctx, view)
                 try:
-                    p = run(["bash", "-lc", app_fill(rctx.c("app.schema"), view, db)], cwd=wt, check=False,
+                    p = run(login_shell(rctx, app_fill(rctx.c("app.schema"), view, db), env), cwd=wt, check=False,
                             env=env, timeout=300)
                     if p.returncode == 0 and (p.stdout or "").strip():
                         write_atomic(schema_path(ctx, n), p.stdout)
