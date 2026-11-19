@@ -44,7 +44,12 @@ several repositories, cite a file as `repo:path` or `repo:path:line`.
    its own coverage, read it for every screen the issue touches: its edge questions (Câu hỏi biên), the states each
    screen must have (Ma trận trạng thái) and what each button leads to (Luồng). The state table
    keeps their rows under `coverage` when the auto test made it, each with the state codes it cites and, under
-   `open`, why a row is not ready.
+   `open`, why a row is not ready. Then the exported page of each screen the issue touches (`<Page>.html`): the texts
+   a Spec often misses are only there (placeholders, tooltips in `title`, accessible names in `aria-label`, the form
+   of a counted sentence for one, texts the script builds). Your prompt gives each package's own version: when the
+   issue names the same package at a later version (a link or a file such as `… - export v1.3.zip`), the package in
+   hand is older than the issue: `SPEC: NEEDS-INFO`, with the options "attach that version and run again" and "go on
+   with the package in hand".
 2. `<job folder>/intake.md`: summary, where in the code, assumptions, risks.
 3. `<job folder>/qa-log.md` if it exists: the human's answers. They override the
    issue where they conflict.
@@ -85,7 +90,21 @@ several repositories, cite a file as `repo:path` or `repo:path:line`.
   with the options "wait for the next design package" and "go on with the
   behaviour the issue gives, and say so in the pull request"; never fill it in
   yourself.
-- **Texts.** Quote every text a user sees on the changed screens word for word
+- **Open on the issue.** A point the issue itself lists as not settled (an
+  open issue with its code, `OI-4`; a line that says it waits for the next
+  design package, "chờ phiên bản gói kế tiếp") is known to its owner: do not
+  ask about it again, and never build from what the open issue proposes. List
+  it under Out of scope with its code, and leave out the criteria that need
+  it. Only when the rest of the issue cannot be delivered without it is it a
+  question. An answer or a later comment that settles it makes it a rule.
+- **Ahead of the design.** A text the issue quotes, or a state code it cites,
+  for a screen of the package that the package does not have: the design is
+  behind the issue, or the issue is wrong. The issue stands and is built; say
+  so under Assumptions (`[ahead of the design] …`, with both places), and its
+  screen in the UI check plan says `design: none (the package does not draw
+  it)`.
+- **Texts.** Read each text where it is written, never from memory of a
+  similar screen. Quote every text a user sees on the changed screens word for word
   in `## UI text`, from the issue, the answers, the design package or the
   project knowledge, and say where each shows: on the control, as a placeholder,
   only as a tooltip or an accessible name (on hover or focus), or as a message.
@@ -130,6 +149,33 @@ ones that do not apply as "n/a, because …":
   sees or changes another user's or tenant's data;
 - **data relations**: ownership, constraints, cascades on delete, allowed and
   forbidden state transitions;
+- **Edge questions** (user-visible criteria only): what an issue seldom writes
+  down and a builder would otherwise decide alone. For each changed screen,
+  answer each group that applies, as a case of kind `edge` with its expected
+  result:
+
+  | Group | What to answer |
+  |---|---|
+  | Limits | each limit (size, number of rows, length, how many): over it, which message and where; what does not count (blank rows) |
+  | Counts | each text with a number: its form for one and for many; which number moves when a row is added, fixed or removed |
+  | Ways in | each way the screen or the form opens (its own button, a button of another screen with values filled in, the address typed, Back): its first state, and whether leaving at once asks to discard |
+  | Rights | without each right: what is hidden or disabled; where the typed address leads and what it says |
+  | Loading | each load of data, also the list behind a choice: loading, failed (which message, how many of them), empty |
+  | Derived values | each value the screen fills in or works out itself: from what, and whether it shows |
+  | Required | each field: required or not; a related field (a higher level, a parent) filled by itself or not |
+  | Files | each file the screen makes (a template, an export, a file of errors): its name; which data it holds (as uploaded or as corrected, the filter or everything); its example row; when there is no data yet |
+  | Edges | the first and the last item, the deepest level, the only one left, all removed: what the screen shows |
+  | Closing | each way to close a dialog, a drawer or the page (x, Esc, Cancel, a click outside, Back): what was typed is kept or lost, asked or not |
+  | Texts | which text shows at once, and which only on hover or focus |
+  | Buttons | each main button: when it is disabled, when hidden, what happens when pressed while errors remain |
+  | Filters | when "Clear filters" shows; what an empty result offers; what an export or a select all takes while a filter is on |
+
+  Take each answer from the issue, the answers and the design package (its
+  edge questions, when it has them), then from what the project already does
+  on its other screens (its knowledge or its code), as an assumption that
+  names where it comes from. One that none of them settles is a question when
+  it changes what a user sees, reads or loses; a low-impact one is yours, as
+  an assumption.
 - **UI states** (user-visible criteria only): a few rows and many (pagination),
   and every state the screen must have, by what it holds:
 
@@ -210,6 +256,7 @@ Factories / fixtures: <existing ones, or new ones to add>
 |---|---|---|---|---|
 | 1 | valid | adminA creates … | 201, … | |
 | 1 | permission | memberB reads orgA's invoice1 | 404, no data | yes |
+| 2 | edge | Esc in the form after typing a name | asks "Bỏ thay đổi?"; Cancel keeps what was typed | |
 
 ## Security requirements
 - ASVS V8.2.1 (example): … → covered by cases …

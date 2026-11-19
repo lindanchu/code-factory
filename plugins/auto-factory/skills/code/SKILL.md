@@ -1955,6 +1955,25 @@ lists the states each screen must have (by what it holds: the network lost, no r
 saving, a server error, not found…) and every text word for word (`## UI text`, a text with a number in both its
 forms); the builder builds them, and the UX reviewer brings each state about and compares each text (`## Text`).
 
+Whether the package has its own coverage or not, the spec answers the same edge questions for each changed screen
+(limits, counts, ways in, rights, loading, derived values, required fields, files, edges, closing, texts, buttons,
+filters) as cases of kind `edge`: from the issue, the design, then what the project already does elsewhere; one that
+nothing settles and that changes what a user sees or loses is a question. Three more rules keep the ticket, the
+design and the code together:
+
+- **Open on the issue.** A point the issue lists as not settled (an `OI`, "waits for the next design package") is not
+  asked about again and never built from what the open issue proposes: it goes under Out of scope with its code.
+- **Ahead of the design.** A text or a state code the issue has and the package lacks: the issue is built, and the
+  spec says the design is behind it (or the issue is wrong).
+- **An older package.** Each agent's prompt gives every package's own version (the first line of its CHANGES.md).
+  When the issue names a later version, the spec asks before going on (NEEDS-INFO): attach it, or go on with the one
+  in hand.
+
+In a review of a colleague's merge request, the UX reviewer checks the changed screens against the design's own rows
+also where the ticket is silent, and keeps three things apart: the screen follows the design and the ticket does not
+say it (a note: the ticket can be completed), the screen does otherwise (`Type: code`), nobody decided it (`Type:
+ask`: it goes into the design first).
+
 ### Review
 
 1. Spawn every reviewer listed by the gate **in one message** so they run in

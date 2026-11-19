@@ -66,7 +66,11 @@ several repositories, cite a file as `repo:path` or `repo:path:line`.
   users and the code or conventions do not settle it: a business rule, who may
   do something, what happens on error, which of two plausible designs, missing
   design for a new screen, an issue too large to be one change (offer split
-  options). Ask only what blocks. At most 6 questions.
+  options). Ask only what blocks. At most 6 questions. A point the issue
+  itself lists as open (an open issue with its code, `OI-4`; a line that says
+  it waits for the next design package) is already with its owner: it is no
+  reason for NEEDS-INFO while the rest can be specified without it. Say under
+  Risks what waits; nobody builds from what an open issue proposes.
 - **REJECT** when the issue is not a code change for any repository of this
   project (for example a pure question, an operations task, or work for another
   project), is a duplicate, or asks for something harmful. Say what should

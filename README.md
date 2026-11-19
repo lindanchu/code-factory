@@ -210,7 +210,14 @@ fits one gate, two gates overlap only where one's checks fit beside the other's 
   UX reviewer brings each state about and compares each text in a `## Text` table; fx refuses a review without it,
   and a text marked `no` makes it CHANGES. When the design package's Spec answers its own edge questions, lists the
   states each screen must have and what each button leads to (design-qa 2.25 and later), the spec turns those rows
-  into criteria; a row the design has not settled is asked about, never filled in.
+  into criteria; a row the design has not settled is asked about, never filled in. With or without them, the spec
+  answers the same edge questions for each changed screen (limits, ways in, rights, closing, files, buttons,
+  filters...) as cases of kind `edge`, from the issue, the design, then what the project already does.
+- What keeps the ticket, the design and the code together: a point the issue itself lists as open (an `OI`, "waits
+  for the next design package") is never built from its proposal; a text or a state the issue has and the package
+  lacks is built and reported as the design being behind; and when the issue names a later version of the package
+  than the one in hand (each package says its own in its CHANGES.md), the spec asks before going on. What these
+  checks cannot know: whether an answer of the Spec is right, only that it is there and which drawn state it cites.
 - A secret in a commit (checked every round, and again right before the push:
   the factory never pushes a branch with a secret in its history); a
   vulnerability the job introduced at or above the blocking severity (default:

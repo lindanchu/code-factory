@@ -311,6 +311,13 @@ and say so under "UI check" in the report):
   name, or as a message. A text with a number has its form for one and for
   many (through the project's i18n plural rules when it has them); the check
   reaches the count of one.
+- **Every edge case of the spec** (its cases of kind `edge`: a limit passed,
+  each way into the screen, the address typed without the right, each way to
+  close, a button pressed while errors remain, an export while a filter is
+  on) is built as the spec answers it and has its `t.step`. One the spec does
+  not answer is not yours to decide alone: follow what the project already
+  does on its other screens and say so in the build report, or stop and ask
+  when it changes what a user sees or loses.
 - **A mobile app.** When your prompt says the project is a mobile app, `check.js` drives the app on virtual phones with the commands that line lists (`t.see`, `t.tap`, `t.type`...; no `t.page`, no `t.goto`), finding things by their text or accessibility label; give each control you add a label a screen reader can say. Run it with the same `fx ui` command: it builds the app from your commit, pointed at the job's API, and runs on the smallest and largest phone of each platform.
 - **A desktop app.** When your prompt says the project is a desktop app (Tauri), `check.js` is a normal Playwright check that runs twice: as the website (when the front end is shipped as one too) and as the app's window with Tauri's IPC answered by mocks. When the project's real app is built (desktop.build.windows), the gate also runs it on the real app (`[app]`: its Rust side answers, so steps that need a mocked answer go under `if (t.ipc.mocked)`); run that yourself with `fx ui <job> --app` before you finish (it builds the app on Windows: minutes the first time). Guard desktop-only steps with `if (t.desktop)`; assert what the front end asks the Rust side with `t.ipc.calls('command')`, answer a case's own data with `t.ipc.handle`, and send a Rust event with `t.ipc.emit`. Every `#[tauri::command]` you add or change that the front end calls gets its entry in the repository's mocks file (the path your prompt gives), in the same commit, its answer shaped like the Rust one; a command nothing answers fails the check. The Rust side itself is tested with `cargo test` (unit tests next to the command), since nothing in the UI check runs it. Keep platform code behind one place (`isTauri()` from `@tauri-apps/api/core`), so the website keeps working without Tauri.
 - **Design.** When your prompt has a `Design measurement` line, call
