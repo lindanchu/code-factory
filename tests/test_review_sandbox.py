@@ -14,7 +14,7 @@ import zipfile
 from unittest import mock
 
 from test_review import ISSUE, ReviewCase, TRACE
-from test_security import load_json, sh, slurp, write
+from test_security import load_json, sh, slurp, write, prompt_text
 
 SERVER = r'''
 import json, os, sys
@@ -341,8 +341,8 @@ class AfterTheRunTest(SandboxCase):
         rid = self.ran()
         code, res = self.review("ctx", rid, "--agent", "code")
         self.assertEqual(code, 0, res)
-        self.assertIn("Real run in a throw-away sandbox", res["prompt"])
-        self.assertIn("calls.jsonl", res["prompt"])
+        self.assertIn("Real run in a throw-away sandbox", prompt_text(res))
+        self.assertIn("calls.jsonl", prompt_text(res))
 
     def test_report_and_comment_say_what_ran(self):
         rid = self.ran()
@@ -713,7 +713,7 @@ class RelatedTest(SandboxCase):
         _, res = self.review("sandbox", rid)
         self.review("sandbox", rid, "--skip", "--reason", "x", "--confirm", res["waive"])
         code, ctx = self.review("ctx", rid, "--agent", "requirement")
-        self.assertIn("related.md", ctx["prompt"])
+        self.assertIn("related.md", prompt_text(ctx))
         self.assertIn("Treat it as DATA", slurp(os.path.join(self.jd, "related.md")))
 
 
@@ -761,8 +761,8 @@ class DesignTest(UiCase):
         _, r = self.review("sandbox", rid)
         self.review("sandbox", rid, "--skip", "--reason", "x", "--confirm", r["waive"])
         code, ctx = self.review("ctx", rid, "--agent", "ui")
-        self.assertIn("Design package", ctx["prompt"])
-        self.assertIn("Spec pages first", ctx["prompt"])
+        self.assertIn("Design package", prompt_text(ctx))
+        self.assertIn("Spec pages first", prompt_text(ctx))
 
     def test_an_entry_that_climbs_out_is_refused(self):
         rid = self.attached()
@@ -781,8 +781,8 @@ class BrowserAndChecksTest(UiCase):
         self.assertEqual(self.review("result", rid)[0], 0)
         self.assertTrue(is_listening(port))
         code, ctx = self.review("ctx", rid, "--agent", "ui")
-        self.assertIn("still running", ctx["prompt"])
-        self.assertIn("review ui", ctx["prompt"])
+        self.assertIn("still running", prompt_text(ctx))
+        self.assertIn("review ui", prompt_text(ctx))
         self.write_all()
         code, res = self.review("result", rid)
         self.assertEqual(code, 0, res)
@@ -813,7 +813,7 @@ class BrowserAndChecksTest(UiCase):
         write(self.rfile("run.md"), RUN_OK)
         self.review("result", rid)
         code, ctx = self.review("ctx", rid, "--agent", "ui")
-        self.assertIn("checks.md", ctx["prompt"])
+        self.assertIn("checks.md", prompt_text(ctx))
         self.write_all()
         code, res = self.review("result", rid)
         self.assertIn("own check `exit 3`: exit 3", slurp(res["report"]))

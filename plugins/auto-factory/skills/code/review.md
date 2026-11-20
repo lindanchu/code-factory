@@ -57,10 +57,11 @@ has its own folder under `jobs/_reviews/` and never goes through the gate. Write
 
 Tell the user in one line which step you are on. In `fx`'s output, `review` is the
 id the later commands take. **/auto-factory:code board** shows each review as it goes, so when an
-agent's result shows its tokens and time, record them as in **Spawning agents**: `fx usage
-<id> --agent <role> --tokens <n> --ms <n> --agent-id <its agentId>` (for the fit checker, the `review` that
-`fx review fit` printed, with `--agent fit-checker`). It also tells the board that agent
-has finished.
+agent's result shows its tokens and time, record them as in **Spawning agents**, on the
+next `fx review` command of that review: `--usage <role>=<tokens>/<ms>/<agentId>` on `fx review scan <id>`
+for the checklist, on `fx review result <id>` for the runner, the reviewers (one `--usage` each) and the
+verifier, and on `fx review fit-result <KEY>` for the fit checker (`fit-checker=…`). It also tells the
+board that agent has finished.
 
 1. **Which one.** Without an argument: `fx review list`, show its `merge_requests`
    as a short table, and ask with AskUserQuestion which to review (at most 4 options;

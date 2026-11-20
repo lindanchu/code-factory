@@ -24,7 +24,7 @@ import unittest
 import urllib.parse
 from unittest import mock
 
-from test_security import FX_PATH, FxTestCase, fx, load_json, sh, slurp, write
+from test_security import FX_PATH, FxTestCase, fx, load_json, sh, slurp, write, prompt_text
 
 READ_ID, READ_SECRET = "READKEYIDFORTEST0001", "read-secret-value-for-tests-0001"
 WRITE_ID, WRITE_SECRET = "WRITEKEYIDFORTEST001", "write-secret-value-for-tests-001"
@@ -490,7 +490,7 @@ class EditedImageTest(BaselinesCase):
         self.assertIn("./home.png png-a", slurp(os.path.join(self.f.out, "seen.txt")))
         self.assertTrue(any("without fx baselines record" in n for n in res["notes"]), res["notes"])
         code, prompt = self.fx("ctx", "T-1", "--agent", "code")
-        self.assertIn("restored by the gate: home.png, sneaky.png", prompt["prompt"])
+        self.assertIn("restored by the gate: home.png, sneaky.png", prompt_text(prompt))
 
     def test_deleting_an_image_does_not_get_through_the_gate(self):
         self.fill()
@@ -902,7 +902,7 @@ class NoBaselinesTest(FxTestCase):
         self.assertFalse(os.path.exists(os.path.join(self.f.factory, "jobs", ".baselines-gate.lock")))
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "state", "baselines")))
         self.assertNotIn("baselines", self.f.job())
-        self.assertNotIn("Baselines", self.fx("ctx", "T-1", "--agent", "builder")[1]["prompt"])
+        self.assertNotIn("Baselines", prompt_text(self.fx("ctx", "T-1", "--agent", "builder")[1]))
 
     def test_a_tracked_folder_of_images_stays_ordinary_files(self):
         self.f.commit({"qa/baselines/home.png": "png\n", "app.py": "x = 1\n"})
@@ -1016,7 +1016,7 @@ class KeySecrecyTest(BaselinesCase):
     def test_agents_are_not_told(self):
         self.gate()
         for agent in ("builder", "security", "code", "ui", "approver"):
-            self.assert_no_key(self.fx("ctx", "T-1", "--agent", agent)[1]["prompt"], agent)
+            self.assert_no_key(prompt_text(self.fx("ctx", "T-1", "--agent", agent)[1]), agent)
 
     def test_the_projects_own_aws_variables_pass_and_are_not_used(self):
         own = {"AWS_ACCESS_KEY_ID": "PROJECTSOWNKEY", "AWS_SECRET_ACCESS_KEY": "projects-own-secret",
@@ -1301,12 +1301,12 @@ class JobChangesImagesTest(BaselinesCase):
         self.assertFalse(os.path.exists(os.path.join(rdir, "baselines", "before", "added.png")))
         self.assertFalse(os.path.exists(os.path.join(rdir, "baselines", "after", "sub", "menu.png")))
         for agent in ("code", "ux", "ui", "security", "approver"):
-            prompt = self.fx("ctx", "T-1", "--agent", agent)[1]["prompt"]
+            prompt = prompt_text(self.fx("ctx", "T-1", "--agent", agent)[1])
             self.assertIn("Baselines changed by this job (1 changed, 1 added, 1 removed)", prompt, agent)
             self.assertIn("round-1/baselines.md", prompt, agent)
 
     def test_the_builder_is_told_the_rules_and_never_a_key(self):
-        prompt = self.fx("ctx", "T-1", "--agent", "builder")[1]["prompt"]
+        prompt = prompt_text(self.fx("ctx", "T-1", "--agent", "builder")[1])
         self.assertIn(os.path.join(self.f.factory, DIR), prompt)
         self.assertIn("Never edit or delete an image", prompt)
         self.assertIn("baselines record --job T-1", prompt)

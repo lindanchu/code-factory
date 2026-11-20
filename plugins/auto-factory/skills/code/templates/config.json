@@ -33,6 +33,8 @@
   },
   "setup_timeout_sec": 1800,
   "app": {
+    "_doc_limits_env": "How the job's app gets the test values of the app's limits (logic's parameter tables, Env and Test value; see /auto-factory:code limits): process (fx starts it as a process, which inherits them) or file (it runs in containers: the script app.up runs loads the file $FACTORY_LIMITS_ENV names, such as docker --env-file \"$FACTORY_LIMITS_ENV\"). Required once a limit has a variable.",
+    "limits_env": "",
     "_doc": "The project's defaults for every repository's app (each repository's own app block in repos holds up, down, schema, needs and env). health: the path checked once an app started. db_template: each job's own database name ({job}; a project of several repositories adds _<repo>).",
     "health": "/",
     "start_timeout_sec": 180,
@@ -48,7 +50,9 @@
       "authorization",
       "data-isolation"
     ],
-    "commit_e2e": "if-present"
+    "commit_e2e": "if-present",
+    "_doc_retry_flaky": "A failed run of the checks script or the UI check whose output shows the machine broke it (a browser that crashed or closed, a timeout, a refused or reset connection, a process killed or out of memory) runs once more on the same commit. Passing then, it passes and is named as flaky in checks.md and the pull request; failing again, the failure stands. A failure without those signs, such as a wrong assertion, is never run again. false: never run again.",
+    "retry_flaky": true
   },
   "ui_checks": {
     "_doc": "Playwright UI checks on the job's running app (needs app.up). The builder writes ui/check.js in the job folder; the gate re-runs it every round. Playwright and axe are installed for the factory, outside the repo (fx tools install). design.test_repo: the git URL of the project's auto test repository; with it, t.design in a check measures a screen against the design package (the ticket's, else the auto test's current one) with the auto test's own comparer, thresholds, screen size and profile, read from a copy fx keeps in this machine's cache. A heavy difference does not fail the gate: the UI reviewer decides each one. look_model: the model of the UI reviewer, who looks at each screen next to its design (never below it, whatever models says).",
@@ -167,10 +171,21 @@
     "zap_image": "ghcr.io/zaproxy/zaproxy:stable",
     "zap_mode": "baseline",
     "zap_minutes": 20,
+    "_doc_zap_confirm": "When the gate's ZAP finds something that would block, ZAP scans once more and only what it finds again at the same place blocks; what one scan alone saw is marked unsure for the security reviewer and sends no builder. Costs one more scan, only then. false: every finding blocks as found.",
+    "zap_confirm": true,
     "zap_openapi": "",
+    "_doc_zap_auth": "How a test account logs in, worked out from the code by the login agent (login.md) and saved with fx login: zap_auth is the web (UI) login (form and session cookie, header Cookie), zap_api_auth the API login (token or key, header Authorization unless the API reads another). Each: command (prints the header's value last; reads passwords and keys when it runs, never holds one), header, check (a page that needs this login and answers 2xx with it; fx calls it before and after every scan), role (the test account's). A job whose own change alters login keeps its way in jobs/<KEY>/login.json until its pull requests are merged. Every agent logs in with fx login <job> --kind web|api. A check that fails, a login lost during the scan, or a scan with most answers 4xx stops the gate (next: login), with no builder.",
     "zap_auth": {
+      "header": "Cookie",
+      "command": "",
+      "check": "",
+      "role": ""
+    },
+    "zap_api_auth": {
       "header": "Authorization",
-      "command": ""
+      "command": "",
+      "check": "",
+      "role": ""
     },
     "strip_env": [],
     "pass_env": []

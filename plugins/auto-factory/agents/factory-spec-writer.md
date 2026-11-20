@@ -116,6 +116,12 @@ several repositories, cite a file as `repo:path` or `repo:path:line`.
   rows need a fix."): the form for one is a sentence of its own, and the Test
   data has a case that reaches the count of one. A form nobody gave is a
   question, never a guess.
+- **Limits.** When the issue adds or changes a limit that can stop tests or
+  scanners (calls per minute, failed logins before a lock, a captcha, messages
+  sent per hour…), add a criterion: the code reads it from an environment
+  variable (name it in the project's style) with the decided value as default,
+  and its row in the module's parameter table gives that variable in Env and the
+  test stack's value in Test value. List it under Logic changes.
 - Name the project conventions that apply (from the knowledge files) in
   Context so the builder follows them.
 

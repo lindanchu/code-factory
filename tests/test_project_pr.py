@@ -16,7 +16,7 @@ import unittest
 from unittest import mock
 
 from test_project_repos import KEY, ProjectCase
-from test_security import fx, load_json, sh, slurp, write
+from test_security import fx, load_json, sh, slurp, write, prompt_text
 
 JIRA = "https://example.atlassian.net"
 GH_STUB = r'''#!%(python)s -I
@@ -92,7 +92,7 @@ class PromptCase(ProjectCase):
         return job
 
     def prompt(self, job, agent, *more):
-        return self.ok("ctx", job, "--agent", agent, *more)["prompt"]
+        return prompt_text(self.ok("ctx", job, "--agent", agent, *more))
 
     def k(self, rel):
         return os.path.join(self.factory, "knowledge", rel)
@@ -237,7 +237,7 @@ class SpecAndFitPromptTest(PromptCase):
         job = self.job_for()
         raw = self.raw(job)
         res = self.ok("ctx", job, "--agent", "fit")
-        p = res["prompt"]
+        p = prompt_text(res)
         self.assertIn("Jira issue" if raw.get("jira_base") else "Task: %s (issue.md in the job folder" % job, p)
         self.assertIn("Spec: %s, with a `## Repo: <name>` part" % os.path.join(self.factory, "jobs", job, "spec.md"), p)
         for n in ("be", "fe"):

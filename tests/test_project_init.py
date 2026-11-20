@@ -15,7 +15,7 @@ import stat
 import unittest
 
 from test_project_repos import CHECKS, ProjectCase, old_keys_id
-from test_security import fx, load_json, sh, slurp, write
+from test_security import fx, load_json, sh, slurp, write, prompt_text
 
 LOGIC_INDEX = "# Logic\n\n| Module | File | Title | Issue |\n|---|---|---|---|\n| billing | [billing/invoices.md]" \
               "(billing/invoices.md) | Invoices | - |\n<!-- index:end -->\n\n<!-- log:end -->\n"
@@ -228,7 +228,7 @@ class ConvertTest(InitCase):
         self.assertNotIn("feature", rows[0])
         job = self.ok("show", "T-1")
         self.assertEqual(job["repos"]["shop"]["branch"], "factory/T-1-old")
-        prompt = self.ok("ctx", "T-1", "--agent", "code")["prompt"]
+        prompt = prompt_text(self.ok("ctx", "T-1", "--agent", "code"))
         self.assertNotIn("api-notes", prompt)
         self.assertNotIn("/somewhere/else", prompt)
 
@@ -370,13 +370,13 @@ class KnowledgeCheckTest(KnowledgeCase):
         self.assertIn("write it as <repo>:app/m2.py", "\n".join(res["problems"]))
 
     def test_the_prompts_name_every_repository_s_code(self):
-        review = self.ok("knowledge", "review")["prompt"]
+        review = prompt_text(self.ok("knowledge", "review"))
         self.assertIn("-code-be", review)
         self.assertIn("-code-fe", review)
         self.assertIn("one folder per repository", review)
         self.assertIn("Main modules of the code of be: app (5 files)", review)
         self.assertIn("<repo>:<path>", review)
-        logic = self.ok("logic", "ctx", "--module", "billing")["prompt"]
+        logic = prompt_text(self.ok("logic", "ctx", "--module", "billing"))
         self.assertIn("one folder per repository", logic)
         self.assertIn("a plain path fails the check", logic)
 
@@ -415,7 +415,7 @@ class KnowledgeRefreshTest(KnowledgeCase):
         res = self.ok("knowledge", "ctx", "--repo", "fe")
         stage = res["stage"]
         self.assertEqual(res["repo"], "fe")
-        self.assertIn("this repository's own files in %s" % os.path.join(stage, "fe"), res["prompt"])
+        self.assertIn("this repository's own files in %s" % os.path.join(stage, "fe"), prompt_text(res))
         write(os.path.join(stage, "fe", "stack.md"), "# fe stack\n\nA web app (`fe:package.json`).\n")
         write(os.path.join(stage, "stack.md"), "# misplaced\n")
         write(os.path.join(stage, "changes.md"), "# changes\n")

@@ -1506,6 +1506,39 @@ class ZapImageMovedTest(CoverageCase):
         self.assertEqual(res["gate"], "FAIL", self.checks_md())
         self.assertFalse(any("moved" in n or "names another" in n for n in res["notes"]), res["notes"])
 
+    def test_a_finding_a_second_scan_does_not_see_again_does_not_block(self):
+        res = self.gate_with_image(STUB_ZAP_IMAGE_ID=self.SELFTEST, STUB_ZAP_REPORT_AGAIN=json.dumps({"site": []}))
+        self.assertEqual(res["gate"], "PASS", self.checks_md())
+        self.assertEqual(len(self.ran()), 2)
+        self.assertTrue(any("were not found again" in n for n in res["notes"]), res["notes"])
+
+    def test_a_finding_found_again_at_the_same_place_blocks(self):
+        again = zap_report(("40018", "3", "SQL Injection", ["http://127.0.0.1:5100/q?id=7"]))
+        res = self.gate_with_image(STUB_ZAP_IMAGE_ID=self.SELFTEST, STUB_ZAP_REPORT_AGAIN=again)
+        self.assertEqual(res["gate"], "FAIL", self.checks_md())
+        self.assertEqual(len(self.ran()), 2)
+
+    def test_the_same_rule_on_another_page_is_not_a_confirmation(self):
+        again = zap_report(("40018", "3", "SQL Injection", ["http://127.0.0.1:5100/other"]))
+        res = self.gate_with_image(STUB_ZAP_IMAGE_ID=self.SELFTEST, STUB_ZAP_REPORT_AGAIN=again)
+        self.assertEqual(res["gate"], "PASS", self.checks_md())
+
+    def test_with_zap_confirm_off_one_scan_blocks(self):
+        self.set_security(required=[], scanners={"headers": False}, zap_confirm=False)
+        res = self.gate_with_image(STUB_ZAP_IMAGE_ID=self.SELFTEST, STUB_ZAP_REPORT_AGAIN=json.dumps({"site": []}))
+        self.assertEqual(res["gate"], "FAIL", self.checks_md())
+        self.assertEqual(len(self.ran()), 1)
+
+    def test_a_login_that_does_not_work_sets_the_round_aside_with_no_builder(self):
+        self.set_security(required=[], scanners={"headers": False}, zap_auth={"command": "exit 3"})
+        self.baseline()
+        self.f.commit({"page.py": "x = 1\n"})
+        with mock.patch.object(fx, "app_start", return_value={"url": "http://127.0.0.1:5100/"}), \
+                mock.patch.object(fx, "app_stop"), mock.patch.object(fx, "docker_running", return_value=True):
+            code, res = self.gate()
+        self.assertEqual(code, 3, res)
+        self.assertEqual((res.get("void"), res.get("next")), (True, "login"))
+
     def test_a_moved_tag_still_blocks(self):
         res = self.gate_with_image(STUB_ZAP_IMAGE_ID="sha256:other")
         self.assertEqual(res["gate"], "FAIL", self.checks_md())
@@ -1654,12 +1687,47 @@ class ZapRunsTest(CoverageCase):
             _, _, _, runs = self.scan()
         self.assertEqual(runs[0]["zap_auth_site"], "127.0.0.1")
 
-    def test_a_login_command_that_fails_stops_the_scan(self):
+    def test_a_login_command_that_fails_stops_the_scan_to_work_the_login_out_again(self):
         self.set_security(zap_auth={"command": "exit 3"})
-        found, err, _, runs = self.scan()
-        self.assertIsNone(found)
-        self.assertIn("zap_auth", err)
-        self.assertEqual(runs, [])
+        with self.assertRaises(fx.ScannerLogin) as e:
+            self.scan()
+        self.assertEqual(e.exception.kind, "web")
+        self.assertEqual(e.exception.extra["next"], "login")
+        self.assertEqual([c for c in self.f.calls("docker") if c["argv"][0] == "run"], [])
+
+    def test_the_web_and_the_api_scans_each_get_their_own_login(self):
+        self.set_security(zap_openapi="/openapi.json", zap_auth={"command": "echo cookie-1", "header": "Cookie"},
+                          zap_api_auth={"command": "echo key-1", "header": "X-Api-Key"})
+        _, err, _, runs = self.scan()
+        self.assertIsNone(err)
+        self.assertEqual([r["zap_auth"] for r in runs], ["cookie-1", "key-1"])
+
+    def test_an_api_with_no_login_of_its_own_uses_the_web_one_as_before(self):
+        self.set_security(zap_openapi="/openapi.json", zap_auth={"command": "echo tok"})
+        _, _, _, runs = self.scan()
+        self.assertEqual([r["zap_auth"] for r in runs], ["tok", "tok"])
+
+    def test_a_scan_most_of_whose_answers_were_refused_stops_for_the_login(self):
+        self.set_security(zap_openapi="/openapi.json")
+        refused = json.dumps({"site": [], "insights": [{"key": "insight.code.4xx", "statistic": "99"}]})
+        with self.assertRaises(fx.ScannerLogin) as e:
+            self.scan(STUB_ZAP_REPORT=refused)
+        self.assertEqual(e.exception.kind, "web")
+        self.assertIn("99%", str(e.exception))
+
+    def test_a_check_page_that_cannot_be_reached_stops_before_the_scan(self):
+        self.set_security(zap_auth={"command": "echo tok", "check": "/me"})
+        with mock.patch.object(fx, "login_check", return_value="its check page /me answered 401"):
+            with self.assertRaises(fx.ScannerLogin) as e:
+                self.scan()
+        self.assertIn("before the scan", str(e.exception))
+
+    def test_a_login_lost_during_the_scan_stops_after_it(self):
+        self.set_security(zap_auth={"command": "echo tok", "check": "/me"})
+        with mock.patch.object(fx, "login_check", side_effect=[None, "its check page /me answered 401"]):
+            with self.assertRaises(fx.ScannerLogin) as e:
+                self.scan()
+        self.assertIn("lost the login", str(e.exception))
 
     def test_findings_say_where_and_merge_across_runs(self):
         self.set_security(zap_openapi="/openapi.json")

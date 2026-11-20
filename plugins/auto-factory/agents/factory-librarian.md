@@ -64,6 +64,13 @@ Read-only commands only.
    "changed outside the factory: commit <sha>"). A change of behaviour nobody
    decided in a ticket is still recorded, and also raised under Questions in
    changes.md.
+7. **Limits.** A limit the new commits add or change that can stop tests or
+   scanners (calls per minute, failed logins before a lock, a captcha, messages
+   sent per hour…) gets its row in its module's parameter table, staged under
+   `logic/<module>/README.md`: Env is the variable the code reads it from, or
+   `MISSING: SUGGESTED_NAME` when the code does not read it from the environment
+   (every job then waits for its fix), and Test value what the test stack runs
+   with. Say each one in changes.md.
 
 Never invent: every changed line rests on a commit or a file you read. Never
 copy secrets, credentials or real personal data into the knowledge: name a

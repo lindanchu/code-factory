@@ -15,7 +15,7 @@ import stat
 import sys
 from unittest import mock
 
-from test_security import FxTestCase, ROOT, fx, load_json, sh, slurp, write
+from test_security import FxTestCase, ROOT, fx, load_json, sh, slurp, write, prompt_text
 
 URL = "https://gitlab.example.com/acme/app/-/merge_requests/7"
 GLAB_STUB = r'''#!%(python)s -I
@@ -346,9 +346,9 @@ class ChecklistFirstTest(ReviewCase):
         rid = self.started()
         code, res = self.review("ctx", rid, "--agent", "checklist")
         self.assertEqual((code, res["subagent_type"]), (0, "factory-review-checklist"))
-        self.assertNotIn("Worktree:", res["prompt"])
-        self.assertNotIn("Diff:", res["prompt"])
-        self.assertIn("checklist.md", res["prompt"])
+        self.assertNotIn("Worktree:", prompt_text(res))
+        self.assertNotIn("Diff:", prompt_text(res))
+        self.assertIn("checklist.md", prompt_text(res))
         self.assertFalse(os.path.exists(os.path.join(self.jd, "mr.md")))
 
     def test_the_checklist_agent_has_no_shell(self):
@@ -381,10 +381,10 @@ class ScanTest(ReviewCase):
         self.assertIn("Mind the header row.", mr)
         code, ctxr = self.review("ctx", rid, "--agent", "code")
         self.assertEqual((code, ctxr["subagent_type"]), (0, "factory-reviewer-code"))
-        self.assertIn("Mode: colleague MR", ctxr["prompt"])
-        self.assertIn(self.head, ctxr["prompt"])
-        self.assertIn(self.rfile("checklist.md"), ctxr["prompt"])
-        self.assertIn(self.rfile("review-code.md"), ctxr["prompt"])
+        self.assertIn("Mode: colleague MR", prompt_text(ctxr))
+        self.assertIn(self.head, prompt_text(ctxr))
+        self.assertIn(self.rfile("checklist.md"), prompt_text(ctxr))
+        self.assertIn(self.rfile("review-code.md"), prompt_text(ctxr))
 
     def test_the_scanners_read_every_commit_of_the_merge_request(self):
         """A colleague's commits are all on their remote branch, which a job's scan would take as already scanned."""
@@ -462,7 +462,7 @@ class ResultTest(ReviewCase):
         self.assertNotIn("nit", text)
         code, ctxr = self.review("ctx", rid, "--agent", "verifier")
         self.assertEqual((code, ctxr["subagent_type"]), (0, "factory-security-verifier"))
-        self.assertIn(self.rfile("verify.md"), ctxr["prompt"])
+        self.assertIn(self.rfile("verify.md"), prompt_text(ctxr))
 
     def verified(self, answers):
         rid, _ = self.scanned()
@@ -789,8 +789,8 @@ class LaterRoundTest(ReviewCase):
         self.assertIn("app/more.py", delta)
         self.assertNotIn("app/new.py", delta)
         _, ctxr = self.review("ctx", rid, "--agent", "requirement")
-        self.assertIn("delta.patch", ctxr["prompt"])
-        self.assertIn(os.path.join(self.jd, "previous.md"), ctxr["prompt"])
+        self.assertIn("delta.patch", prompt_text(ctxr))
+        self.assertIn(os.path.join(self.jd, "previous.md"), prompt_text(ctxr))
         previous = slurp(os.path.join(self.jd, "previous.md"))
         self.assertIn(first, previous)
         self.assertIn("slow", previous)
@@ -1063,25 +1063,25 @@ class SeveralReposTest(SeveralReposCase):
         _, app = self.review("ctx", APP, "--agent", "code")
         ours = os.path.join("knowledge", "overview.md")
         theirs = os.path.join("knowledge", "repos", "fe", "overview.md")
-        self.assertIn(theirs, fe["prompt"])
-        self.assertNotIn(ours, fe["prompt"])
-        self.assertIn(ours, app["prompt"])
-        self.assertNotIn(theirs, app["prompt"])
-        self.assertIn("Repository: fe (acme/fe)", fe["prompt"])
+        self.assertIn(theirs, prompt_text(fe))
+        self.assertNotIn(ours, prompt_text(fe))
+        self.assertIn(ours, prompt_text(app))
+        self.assertNotIn(theirs, prompt_text(app))
+        self.assertIn("Repository: fe (acme/fe)", prompt_text(fe))
 
     def test_a_repository_with_no_knowledge_gets_none_of_the_projects(self):
         write(os.path.join(self.f.factory, "knowledge", "overview.md"), "the project\n")
         self.scanned_all()
         _, fe = self.review("ctx", FE, "--agent", "code")
-        self.assertNotIn(os.path.join("knowledge", "overview.md"), fe["prompt"])
+        self.assertNotIn(os.path.join("knowledge", "overview.md"), prompt_text(fe))
 
     def test_the_projects_schema_is_not_given_for_another_repository(self):
         self.scanned_all()
         with mock.patch.object(fx, "schema_path", return_value=self.f.origin):
             _, fe = self.review("ctx", FE, "--agent", "code")
             _, app = self.review("ctx", APP, "--agent", "code")
-        self.assertNotIn("Database schema", fe["prompt"])
-        self.assertIn("Database schema", app["prompt"])
+        self.assertNotIn("Database schema", prompt_text(fe))
+        self.assertIn("Database schema", prompt_text(app))
 
     def test_merge_requests_waiting_are_listed_from_every_repository(self):
         code, res = self.review("list")
@@ -1160,8 +1160,8 @@ class AskWhichTest(SeveralReposCase):
         self.review("scan", APP)
         self.no_sandbox(APP)
         _, ctx = self.review("ctx", APP, "--agent", "requirement")
-        self.assertIn("left out of this review", ctx["prompt"])
-        self.assertIn(URL_FE, ctx["prompt"])
+        self.assertIn("left out of this review", prompt_text(ctx))
+        self.assertIn(URL_FE, prompt_text(ctx))
 
     def test_the_same_link_twice_is_one_merge_request(self):
         code, res = self.review("start", "PROJ-9", "--mrs", "%s,%s" % (URL, URL), "--issue-file", self.issue_file())
@@ -1192,7 +1192,7 @@ class TogetherTest(SeveralReposCase):
         self.assertIn("one checklist", ctx["error"])
         code, ctx = self.review("ctx", APP, "--agent", "checklist")
         self.assertEqual(code, 0, ctx)
-        self.assertIn(self.rfile_of(APP, "checklist.md"), ctx["prompt"])
+        self.assertIn(self.rfile_of(APP, "checklist.md"), prompt_text(ctx))
 
     def test_no_code_is_cloned_before_the_checklist(self):
         self.together()
@@ -1225,10 +1225,10 @@ class TogetherTest(SeveralReposCase):
     def test_each_reviewer_can_read_the_other_merge_request(self):
         self.scanned_all()
         _, ctx = self.review("ctx", APP, "--agent", "requirement")
-        self.assertIn("Other merge requests of this ticket", ctx["prompt"])
-        self.assertIn(self.rfile_of(FE, "diff.patch"), ctx["prompt"])
-        self.assertIn(self.job_of(FE)["worktree"], ctx["prompt"])
-        self.assertNotIn(self.rfile_of(APP, "diff.patch") + ", worktree", ctx["prompt"])
+        self.assertIn("Other merge requests of this ticket", prompt_text(ctx))
+        self.assertIn(self.rfile_of(FE, "diff.patch"), prompt_text(ctx))
+        self.assertIn(self.job_of(FE)["worktree"], prompt_text(ctx))
+        self.assertNotIn(self.rfile_of(APP, "diff.patch") + ", worktree", prompt_text(ctx))
 
     def test_the_clones_stay_until_they_are_checked_together(self):
         self.scanned_all()
@@ -1258,9 +1258,9 @@ class TogetherTest(SeveralReposCase):
         self.assertEqual(res["model"], "opus")
         for rid in (APP, FE):
             j = self.job_of(rid)
-            self.assertIn("`git -C %s diff %s HEAD`" % (j["worktree"], j["merge_base"]), res["prompt"])
-        self.assertIn("Mode: colleagues' merge requests", res["prompt"])
-        self.assertIn("- fe: copy", res["prompt"])
+            self.assertIn("`git -C %s diff %s HEAD`" % (j["worktree"], j["merge_base"]), prompt_text(res))
+        self.assertIn("Mode: colleagues' merge requests", prompt_text(res))
+        self.assertIn("- fe: copy", prompt_text(res))
 
     def test_a_bad_fit_file_is_asked_again(self):
         self.scanned_all()
@@ -1308,7 +1308,7 @@ class TogetherTest(SeveralReposCase):
         self.reviewed(APP, code="VERDICT: PASS\n\n## Findings\n1. [note] app/new.py:2: seven\n")
         self.reviewed(two, code="VERDICT: PASS\n\n## Findings\n1. [note] app/other.py:1: eight\n")
         code, ask = self.review("fit", "PROJ-9")
-        self.assertIn("- app (mr8): copy", ask["prompt"])
+        self.assertIn("- app (mr8): copy", prompt_text(ask))
         write(ask["fit_file"], "FIT: CHANGES\n\n## Repo: app (mr8)\n1. no\n")
         code, res = self.review("fit-result", "PROJ-9")
         self.assertEqual(code, 0, res)
@@ -1508,12 +1508,12 @@ class OneCommentTest(SeveralReposCase):
         self.no_sandbox(APP)
         self.no_sandbox(FE)
         _, ctx = self.review("ctx", FE, "--agent", "code")
-        self.assertIn("previous.md", ctx["prompt"])
-        self.assertIn("delta.patch", ctx["prompt"])
+        self.assertIn("previous.md", prompt_text(ctx))
+        self.assertIn("delta.patch", prompt_text(ctx))
         self.reviewed(APP, 2)
         self.reviewed(FE, 2)
         _, ask = self.review("fit", "PROJ-9")
-        self.assertIn("previous-fit.md", ask["prompt"])
+        self.assertIn("previous-fit.md", prompt_text(ask))
 
     def test_a_merge_request_reviewed_alone_after_a_ticket_goes_out_by_itself(self):
         self.decided()
@@ -2018,8 +2018,8 @@ class ReviewLearningTest(ReviewCase):
         self.add_lessons("[review] do not raise X", "[code] use paginate", "[ui] use the grid")
         rid, _ = self.scanned()
         _, code = self.review("ctx", rid, "--agent", "code")
-        self.assertIn("do not raise X", self.lessons_of(code["prompt"]))
-        self.assertNotIn("use the grid", self.lessons_of(code["prompt"]))
+        self.assertIn("do not raise X", self.lessons_of(prompt_text(code)))
+        self.assertNotIn("use the grid", self.lessons_of(prompt_text(code)))
         builder = fx.lessons_for(self.f.ctx(), "builder", self.job())
         self.assertNotIn("do not raise X", slurp(builder))
 
@@ -2027,7 +2027,7 @@ class ReviewLearningTest(ReviewCase):
         self.add_lessons("[review] do not raise X", "[code] use paginate", "[ui] use the grid")
         rid, _ = self.scanned()
         _, req = self.review("ctx", rid, "--agent", "requirement")
-        text = self.lessons_of(req["prompt"])
+        text = self.lessons_of(prompt_text(req))
         for rule in ("do not raise X", "use paginate", "use the grid"):
             self.assertIn(rule, text)
 
@@ -2035,7 +2035,7 @@ class ReviewLearningTest(ReviewCase):
         self.add_lessons("[review] do not raise X", "[spec] say which month")
         self.started()
         _, ck = self.review("ctx", "_reviews/PROJ-9-mr7", "--agent", "checklist")
-        text = self.lessons_of(ck["prompt"])
+        text = self.lessons_of(prompt_text(ck))
         self.assertNotIn("do not raise X", text)
         self.assertIn("say which month", text)
 

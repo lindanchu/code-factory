@@ -29,7 +29,7 @@ from unittest import mock
 from test_baselines import A, B, C, CHECKS as BASELINE_CHECKS, DIR, MANIFEST, BaselinesCase, ProjectRepoCase, entries
 from test_parallel import FOUR, PLAN, BoxCase, WORKER, load
 from test_scan_coverage import zap_report
-from test_security import FX_PATH, FxTestCase, fx, load_json, sh, slurp, write
+from test_security import FX_PATH, FxTestCase, fx, load_json, sh, slurp, write, prompt_text
 
 COUNTING = '''echo ran >> "$FX_TEST_OUT/checks.ran"
 env > "$FX_TEST_OUT/checks.env"
@@ -215,11 +215,11 @@ class OneChecksRunTest(ChecksCase):
         self.assertIn("files of the factory repository", res["checks"]["not_reused_because"])
 
     def test_what_fx_itself_owns_there_does_not(self):
-        for rel in ("knowledge/overview.md", "logic/README.md", "lessons.md", "jobs/OTHER-1/build.md",
+        for rel in ("knowledge/overview.md", "logic/billing/rules.md", "lessons.md", "jobs/OTHER-1/build.md",
                     "overrides/OTHER-1.json", ".claude/settings.local.json"):
             write(os.path.join(self.f.factory, rel), "{}\n")
         self.checks()
-        for rel in ("knowledge/overview.md", "logic/README.md", "lessons.md", "jobs/OTHER-1/build.md",
+        for rel in ("knowledge/overview.md", "logic/billing/rules.md", "lessons.md", "jobs/OTHER-1/build.md",
                     "overrides/OTHER-1.json", ".claude/settings.local.json"):
             write(os.path.join(self.f.factory, rel), '{"changed": true}\n')
         code, res = self.gate()
@@ -342,7 +342,7 @@ class OneChecksRunTest(ChecksCase):
 # 2. a human accepted a finding: the reports are judged again, the app is not scanned again
 
 class ZapJudgedAgainTest(ChecksCase):
-    cfg = {"app": {"up": "true"}, "security": {"required": [], "scanners": {"headers": False}}}
+    cfg = {"app": {"up": "true"}, "security": {"required": [], "scanners": {"headers": False}, "zap_confirm": False}}
     SELFTEST = "sha256:selftest"
     SQLI = zap_report(("40018", "3", "SQL Injection", ["http://127.0.0.1:5100/q"]))
     BOTH = zap_report(("40018", "3", "SQL Injection", ["http://127.0.0.1:5100/q"]),
@@ -521,7 +521,7 @@ class RoundsGivenBackTest(ChecksCase):
         self.assertEqual((row["round"], row["rounds_given_back"]), ("1/3", 2), row)
         self.assertEqual(fx.job_view(self.f.factory, "proj", job, {}, {})["round"], 1)
         code, prompt = self.fx("ctx", "T-1", "--agent", "approver")  # round numbers, and their folders, stay what they were
-        self.assertIn("Review round: 3 (folder round-3/", prompt["prompt"])
+        self.assertIn("Review round: 3 (folder round-3/", prompt_text(prompt))
         learn = [x["finding"] for x in fx.job_findings(self.f.ctx(), job) if x["reviewer"] == "gate"]
         self.assertEqual(len(learn), 2)  # and whoever learns from failed gates is told the code was not at fault
         self.assertTrue(all("This round was given back" in x for x in learn), learn)
@@ -877,7 +877,7 @@ class CandidatesChecksTest(BoxCase):
             subprocess.run(["git", "commit", "-q", "-m", "candidate %d" % c["k"]], cwd=c["worktree"], env=self.box.env, check=True)
             write(os.path.join(f, "jobs", job, "build-c%d.md" % c["k"]), "STATUS: READY\n")
         code, res = self.box.fx(f, "ctx", job, "--agent", "builder", "--candidate", "1")
-        self.assertIn("checks %s --candidate 1` runs the whole checks script" % job, res["prompt"])
+        self.assertIn("checks %s --candidate 1` runs the whole checks script" % job, prompt_text(res))
         code, res = self.box.fx(f, "checks", job, "--candidate", "1")
         self.assertEqual((code, res["checks"], res["candidate"], res["kept_for_the_gate"]), (0, "PASS", 1, True), res)
         code, res = self.box.fx(f, "judge-prep", job)
@@ -943,22 +943,22 @@ class PackageChecksTest(SplitCase):
         f, job = self.split(checks=self.COUNT)
         self.box.fx(f, "wp", "next", job)
         code, res = self.box.fx(f, "ctx", job, "--agent", "builder", "--wp", "wp0")
-        self.assertIn("Heavy commands (the tests of the files you own, a build, a browser run)", res["prompt"])
-        self.assertIn("run --job %s --wp wp0 -- <command>" % job, res["prompt"])
-        self.assertIn("fx does not run it for a package", res["prompt"])
-        self.assertNotIn("\nChecks: ", res["prompt"])
+        self.assertIn("Heavy commands (the tests of the files you own, a build, a browser run)", prompt_text(res))
+        self.assertIn("run --job %s --wp wp0 -- <command>" % job, prompt_text(res))
+        self.assertIn("fx does not run it for a package", prompt_text(res))
+        self.assertNotIn("\nChecks: ", prompt_text(res))
         for pid, rel in (("wp0", "src/a.py"), ("wp1", "src/b.py"), ("wp2", "web/c.js"), ("wp3", "README.md")):
             self.finish_package(f, job, pid, rel)
         self.assertEqual(self.box.fx(f, "wp", "next", job)[1]["next"], "integrate")
         code, res = self.box.fx(f, "ctx", job, "--agent", "builder")  # the integrator: the whole, once
         self.assertTrue(res["task"].startswith("Integrate"), res["task"])
-        self.assertIn("Checks: `python3 %s checks %s` runs the whole checks script" % (FX_PATH, job), res["prompt"])
-        self.assertIn("Commit first, then run it once", res["prompt"])
+        self.assertIn("Checks: `python3 %s checks %s` runs the whole checks script" % (FX_PATH, job), prompt_text(res))
+        self.assertIn("Commit first, then run it once", prompt_text(res))
         code, res = self.box.fx(f, "checks", job)
         self.assertEqual((code, res["checks"], res["kept_for_the_gate"]), (0, "PASS", True), res)
         self.assertEqual(slurp(os.path.join(self.box.out, "checks.ran")).split(), ["ran"])
         code, res = self.box.fx(f, "ctx", job, "--agent", "code")  # a reviewer is told the same command
-        self.assertIn("It answers at once when the script already passed on this commit", res["prompt"])
+        self.assertIn("It answers at once when the script already passed on this commit", prompt_text(res))
 
 
 class PackagePlacesTest(SplitCase):

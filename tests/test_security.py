@@ -141,8 +141,9 @@ elif name == "docker":
             if a == "-v":
                 host = args[i + 1].split(":/zap/wrk")[0]
                 report = args[args.index("-J") + 1] if "-J" in args else "zap.json"
+                again = "zap-confirm" in host and os.environ.get("STUB_ZAP_REPORT_AGAIN")  # the confirming scan
                 with open(os.path.join(host, report), "w") as f:
-                    f.write(os.environ.get("STUB_ZAP_REPORT", json.dumps({"site": []})))
+                    f.write(again or os.environ.get("STUB_ZAP_REPORT", json.dumps({"site": []})))
                 print(os.environ.get("STUB_ZAP_LOG", ""))
     elif mode == "down" and args[:1] == ["info"]:
         sys.exit(1)
@@ -170,6 +171,11 @@ def sh(cmd, cwd, check=True):
     if check and p.returncode != 0:
         raise AssertionError("%s failed: %s" % (cmd, p.stdout))
     return p.stdout
+
+
+def prompt_text(res):
+    """The whole prompt of an fx output that hands an agent its instructions in a file (prompt_file)."""
+    return slurp(res["prompt_file"])
 
 
 def slurp(path):
@@ -1077,7 +1083,7 @@ class RequiredScannersTest(FxTestCase):
         self.assertTrue(any("built-in check" in s for s in res["skipped"]))
         # the approver is told, and APPROVE is turned into needs-human
         code, ctxres = self.fx("ctx", "T-1", "--agent", "approver")
-        self.assertIn("Security scanners skipped this round", ctxres["prompt"])
+        self.assertIn("Security scanners skipped this round", prompt_text(ctxres))
         self.f.save_job(stage="approve", flags=[])
         write(os.path.join(self.f.jd, "decision.md"), "APPROVE\n\nfine\n")
         code, r = self.fx("result", "T-1", "decision")
@@ -1121,7 +1127,7 @@ class ZapWithoutDockerTest(FxTestCase):
         self.assertEqual(self.f.job()["security_missed"], [])
         self.assertIn(why, slurp(os.path.join(self.f.jd, "round-1", "security.md")))
         code, prompt = self.fx("ctx", "T-1", "--agent", "approver")
-        self.assertIn("Security scanners skipped this round", prompt["prompt"])  # the approver still hears of it
+        self.assertIn("Security scanners skipped this round", prompt_text(prompt))  # the approver still hears of it
         res = self.approve()
         self.assertNotIn("note", res)
         self.assertFalse(self.f.job()["needs_human"])
@@ -1812,7 +1818,7 @@ class ScriptTest(unittest.TestCase):
             self.assertEqual(json.load(f)["version"], v)
         with open(os.path.join(ROOT, "plugins", "auto-factory", "skills", "code", "shared", "VERSION")) as f:
             self.assertEqual(f.read().strip(), v)  # the two skills ship together
-        self.assertEqual(v, "3.4.0")
+        self.assertEqual(v, "3.5.0")
 
     def test_three_commands(self):
         """/auto-factory:code and /auto-factory:review (no auto test here): a plugin skill's command is

@@ -1,7 +1,7 @@
 ---
 name: code
-description: Run the software factory on Jira issues or local tasks (intake → spec → build → gate → reviews → approver → pull request). Only when the user types /auto-factory:code with a Jira link or key, or /auto-factory:code task | audit | resume | rework | lessons | status | board | capacity | install | init | cleanup. A colleague's merge request is /auto-factory:review, which follows this file too.
-argument-hint: <jira-link> [more, space or comma separated] [--best-of N] | task "<what to do>" | audit | resume <KEY> | rework <KEY> "<note>" | lessons | status | board | capacity | install | init | cleanup <KEY>
+description: Run the software factory on Jira issues or local tasks (intake → spec → build → gate → reviews → approver → pull request). Only when the user types /auto-factory:code with a Jira link or key, or /auto-factory:code task | audit | resume | rework | lessons | limits | status | board | capacity | install | init | cleanup. A colleague's merge request is /auto-factory:review, which follows this file too.
+argument-hint: <jira-link> [more, space or comma separated] [--best-of N] | task "<what to do>" | audit | resume <KEY> | rework <KEY> "<note>" | lessons | limits | status | board | capacity | install | init | cleanup <KEY>
 model: sonnet
 disable-model-invocation: true
 ---
@@ -95,9 +95,25 @@ them to create a separate repository for the factory (for example
     `outside-stop.json` it names in `kept`). The round does not count and no builder is
     needed: never spawn one for it. Tell the user what fx said. `next: gate` → run
     `fx gate <job>` again once; `next: pr` → nothing was pushed, run the same `fx pr`
-    again once; `next: stop` → stop and wait for the user. A stop from outside is put
+    again once; `next: stop` → stop and wait for the user; `next: login` → **Scanner
+    login** below, then the gate again. A stop from outside is put
     aside once for a commit: when it happens again on the same commit the result counts,
     and fx says so in its `Problems`.
+  - `next: limits` (exit code 3, from `fx new` or the gate): a limit of the app cannot be
+    set through the environment, or the limits were never worked out. No job starts and
+    no builder is sent: **/auto-factory:code limits**. Never work around it.
+  - `next: login` (exit code 3, from the gate, `fx selftest` or `fx login`; `kind` is
+    `web` or `api`): **Scanner login.** The saved way to log in does not work, or the
+    scanner lost its login during the scan, or most of a scan's answers were 4xx. It is
+    not the job's code: never send a builder. With a job, `fx app up <job>` first. Spawn a
+    `general-purpose` agent with `model: sonnet` and as prompt: `Follow
+    ${CLAUDE_SKILL_DIR}/login.md` (the absolute path), then the fx command, the factory
+    repository, `kind`, fx's error and the job (or `init`). Its answer is one line per kind.
+    `ask: …` → ask the user in plain words, then spawn it again with the answer.
+    `limits: …` → a limit of the app stopped the scan: **/auto-factory:code limits**. When it
+    saved to the factory, commit `factory.json` and the knowledge it described, and push.
+    Then `fx app down <job>` and run the step that stopped again. A job whose `login.json`
+    was saved for itself keeps it until its pull requests are merged (**Learn**).
   - exit code 6 with `retry_agent`: that agent's result file is missing or
     malformed. If the agent is still running, wait for it. Otherwise spawn it
     once more (same `fx ctx` prompt) with the extra sentence
@@ -142,6 +158,14 @@ them to create a separate repository for the factory (for example
   reviews look at the whole change (with the fit checker when two or more
   repositories change), and each changed repository gets its own branch (the same
   name in each) and pull request, linked to the others.
+- **Keep your own context small.** Everything you read or run stays in your context,
+  and you read all of it again at every later step, for every job of this session.
+  So you do not investigate yourself: no reading logs, grepping code or reports,
+  or working out why something failed. When you or the user need to know why,
+  spawn a `general-purpose` agent with `model: sonnet` (or `Explore` to find code),
+  give it the question and the paths, ask for the answer in a few lines, and keep
+  only that. Read a file yourself only where this file says to (questions to ask,
+  changes to show the user), and never one an agent will read anyway.
 
 ## Spawning agents
 
@@ -177,15 +201,24 @@ For every spawn:
    repositories with their clones, branches, checks scripts and apps, and the task),
    `task`, `model`, and for the builder possibly `resume_agent_id`.
 2. Call the Agent tool with that `subagent_type`, `model` set to the returned
-   `model`, `run_in_background: false`, and `prompt` exactly as returned. The
+   `model`, `run_in_background: false`, and `prompt` exactly as returned. `prompt` is
+   one line naming `prompt_file`, where fx wrote the agent's whole instructions: the agent
+   reads that file itself. Never read it, print it or paste it yourself; it would sit in
+   your context for every later step. The same holds for every fx command that returns a
+   `prompt` (logic, knowledge, review). The
    one exception: the package builders of a split build run in the
    background (**Build (split)**).
 3. Wait until the agent has finished before running the fx command that reads
    its file. When its result shows how many tokens it used and how long it ran
    (a `<usage>` block with `total_tokens` and `duration_ms`), record them for the
-   board with the agent's id from its result (`agentId`): `python3 ${CLAUDE_SKILL_DIR}/fx usage <job> --agent <role>
-   [--wp <id>] [--candidate K] --tokens <n> --ms <n> --agent-id <id>`. fx reads what the agent really used from its
-   transcript; `total_tokens` is only the size of its context at the end. Skip it when the result shows no numbers. If the agent runs in the background anyway (SendMessage
+   board **on the fx command that reads its result**, not in a step of its own: add
+   `--usage <role>=<total_tokens>/<duration_ms>/<agentId>` to `fx result`, `fx verdicts`,
+   `fx split`, `fx pick` or `fx wp done` (`<role>@<package>` for a package's builder,
+   `<role>#<k>` for a candidate; one `--usage` per agent, so `fx verdicts` takes every
+   reviewer of the round at once). fx reads what the agent really used from its transcript;
+   `total_tokens` is only the size of its context at the end. Only an agent whose result
+   no fx command reads gets `python3 ${CLAUDE_SKILL_DIR}/fx usage <job> --agent <role> [--wp <id>]
+   [--candidate K] --tokens <n> --ms <n> --agent-id <id>`. Skip it when the result shows no numbers. If the agent runs in the background anyway (SendMessage
    continuations always do), end your turn and continue only when its
    completion notification arrives. Never act on a half-written result.
 
@@ -261,6 +294,8 @@ from) and say so at the top of the report.
 ### `/auto-factory:code <jira-link-or-key> [more ...]`
 
 References are separated by spaces or commas: `C2P3-1,C2P3-2 C2P3-3` is three.
+**At most 3 jobs per session** (**Several tickets from one command**): with more, keep
+the first ones up to that and hand the rest to new sessions before anything else.
 With several, ask all their source branches first (batched, see **Branches: always
 asked**), then make each job as below, and run them **side by side** (see
 **Several tickets from one command**), not one after another.
@@ -290,6 +325,16 @@ With several references and `learning.ask_after` set to `run`, run **Learn**
 once after the last one instead of after each job.
 
 #### Several tickets from one command
+
+**At most 3 jobs per session, over its whole life.** Every job a session drives
+stays in its context, and the session reads all of it again at every step, so a
+fourth job makes every step of the other three dearer as well. Count the jobs this
+session started, resumed or took over, finished or not. When a command would go past
+3, run only as many as are left, and for the rest print ready-to-paste commands for
+new Claude Code sessions in this factory repository, at most 3 references each, for
+example `/auto-factory:code C2P3-4,C2P3-5,C2P3-6`, and say that each new session asks
+its own questions and that the board shows every session's jobs. Do not ask their
+branches or make their jobs here. The same holds for a later command in this session.
 
 This session drives all the jobs of the command at the same time. fx keeps them
 out of each other's way and shares the machine (**Several jobs at once**); your part
@@ -350,6 +395,34 @@ command**).
 
 `/auto-factory:code feature <KEY>` no longer exists: when the user asks for it,
 say so in one line and do the above.
+
+### `/auto-factory:code limits`
+
+Every limit of the app that can stop tests or the security scanner (calls per minute, failed logins before a lock,
+a captcha, messages sent per hour…) must be settable through an environment variable, so that the job's test stack
+runs with it raised. A limit the code does not read so stops **every** job but its own fix task; nothing turns this
+off and you never work around it. `fx new` and the gate answer `next: limits` (exit code 3) while that is so, and on
+a factory whose limits were never worked out (after the update to this version, or a new init).
+
+1. `python3 ${CLAUDE_SKILL_DIR}/fx limits check`. `ok: true` → say so in one line and stop.
+2. Spawn one `general-purpose` agent with `model: sonnet` per module folder of `logic/`, **in one message**, each with
+   the prompt `Follow ${CLAUDE_SKILL_DIR}/limits.md` (the absolute path), then the fx command, the factory repository,
+   the module and its code (the paths its README cites). Each fills the module's parameter table (Env and Test
+   value) and answers one line per limit.
+3. Show the user the limits found, one line each (module, limit, today's value, the variable or MISSING, the test
+   value), and ask whether they are right; correct what they say.
+4. `fx limits check --code`. Problems → give each to its module's agent once, then check again. `app.limits_env`
+   missing → ask the user how the app runs: as a process fx starts (`"process"`) or in containers (`"file"`: the
+   stack must load the file `$FACTORY_LIMITS_ENV` names; show the line fx says to add to the script `app.up` runs,
+   and add it only when they agree). Set it in `factory.json`.
+5. `fx limits mark`, then commit `logic/` and `factory.json` and push.
+6. MISSING limits → `fx limits tasks` writes a fix task for each. Tell the user every other job waits for them;
+   start them as jobs (`fx new --local "<title>" --issue-file <task_file> --base <branch>`, the branch asked as
+   always; at most 3 jobs per session). Once their pull requests are merged and **Learn** applied their logic,
+   `fx limits check` passes and jobs start again.
+
+`next: limits` from the gate of a running job: the round did not count, no builder. Run the steps above; the job
+goes on from its gate once the fixes are merged.
 
 ### `/auto-factory:code lessons`
 
@@ -1300,6 +1373,12 @@ is saved without the user's approval.
      `fx logic apply --job <J>` checks the logic against every repository's base.
    - `closed`: every pull request was closed without a merge: ask, then normally
      `fx logic skip --job <J>`.
+4b. **Logins of merged jobs.** A job whose own change altered how login works kept its
+   way in `jobs/<KEY>/login.json`. Once all its pull requests are merged (`state`
+   `merged` above), save each kind of it as the factory's:
+   `python3 ${CLAUDE_SKILL_DIR}/fx login --kind <web|api> --command '<its command>' --header <its header>
+   --check <its check> --role <its role> --untested --save factory`, commit `factory.json` and push.
+   The next scan proves it on its check page (**Scanner login** if not).
 5. Knowledge, when `learning.knowledge_refresh` is on (logic files whose cited
    code changed outside the factory are refreshed the same way), one repository
    at a time: `python3 ${CLAUDE_SKILL_DIR}/fx knowledge stale` lists in `stale_repos` the

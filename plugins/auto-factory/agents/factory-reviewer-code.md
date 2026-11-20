@@ -175,6 +175,12 @@ plain path that more than one repository has goes to no one in particular.
   With several repositories, each side follows the spec's `## Shared contract`
   (and the contract changes the builder reports under `## Shared contract`); a
   mismatch is **blocking**.
+- **Limits.** A limit the change adds or changes that can stop tests or scanners
+  (calls per minute, failed logins before a lock, a captcha, messages sent per
+  hour…) must be read from an environment variable, with today's value as its
+  default, and have its row in the module's parameter table (staged logic) with
+  that variable in Env and a Test value. A limit in the diff that is not so is
+  **blocking**: no setting excuses it.
 
 ## Write review-code.md
 

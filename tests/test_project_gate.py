@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 
 from test_project_repos import ProjectCase
-from test_security import fx, load_json, sh, slurp, write
+from test_security import fx, load_json, sh, slurp, write, prompt_text
 
 APP = r'''
 import json, os, sys
@@ -355,7 +355,7 @@ class PortsTest(GateCase):
         raw = self.raw(job)
         self.to_build(job)
         res = self.ok("ctx", job, "--agent", "builder")
-        port = int([l for l in res["prompt"].splitlines() if l.startswith("Port: ")][0].split()[1])
+        port = int([l for l in prompt_text(res).splitlines() if l.startswith("Port: ")][0].split()[1])
         self.assertNotIn(port, [raw["port"], raw["port"] + 1])
 
     def test_best_of_n_candidates_get_blocks_of_their_own(self):
@@ -682,7 +682,7 @@ class FitReviewerTest(GateCase):
         self.assertEqual(res["agents"]["fit"], "factory-fit-checker")
         self.assertEqual(res["agents"]["code"], "factory-reviewer-code")
         ctx_ = self.ok("ctx", job, "--agent", "fit")
-        self.assertIn(os.path.join("round-1", "review-fit.md"), ctx_["prompt"])
+        self.assertIn(os.path.join("round-1", "review-fit.md"), prompt_text(ctx_))
         self.assertEqual(ctx_["model"], self.raw(job)["models"]["fit"])
         rdir = os.path.join(self.factory, "jobs", job, "round-1")
         for r in res["reviewers"]:

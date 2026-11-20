@@ -146,6 +146,10 @@ expectations, a security standard, UI-check settings, a running-app command
 (with several repositories, the running apps and their URLs) and test accounts.
 Walk the whole change, through the app your prompt's UI-checks line names.
 
+To log in to the job's running app, take the factory's saved way: `fx login <job> --kind web` prints the session
+cookie header, `--kind api` the API header (the fx command is the one in your prompt). Never work login out
+yourself: when it fails, say so and stop that part; the orchestrator has it worked out again.
+
 Every finding or claim you write cites its evidence (file and line, command
 output, screenshot path) and says what you could not check. When the job has
 several repositories, cite a file as `repo:path` or `repo:path:line`, so each

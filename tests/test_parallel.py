@@ -24,7 +24,7 @@ import time
 import unittest
 import unittest.mock
 
-from test_security import FX_PATH, SECRET_ENV, STUB, fx
+from test_security import FX_PATH, SECRET_ENV, STUB, fx, prompt_text
 
 JIRA = "https://example.atlassian.net"
 PORT_BASE = 45100  # away from the ports of real jobs on the machine that runs the tests
@@ -845,7 +845,7 @@ class PackagesTest(BoxCase):
         pkgs = self.box.job(f, job)["split"]["packages"]
         self.assertEqual([pkgs[k]["port"] for k in ("wp0", "wp1", "wp2", "wp3")], [first, first + 10, first + 20, old + 3])
         code, res = self.box.fx(f, "ctx", job, "--agent", "builder", "--wp", "wp1")  # and its builder is told the new one
-        self.assertIn("Port: %d;" % (first + 10), res["prompt"])
+        self.assertIn("Port: %d;" % (first + 10), prompt_text(res))
         self.assertEqual(self.box.new(f, "SPL-2")["port"], first + 30)  # a job that starts now gets none of them
         code, res = self.box.fx(f, "wp", "next", job)  # asked again: nothing moves twice
         self.assertEqual((res["next"], res.get("ports_moved")), ("wait", None), res)
@@ -1875,6 +1875,22 @@ class TokenUseTest(BoxCase):
         self.assertEqual([r["tokens"] for r in runs], [4186, 5032])
         self.assertEqual([r["context"] for r in runs], [4100, 5032])
 
+    def test_the_command_that_reads_the_result_records_usage_for_every_reviewer_at_once(self):
+        f = self.box.factory("tok3")
+        job = self.box.new(f, "TOK-3")["job"]
+        self.box.to_build(f, job)
+        self.box.edit(f, job, stage="review", round=1, reviewers=["security", "code"])
+        env = self.transcript("sec1", [self.call("s1", 1, 10, 100, 0)])
+        for a in ("security", "code"):
+            self.assertEqual(self.box.fx(f, "ctx", job, "--agent", a, env=env)[0], 0)
+        self.box.fx(f, "verdicts", job, "--usage", "security=900/5/sec1", "--usage", "code=700/4", env=env)
+        runs = {r["agent"]: r for r in self.box.job(f, job)["runs"] if r["agent"] in ("security", "code")}
+        self.assertEqual((runs["security"]["tokens"], runs["security"]["context"]), (111, 900))
+        self.assertEqual((runs["code"]["tokens"], runs["code"]["ms"], runs["code"].get("usage")), (700, 4, None))
+        self.assertTrue(runs["code"].get("ended"))
+        code, res = self.box.fx(f, "verdicts", job, "--usage", "security=lots")
+        self.assertNotEqual(code, 0, res)
+
     def test_without_a_transcript_the_reported_number_stays_and_says_what_it_is(self):
         f = self.box.factory("tok2")
         job = self.box.new(f, "TOK-2")["job"]
@@ -1926,6 +1942,32 @@ class TokenUseTest(BoxCase):
         self.assertEqual(again["model"], "sonnet")
         self.assertIn("spec-asked-2.md", again["task"])
 
+    COUNTED = ('#!/usr/bin/env bash\nn=$(cat "$FX_TEST_OUT/runs-%s" 2>/dev/null || echo 0); n=$((n+1)); '
+               'echo $n > "$FX_TEST_OUT/runs-%s"\nif [ $n -eq 1 ]; then echo "%s"; exit 1; fi\nexit 0\n')
+
+    def checks_runs(self, name):
+        return int(slurp(os.path.join(self.box.out, "runs-" + name)).strip())
+
+    def test_a_run_the_machine_broke_runs_once_more_and_passes_as_flaky(self):
+        crash = "Error: Protocol error (Page.captureScreenshot): Page crashed."
+        f = self.box.factory("flk", checks=self.COUNTED % ("flk", "flk", crash))
+        job = self.box.new(f, "FLK-1")["job"]
+        self.box.to_build(f, job)
+        code, res = self.box.fx(f, "checks", job)
+        self.assertEqual(code, 0, res)
+        self.assertEqual(self.checks_runs("flk"), 2)
+        self.assertEqual(res["flaky"]["signs"], ["protocol error", "page crashed"])
+        self.assertEqual(res["flaky"]["second"], "PASS")
+
+    def test_a_wrong_assertion_is_not_run_again(self):
+        f = self.box.factory("asr", checks=self.COUNTED % ("asr", "asr", "AssertionError: expected 3, got 2"))
+        job = self.box.new(f, "ASR-1")["job"]
+        self.box.to_build(f, job)
+        code, res = self.box.fx(f, "checks", job)
+        self.assertNotEqual(code, 0, res)
+        self.assertEqual(self.checks_runs("asr"), 1)
+        self.assertNotIn("flaky", res)
+
     def test_the_cost_of_a_run_prices_each_kind(self):
         use = {"input": 10 ** 6, "output": 10 ** 6, "cache_read": 10 ** 6, "cache_write": 10 ** 6}
         self.assertAlmostEqual(fx.run_cost({"usage": use, "tokens": 4 * 10 ** 6}, 5), 5 + 25 + 0.5 + 6.25)
@@ -1934,6 +1976,99 @@ class TokenUseTest(BoxCase):
         self.assertIsNone(fx.run_cost({"usage": use}, None))
         self.assertEqual(fx.board_cost([{"model": "opus", "tokens": 4 * 10 ** 6, "usage": use}], {"opus": 5}),
                          (4 * 10 ** 6, 36.75))
+
+
+# --------------------------------------------------------------------------
+# limits: every limit that can stop tests or scanners is set through the environment
+
+class LimitsTest(BoxCase):
+    TABLE = ("# Module auth (auth)\n\n## 1. Module-wide rules\n| Rule | Code | Test |\n| ---- | ---- | ---- |\n\n"
+             "## 2. Parameters\n| Parameter | Value | Code | Env | Test value |\n| --- | --- | --- | --- | --- |\n%s\n"
+             "## 3. Open points (module-wide)\n1. none\n")
+    RATE = "| Calls per minute | 60 | `config/api.php:3` | API_RATE_LIMIT | 1000000 |"
+    LOCK = "| Failed logins before a lock | 5 | `app/Login.php:9` | MISSING: LOGIN_MAX_ATTEMPTS | 1000000 |"
+    PLAIN = "| Password length | 8 | `app/User.php:4` | - | - |"
+
+    def factory_with(self, name, *rows, limits_env="process"):
+        f = self.box.factory(name)
+        write(os.path.join(f, "logic", "README.md"), "# Logic\n")
+        write(os.path.join(f, "logic", "auth", "README.md"), self.TABLE % "\n".join(rows))
+        cfg = json.load(open(os.path.join(f, "factory.json")))
+        cfg.setdefault("app", {})["limits_env"] = limits_env
+        write(os.path.join(f, "factory.json"), json.dumps(cfg, indent=2))
+        return f
+
+    def test_no_job_starts_before_the_limits_were_worked_out(self):
+        f = self.factory_with("lim0", self.RATE)
+        code, res = self.box.fx(f, *self.box.new_args(f, "LIM-1"))
+        self.assertEqual((code, res.get("next")), (3, "limits"), res)
+        self.assertIn("never worked out", res["error"])
+
+    def test_a_missing_limit_stops_every_job_but_its_fix_task(self):
+        f = self.factory_with("lim1", self.RATE, self.LOCK, self.PLAIN)
+        code, res = self.box.fx(f, "limits", "mark")
+        self.assertEqual(code, 0, res)
+        self.assertEqual(res["missing"], 1)
+        code, res = self.box.fx(f, *self.box.new_args(f, "LIM-2"))
+        self.assertEqual((code, res.get("next")), (3, "limits"), res)
+        self.assertIn("Failed logins before a lock", res["error"])
+        code, res = self.box.fx(f, "limits", "tasks")
+        self.assertEqual(code, 0, res)
+        task = res["tasks"][0]["task_file"]
+        self.assertIn("LOGIN_MAX_ATTEMPTS", slurp(task))
+        other = os.path.join(self.tmp, "my-task.md")
+        write(other, slurp(task))
+        code, res = self.box.fx(f, "new", "--local", "Not a fix task", "--issue-file", other, "--base", "main")
+        self.assertEqual((code, res.get("next")), (3, "limits"), res)
+        code, res = self.box.fx(f, "new", "--local", "Make it settable", "--issue-file", task, "--base", "main")
+        self.assertEqual(code, 0, res)
+        self.assertTrue(self.box.job(f, res["job"]).get("limits_fix"))
+
+    def test_a_limit_with_no_test_value_cannot_be_marked(self):
+        f = self.factory_with("lim2", "| Calls per minute | 60 | `config/api.php:3` | API_RATE_LIMIT |  |")
+        code, res = self.box.fx(f, "limits", "mark")
+        self.assertEqual(code, 3, res)
+        self.assertIn("no test value", res["error"])
+
+    def test_the_app_must_say_how_it_gets_the_values(self):
+        f = self.factory_with("lim3", self.RATE, limits_env="")
+        code, res = self.box.fx(f, "limits", "check")
+        self.assertFalse(res["ok"])
+        self.assertTrue(any("app.limits_env" in p for p in res["problems"]), res["problems"])
+
+    def test_a_container_stack_must_load_the_file(self):
+        f = self.factory_with("lim4", self.RATE, limits_env="file")
+        _, res = self.box.fx(f, "limits", "check")
+        self.assertTrue(any("FACTORY_LIMITS_ENV" in p for p in res["problems"]), res["problems"])
+        write(os.path.join(f, "stack", "serve.sh"), 'docker run --env-file "$FACTORY_LIMITS_ENV" app\n')
+        _, res = self.box.fx(f, "limits", "check")
+        self.assertEqual(res["problems"], [])
+
+    def test_the_jobs_app_runs_with_the_test_values(self):
+        f = self.factory_with("lim5", self.RATE, self.PLAIN)
+        self.assertEqual(self.box.fx(f, "limits", "mark")[0], 0)
+        job = self.box.new(f, "LIM-5")["job"]
+        code, res = self.box.fx(f, "limits", "env", job)
+        self.assertEqual(res["env"], {"API_RATE_LIMIT": "1000000"})
+
+    def test_the_cited_line_must_read_the_variable(self):
+        class Ctx:
+            factory = self.tmp
+            def c(self, key, default=None):
+                return "process" if key == "app.limits_env" else default
+            def repo_names(self):
+                return ["app"]
+            def code(self, name):
+                return None
+        code = os.path.join(self.tmp, "code")
+        write(os.path.join(code, "config", "api.php"), "<?php\nreturn [\n  'rate' => env('API_RATE_LIMIT', 60),\n];\n")
+        ldir = os.path.join(self.tmp, "logic")
+        write(os.path.join(ldir, "auth", "README.md"), self.TABLE % self.RATE)
+        write(os.path.join(ldir, "limits.json"), "{}")
+        self.assertEqual(fx.limits_check(Ctx(), ldir, {"app": code})["problems"], [])
+        write(os.path.join(code, "config", "api.php"), "<?php\nreturn [\n  'rate' => 60,\n];\n")
+        res = fx.limits_check(Ctx(), ldir, {"app": code})
+        self.assertTrue(any("does not read API_RATE_LIMIT" in p for p in res["problems"]), res["problems"])
 
 
 if __name__ == "__main__":

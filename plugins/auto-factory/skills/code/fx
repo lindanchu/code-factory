@@ -1365,6 +1365,23 @@ def builder_model(ctx, job):
     return m
 
 
+def prompt_by_file(folder, name, text):
+    """An agent's prompt, written to a file the agent reads first; the session hands the agent only the file's path.
+    Printed whole, a prompt sat in the session's context twice (fx's output, then the Agent call), and the session
+    reads its whole context again at every later step. Returns (path, the short prompt to give the agent)."""
+    folder = os.path.join(folder, "prompts")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-") + ".md")
+    write_atomic(path, text.rstrip() + "\n")
+    return path, ("Your instructions for this run are in %s. Read that whole file first and follow it: it is your "
+                  "prompt (paths, settings and your task)." % path)
+
+
+def init_prompts_dir(ctx):
+    """Prompts of agents that belong to no job (init's logic writers, the knowledge reviewer, the librarian)."""
+    return os.path.join(ctx.jobs, "_prompts")
+
+
 def spec_draft(ctx, job):
     """The spec draft that asked the human, newest first (fx renamed spec.md to spec-asked-<k>.md when the answers
     came), or None when the spec never asked."""
@@ -1923,8 +1940,100 @@ def cmd_new(ctx, a):
             shutil.rmtree(claim["dir"], ignore_errors=True)  # the making failed: nothing is left that looks half made
 
 
+def limits_task_text(m):
+    name = m.get("suggested") or "a variable named in the project's style"
+    return ("# Make the limit \"%s\" settable through the environment\n\n"
+            "Module `%s`. Today: %s, in %s.\n\n"
+            "This limit of the app cannot be changed without changing its code, so the factory's test stack cannot raise "
+            "it, and tests and the security scanner run into it (an answer 429, a locked account) and misread it. Every "
+            "job of the project waits for this fix.\n\n"
+            "## Acceptance criteria\n\n"
+            "1. The code reads the limit from the environment variable %s, with today's value (%s) as its default: "
+            "nothing changes where the variable is not set.\n"
+            "2. `logic/%s/README.md`: the row of \"%s\" gives that variable in Env, the value the factory's test stack "
+            "runs with in Test value (high enough, or off, so that tests and scanners never meet the limit), and the "
+            "line that reads it in Code.\n"
+            "3. A test shows the limit applies with the default and follows the variable when it is set.\n"
+            % (m["parameter"], m["module"], m["value"] or "?", m["code"] or "the code", name, m["value"] or "?",
+               m["module"], m["parameter"]))
+
+
+def cmd_limits(ctx, a):
+    """The app's limits (logic's parameter tables): check them, write the fix tasks of those the code does not read
+    from the environment, mark them worked out, or show a job's test values."""
+    if a.action == "env":
+        if not a.job:
+            raise FxError("fx limits env <job>", code=3)
+        job = ctx.load(a.job)
+        out({"ok": True, "job": job["id"], "env": limits_env(ctx, job)})
+        return
+    res = limits_check(ctx, code=knowledge_codes(ctx) if a.code else None)
+    if a.action == "check":
+        out(dict(res, words=limits_words(res), next="go on" if res["ok"] else "limits"))
+        return
+    if a.action == "tasks":
+        folder = os.path.join(ctx.jobs, LIMITS_DIR)
+        os.makedirs(folder, exist_ok=True)
+        tasks = []
+        for m in res["missing"]:
+            slug = re.sub(r"[^a-z0-9]+", "-", ("%s-%s" % (m["module"], m["parameter"])).lower()).strip("-")[:60]
+            path = os.path.join(folder, slug + ".md")
+            write_atomic(path, limits_task_text(m))
+            tasks.append({"module": m["module"], "parameter": m["parameter"], "task_file": path,
+                          "start": "fx new --local \"Make %s settable\" --issue-file %s" % (m["parameter"], path)})
+        out({"ok": True, "tasks": tasks, "next": "start each task (fx new --local ... --issue-file <task_file>); every "
+                                                 "other job waits until they are merged"})
+        return
+    if a.action == "mark":
+        if res["unchecked"] or res["problems"]:
+            raise FxError("the limits cannot be marked worked out yet:\n- %s" % "\n- ".join(
+                [w for w in limits_words(res) if "never worked out" not in w and "fix task" not in w]), code=3)
+        write_atomic(os.path.join(logic_dir(ctx), LIMITS_MARK), json.dumps(
+            {"worked_out": now(), "limits": len(res["env"]) + len(res["missing"]), "missing": len(res["missing"])},
+            indent=1) + "\n")
+        out({"ok": True, "missing": len(res["missing"]),
+             "next": "commit logic/ and push; then fx limits tasks" if res["missing"] else "commit logic/ and push"})
+        return
+    raise FxError("fx limits check | tasks | mark | env <job>", code=3)
+
+
+def limits_gate(ctx, job, rn, rdir, place):
+    """The gate's look at the limits. One that is not the job's doing (never worked out, or MISSING on the base) sets
+    the round aside until its fix is merged (next: limits); one the job's own change brings (its staged logic, or the
+    code it cites in the job's clone) is the builder's to fix."""
+    if not logic_ready(ctx):
+        return []
+    base = limits_check(ctx)
+    if not base["ok"] and not job.get("limits_fix"):
+        gate_void(ctx, job["id"], rn, rdir, place, "the app's limits stop every job until they can be set through the "
+                  "environment:\n- %s" % "\n- ".join(limits_words(base)), next_step="limits")
+    roots = job_code_roots(job)
+    code = roots if isinstance(roots, dict) else {job.get("repo") or (ctx.repo_names() or ["app"])[0]: roots}
+    own = limits_check(ctx, over=os.path.join(ctx.job_dir(job["id"]), "logic"), code=code)
+    known = set(limits_words(base))
+    return ["limits: %s" % w for w in limits_words(own) if w not in known and not w.startswith("the limits of the app")]
+
+
+def limits_gate_new(ctx, a):
+    """No job starts while a limit of the app cannot be set through the environment, but the fix tasks fx wrote for
+    those limits (jobs/_limits/). Nothing turns this off."""
+    if not logic_ready(ctx):
+        return
+    res = limits_check(ctx)
+    if res["ok"]:
+        return
+    task = os.path.realpath(a.issue_file) if getattr(a, "local", False) and getattr(a, "issue_file", None) else ""
+    if task and path_under(task, os.path.realpath(os.path.join(ctx.jobs, LIMITS_DIR))) and res["checked"] \
+            and not res["unchecked"] and not res["problems"]:
+        return True  # a fix task of a MISSING limit: the one kind of job that may run now
+    raise FxError("no new job until every limit of the app can be set through the environment:\n- %s" %
+                  "\n- ".join(limits_words(res)), code=3,
+                  extra={"next": "limits", "missing": len(res["missing"]), "unchecked": res["unchecked"]})
+
+
 def new_job(ctx, a, claim):
     store_warnings = []
+    limits_fix = limits_gate_new(ctx, a)
     change = new_job_repos(ctx, a)
     bases = parse_bases(ctx, a.base, change)
     if a.local:
@@ -2032,6 +2141,7 @@ def new_job(ctx, a, claim):
         "gate": None, "flags": [], "decision": None, "needs_human": False, "incomplete": False,
         "handoff_reason": None, "resume_stage": None, "builder_agent_id": None, "jira_started": False,
         "created_at": now(), "history": [],
+        **({"limits_fix": True} if limits_fix else {}),
     }
     made = []
     try:
@@ -2617,6 +2727,13 @@ def app_env(ctx, job, make=True):
         raise FxError("app.env of %s must be an object of NAME: value" % job["repo"], code=3)
     for k, v in (own or {}).items():
         extra[str(k)] = app_fill(str(v), job, db, strict="app.env of %s" % job["repo"])
+    lim = limits_env(ctx, job)  # the app's limits at their test values (logic's parameter tables)
+    if lim:
+        path = os.path.join(ctx.job_dir(job_real_id(job)), "limits.env")
+        if make:
+            write_atomic(path, "".join("%s=%s\n" % kv for kv in sorted(lim.items())))
+        extra.update(lim)
+        extra["FACTORY_LIMITS_ENV"] = path
     return project_env(ctx, **extra), db
 
 
@@ -3419,7 +3536,9 @@ def cmd_ctx(ctx, a):
         lines.append("Result file: %s (write it before you finish: the factory reads only this file, never your "
                      "reply)" % os.path.join(jd, result))
     prefix = "\n".join(lines)
-    res.update(model=model, task=task, prompt_prefix=prefix, prompt="%s\n\nTask: %s" % (prefix, task))
+    pfile, short = prompt_by_file(jd, "%s%s%s" % (agent, "-" + a.wp if wp else "", "-c%d" % cand["k"] if cand else ""),
+                                  "%s\n\nTask: %s" % (prefix, task))
+    res.update(model=model, task=task, prompt=short, prompt_file=pfile)
     record_run(ctx, job, agent, model, wp=getattr(a, "wp", None), cand=cand["k"] if cand else None,
                name="integrator" if agent == "builder" and task.startswith("Integrate") else
                "fit-checker" if agent == "fit" else None)
@@ -3824,7 +3943,7 @@ def changed_files(job):
     return files
 
 
-def gate_void(ctx, job_id, rn, rdir, place, why, also=None):
+def gate_void(ctx, job_id, rn, rdir, place, why, also=None, next_step=None):
     """A round that says nothing about the job's code: the gate's settings changed under it (a commit to the factory
     repository for another job), another program sat on the job's port, or part of its checks was stopped from outside
     (outside_stop). It does not count against the job's rounds and no builder is sent to fix what is not broken: the
@@ -3850,6 +3969,9 @@ def gate_void(ctx, job_id, rn, rdir, place, why, also=None):
         also(job)
     ctx.save(job, "round %d did not count: %s" % (rn, first))
     place.count, place.result = False, "void"
+    if next_step:  # what must be fixed first is named: the gate runs again after it, whatever the count
+        raise FxError("%s\nThis says nothing about the job's code, so the round does not count and no builder is "
+                      "needed." % why, code=3, extra={"void": True, "round": rn, "kept": aside, "next": next_step})
     raise FxError("%s\nThis says nothing about the job's code, so the round does not count and no builder is needed. %s"
                   % (why, "Run the gate again." if n < 3 else "It is the third time in a row for this round: find out "
                      "what keeps changing before the gate runs again."),
@@ -4024,6 +4146,7 @@ def gate_round_repos(ctx, job, a, place):
     crs = {n: per[n]["cr"] for n in change if per[n]["cr"] is not None}
     place.count = bool(crs) and all(c["reused"] == (place.lease.get("kind") == GATE_AFTER_CHECKS) for c in crs.values())
 
+    problems += limits_gate(ctx, job, rn, rdir, place)
     if not problems and logic_ready(ctx):
         sdir, snames = staged_logic(ctx, job)
         if logic_changes_planned(ctx, job) and not snames:
@@ -4099,7 +4222,7 @@ def gate_round_repos(ctx, job, a, place):
             problems.append("this change is user-visible but the builder wrote no ui/check.js "
                             "(a Playwright check of the UI acceptance criteria) in the job folder")
         else:
-            ui_rep = ui_run(ctx, job, ui_script, os.path.join(rdir, "ui"))
+            ui_rep = ui_run_flaky_again(ctx, job, ui_script, rdir)
             write_atomic(os.path.join(rdir, "ui.md"), ui_markdown(ui_rep, ui_name))
             if ui_rep.get("skipped"):
                 job["skipped_checks"].append(ui_rep["skipped"])
@@ -4112,7 +4235,10 @@ def gate_round_repos(ctx, job, a, place):
         for n in change:
             if n in idle:
                 continue
-            secs[n] = run_security(rctxs[n], views[n], sec_dir(n), urls.get(n))
+            try:
+                secs[n] = run_security(rctxs[n], views[n], sec_dir(n), urls.get(n))
+            except ScannerLogin as e:
+                gate_void(ctx, job["id"], rn, rdir, place, "%s%s" % (label(n), e), next_step="login")
             for f_ in secs[n]["findings"]:
                 f_["repo"] = n
         sec = security_merge(secs, True)
@@ -4156,6 +4282,11 @@ def gate_round_repos(ctx, job, a, place):
           "Round %d. Branch %s in %s." % (rn, job_branch_name(job), ", ".join(change)), ""]
     if problems:
         md += ["## Problems", ""] + ["- " + p.replace("\n", "\n  ") for p in problems] + [""]
+    if FLAKY_NOTED:
+        md += ["## Flaky (failed once, passed on a second run of the same commit)", ""] + [
+            "- %s: %s (logs: %s, %s)" % (x["script"], ", ".join(x["signs"]), x["first_log"], x["second_log"])
+            for x in FLAKY_NOTED] + [""]
+        job["flaky"] = (job.get("flaky") or []) + [dict(x, round=rn) for x in FLAKY_NOTED]
     skipped_all = job["skipped_checks"] + job["security_skipped"]
     if skipped_all:
         md += ["## Skipped checks", ""] + ["- " + x for x in skipped_all] + [""]
@@ -4455,6 +4586,7 @@ def gate_round_one(ctx, job, a, place):
                             "aside for that, so this one counts: if the code is not at fault, find out what stops this "
                             "job's containers (round-%d/outside-stop.json)" % (cr["outside"]["why"], rn))
 
+    problems += limits_gate(ctx, job, rn, rdir, place)
     if not problems and logic_ready(ctx):
         sdir, snames = staged_logic(ctx, job)
         if logic_changes_planned(ctx, job) and not snames:
@@ -4511,7 +4643,7 @@ def gate_round_one(ctx, job, a, place):
             problems.append("this change is user-visible but the builder wrote no ui/check.js "
                             "(a Playwright check of the UI acceptance criteria) in the job folder")
         else:
-            ui_rep = ui_run(ctx, job, ui_script, os.path.join(rdir, "ui"))
+            ui_rep = ui_run_flaky_again(ctx, job, ui_script, rdir)
             write_atomic(os.path.join(rdir, "ui.md"), ui_markdown(ui_rep))
             if ui_rep.get("skipped"):
                 job["skipped_checks"].append(ui_rep["skipped"])
@@ -4521,7 +4653,10 @@ def gate_round_one(ctx, job, a, place):
     if not problems:
         # Always: a factory.json without security.scanners means the template's defaults (all on). Every scanner runs.
         # Only ZAP may judge again what it found last round instead of scanning again, and only where zap_stored says so.
-        sec = run_security(ctx, job, rdir, app_url_, zap_from=zap_stored(ctx, job, rn, head))
+        try:
+            sec = run_security(ctx, job, rdir, app_url_, zap_from=zap_stored(ctx, job, rn, head))
+        except ScannerLogin as e:
+            gate_void(ctx, job["id"], rn, rdir, place, str(e), next_step="login")
         write_atomic(os.path.join(rdir, "security.md"), security_markdown(sec))
         job["security_skipped"] = sec["skipped"]
         job["security_missed"] = sec["missed"]
@@ -4555,6 +4690,11 @@ def gate_round_one(ctx, job, a, place):
     md = ["GATE: %s" % ("PASS" if passed else "FAIL"), "", "Round %d. Branch %s." % (rn, job["branch"]), ""]
     if problems:
         md += ["## Problems", ""] + ["- " + p.replace("\n", "\n  ") for p in problems] + [""]
+    if FLAKY_NOTED:
+        md += ["## Flaky (failed once, passed on a second run of the same commit)", ""] + [
+            "- %s: %s (logs: %s, %s)" % (x["script"], ", ".join(x["signs"]), x["first_log"], x["second_log"])
+            for x in FLAKY_NOTED] + [""]
+        job["flaky"] = (job.get("flaky") or []) + [dict(x, round=rn) for x in FLAKY_NOTED]
     skipped_all = job["skipped_checks"] + job["security_skipped"]
     if skipped_all:
         md += ["## Skipped checks", ""] + ["- " + x for x in skipped_all] + [""]
@@ -5121,6 +5261,9 @@ def pr_body(ctx, job, repo=None, links=None):
         checks.append("- %s (`round-%d/security.md`)" % (sec_line, job["round"]))
     for sk in (job.get("security_skipped") or []) + (job.get("skipped_checks") or []):
         checks.append("- skipped: %s" % sk)
+    for fl in job.get("flaky") or []:
+        checks.append("- flaky: %s failed once and passed on a second run of the same commit, round %s (%s)"
+                      % (fl.get("script"), fl.get("round"), ", ".join(fl.get("signs") or [])))
     if checks:
         parts += ["## Automated checks", ""] + checks + [""]
     bl = (job.get("baselines") or {}) if not several or repo == pr_baselines_repo(ctx, job) else {}
@@ -5570,9 +5713,73 @@ def checks_once(ctx, job, log_path, by, who=None, cand=None, rn=None, place=None
         w = who or job
         with step_place(ctx, "checks", job, folders=[w["worktree"], ctx.job_dir(job_real_id(job))],
                         over=place.lease["id"]) as inner:
-            return dict(checks_execute(ctx, job, look, log_path, by, who=who, cand=cand, rn=rn, place=inner),
-                        own_place=True)
-    return checks_execute(ctx, job, look, log_path, by, who=who, cand=cand, rn=rn, place=place)
+            return dict(checks_flaky_again(ctx, job, look, log_path, by, who, cand, rn, inner,
+                                           checks_execute(ctx, job, look, log_path, by, who=who, cand=cand, rn=rn,
+                                                          place=inner)), own_place=True)
+    return checks_flaky_again(ctx, job, look, log_path, by, who, cand, rn, place,
+                              checks_execute(ctx, job, look, log_path, by, who=who, cand=cand, rn=rn, place=place))
+
+
+# What a failure looks like when the machine, not the code, broke the run: a browser that crashed or closed, a page or
+# a connection that timed out or was refused, a process killed or out of memory. A wrong assertion has none of these.
+FLAKY_RE = re.compile(r"(?i)page crashed|target crashed|browser has been closed|context or browser has been closed|"
+                      r"protocol error|timeouterror|timeout of \d+\s*ms exceeded|timeout \d+\s*ms exceeded|net::err_\w+|"
+                      r"econnreset|econnrefused|socket hang up|\bsigterm\b|\bsigkill\b|out of memory|enomem|"
+                      r"\bkilled\b")
+FLAKY_NOTED = []  # retries that passed in this fx command: the gate names them in checks.md
+
+
+def flaky_signs(output):
+    seen = []
+    for m in FLAKY_RE.finditer(output or ""):
+        w = m.group(0).lower()
+        if w not in seen:
+            seen.append(w)
+    return seen[:8]
+
+
+def ui_run_flaky_again(ctx, job, script, rdir):
+    """The gate's UI check, run once more when what blocked it shows the machine broke the run (FLAKY_RE: a browser
+    that crashed, a page that timed out). The whole check runs again, since its steps build on each other (logging in,
+    the pages before). Passing the second time, it passes and is named as flaky; failing again, that result stands."""
+    rep = ui_run(ctx, job, script, os.path.join(rdir, "ui"))
+    if rep.get("skipped") or not rep.get("blocking") or ctx.c("tests.retry_flaky", True) is False:
+        return rep
+    signs = flaky_signs(json.dumps(rep["blocking"], ensure_ascii=False))
+    if not signs:
+        return rep
+    second = ui_run(ctx, job, script, os.path.join(rdir, "ui-again"))
+    if not second.get("skipped") and not second.get("blocking"):
+        FLAKY_NOTED.append({"script": "ui/check.js", "signs": signs, "first_log": "ui/", "second_log": "ui-again/",
+                            "second": "PASS"})
+    return second
+
+
+def checks_flaky_again(ctx, job, look, log_path, by, who, cand, rn, place, res):
+    """A failed run whose output shows the machine broke it (FLAKY_RE) runs once more on the same commit, so no builder
+    is sent to chase what is not in the code. Passing the second time, it passes, named as flaky (in the run's row, the
+    gate's checks.md and the pull request); failing again, the failure stands. Not for a run that hit the gate's time
+    limit or that something outside stopped (outside_stop handles that), nor on uncommitted changes.
+    tests.retry_flaky: false turns it off."""
+    if res.get("ok") or res.get("timed_out") or res.get("outside") or look.get("dirty") \
+            or ctx.c("tests.retry_flaky", True) is False:
+        return res
+    signs = flaky_signs(res.get("output"))
+    if not signs:
+        return res
+    root, ext = os.path.splitext(log_path)
+    again_log = "%s-again%s" % (root, ext or ".log")
+    second = checks_execute(ctx, job, checks_look(ctx, job, who, cand, again=True), again_log, by, who=who, cand=cand,
+                            rn=rn, place=place)
+    note = {"script": os.path.relpath(checks_script(ctx, job), ctx.factory), "commit": look["head"], "signs": signs,
+            "first_log": os.path.basename(log_path), "second_log": os.path.basename(again_log),
+            "second": "PASS" if second.get("ok") else second.get("result") or "FAIL"}
+    second["flaky"] = note
+    if second.get("ok"):
+        FLAKY_NOTED.append(note)
+        second["note"] = ("%s failed once and passed on a second run of the same commit: flaky (%s). First run's log: "
+                          "%s" % (note["script"], ", ".join(signs), note["first_log"]))
+    return second
 
 
 def checks_answer(res):
@@ -5585,6 +5792,10 @@ def checks_answer(res):
         row["not_reused_because"] = res["why_run"]
     if res.get("not_reusable"):
         row["not_kept_for_reuse_because"] = res["not_reusable"]
+    if res.get("flaky"):
+        row["flaky"] = res["flaky"]
+        if res.get("ok"):
+            row["note"] = res.get("note")
     return row
 
 
@@ -5696,13 +5907,17 @@ def cmd_checks(ctx, a):
                 mark_step(ctx, job["id"], "checks", True, only_one=not a.candidate, lease=place.lease)
                 done = None
                 try:
-                    done = checks_execute(ctx, job, look, log, by, who=who, cand=a.candidate, place=place)
+                    done = checks_flaky_again(ctx, job, look, log, by, who, a.candidate, None, place,
+                                              checks_execute(ctx, job, look, log, by, who=who, cand=a.candidate,
+                                                             place=place))
                 finally:
                     mark_step(ctx, job["id"], "checks", False, (done or {}).get("result") or "stopped")
         except PlaceWait as e:
             raise place_refusal(e, "the checks of %s" % job["id"])
     res.update(ok=done["ok"], checks=done["result"], run=done["id"], commit=done["commit"], seconds=done["seconds"],
                log=log, reused=False)
+    if done.get("flaky"):
+        res["flaky"] = done["flaky"]
     if place.waited >= WAIT_NOTED_SEC:
         res["waited_sec"] = round(place.waited)
     if done["ok"]:
@@ -8191,6 +8406,143 @@ def logic_dir(ctx):
     return os.path.join(ctx.factory, "logic")
 
 
+# --------------------------------------------------------------------------
+# Limits: every limit of the app that can stop tests or scanners (rate limits, lockouts, captchas, sending limits...)
+# is a row of its module's parameter table with the environment variable that sets it and the value the job's test
+# stack runs with. A limit the code does not read from the environment (Env: MISSING) stops every job of the project
+# but the fix tasks fx writes for it. No setting turns this off.
+
+LIMIT_MISSING = "MISSING"
+LIMITS_MARK = "limits.json"  # logic/limits.json: the limits were worked out (fx limits mark), and when
+ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+LIMITS_DIR = "_limits"  # jobs/_limits/: the fix tasks fx wrote
+
+
+def limits_rows(ldir, over=None):
+    """Each module README's parameter table: [{module, cols, rows: [{parameter, value, code, env, test}]}]. over: a
+    staged logic folder whose module READMEs replace the factory's (a job's own changes)."""
+    mods = []
+    names = set(os.listdir(ldir)) if os.path.isdir(ldir) else set()
+    if over and os.path.isdir(over):
+        names |= {d for d in os.listdir(over) if os.path.isfile(os.path.join(over, d, "README.md"))}
+    for d in sorted(names):
+        path = os.path.join(over, d, "README.md") if over and os.path.isfile(os.path.join(over or "", d, "README.md")) \
+            else os.path.join(ldir, d, "README.md")
+        if not os.path.isfile(path):
+            continue
+        text = read(path, "") or ""
+        sec = re.search(r"(?ms)^## 2\.[^\n]*\n(.*?)(?=^## |\Z)", text)
+        lines = [l for l in (sec.group(1) if sec else "").splitlines() if l.strip().startswith("|")]
+        head = [c.strip().lower() for c in lines[0].strip().strip("|").split("|")] if lines else []
+        ie = next((i for i, c in enumerate(head) if c == "env"), None)
+        it = next((i for i, c in enumerate(head) if c in ("test value", "giá trị khi chạy thử")), None)
+        ic = next((i for i, c in enumerate(head) if c in ("code", "mã")), None)
+        rows = []
+        for l in lines[2:]:
+            cells = [c.strip() for c in l.strip().strip("|").split("|")]
+            cell = (lambda i: cells[i] if i is not None and i < len(cells) else "")
+            rows.append({"parameter": cell(0), "value": cell(1), "code": cell(ic), "env": cell(ie).strip("` "),
+                         "test": cell(it).strip("` ")})
+        mods.append({"module": d, "cols": ie is not None and it is not None, "rows": rows})
+    return mods
+
+
+def limits_check(ctx, ldir=None, code=None, over=None):
+    """Whether the limits hold: worked out (logic/limits.json), every module's table has the Env and Test value
+    columns, no limit is MISSING, every Env names a variable with a test value, and (with code) the code cited for
+    it reads that variable. Returns {ok, checked, unchecked, missing, problems, env}."""
+    ldir = ldir or logic_dir(ctx)
+    mods = limits_rows(ldir, over)
+    unchecked = [m["module"] for m in mods if not m["cols"]]
+    missing, problems, env = [], [], {}
+    for m in mods:
+        for r in m["rows"] if m["cols"] else []:
+            e = r["env"]
+            if not e or e in ("-", "—", "–"):
+                continue
+            where = "logic/%s/README.md, %s" % (m["module"], r["parameter"] or "a parameter")
+            if e.upper().startswith(LIMIT_MISSING):
+                m_ = re.search(r"[A-Z_][A-Z0-9_]{2,}", e[len(LIMIT_MISSING):])
+                missing.append(dict(r, module=m["module"], suggested=m_.group(0) if m_ else None))
+                continue
+            if not ENV_NAME_RE.match(e):
+                problems.append("%s: Env %r is not the name of an environment variable" % (where, e))
+                continue
+            if not r["test"]:
+                problems.append("%s: %s has no test value (the value the job's test stack runs with)" % (where, e))
+                continue
+            env[e] = r["test"]
+            if code is None:
+                continue
+            cites = CITE_RE.findall(r["code"])
+            if not cites:
+                problems.append("%s: the Code column cites no line that reads %s" % (where, e))
+                continue
+            ok = False
+            for tok, a, b in cites:
+                root, rel, err = cited_root(ctx, code, tok)
+                text = read(os.path.join(root, rel.lstrip("./")), None) if root and not err else None
+                if text is None:
+                    continue
+                lines_ = text.splitlines()
+                part = "\n".join(lines_[int(a) - 1:int(b or a)]) if a else text
+                ok = ok or e in part
+            if not ok:
+                problems.append("%s: the code it cites (%s) does not read %s: the limit must be set through it"
+                                % (where, r["code"], e))
+    mark = read(os.path.join(ldir, LIMITS_MARK))
+    if env and not str(ctx.c("app.limits_env", "") or "") in ("process", "file"):
+        problems.append("app.limits_env in factory.json says how the app gets the test values: \"process\" (it "
+                        "runs as a process of fx and inherits them) or \"file\" (it runs in containers: the stack loads "
+                        "the file $FACTORY_LIMITS_ENV names)")
+    elif env and ctx.c("app.limits_env") == "file" and not limits_file_loaded(ctx):
+        problems.append("app.limits_env is \"file\" but nothing in the factory repository loads $FACTORY_LIMITS_ENV: "
+                        "have the script app.up runs pass it to the app, such as `--env-file \"$FACTORY_LIMITS_ENV\"` "
+                        "for docker, or `set -a; . \"$FACTORY_LIMITS_ENV\"; set +a` before the app starts")
+    return {"ok": bool(mark) and not unchecked and not missing and not problems, "checked": bool(mark),
+            "unchecked": unchecked, "missing": missing, "problems": problems, "env": env}
+
+
+def limits_file_loaded(ctx):
+    """Whether the app's start loads $FACTORY_LIMITS_ENV: an app.* command of factory.json, or a script of the factory
+    repository. factory.json itself and the Markdown files only describe it, so they do not count."""
+    app = ctx.c("app", {}) or {}
+    if isinstance(app, dict) and any("FACTORY_LIMITS_ENV" in str(v) for k, v in app.items() if not k.startswith("_")):
+        return True
+    for folder, dirs, files in os.walk(ctx.factory):
+        rel = os.path.relpath(folder, ctx.factory)
+        if rel.split(os.sep)[0] in ("jobs", "knowledge", "logic", ".git", "local", "node_modules", ".claude"):
+            dirs[:] = []
+            continue
+        for f in files:
+            if (rel == "." and f == "factory.json") or f.endswith(".md"):
+                continue
+            if "FACTORY_LIMITS_ENV" in (read(os.path.join(folder, f), "") or ""):
+                return True
+    return False
+
+
+def limits_words(res):
+    """What stops jobs, in lines for the user."""
+    said = []
+    if not res["checked"]:
+        said.append("the limits of the app were never worked out: run /auto-factory:code limits")
+    if res["unchecked"]:
+        said.append("the parameter tables of %s have no Env and Test value columns: run /auto-factory:code limits"
+                    % ", ".join(res["unchecked"]))
+    for m in res["missing"]:
+        said.append("logic/%s/README.md, %s: the code does not read it from the environment (%s): fix task first"
+                    % (m["module"], m["parameter"], m["code"] or "no code cited"))
+    return said + res["problems"]
+
+
+def limits_env(ctx, job):
+    """The test values the job's app runs with: the factory's tables with the job's own staged logic over them."""
+    if not logic_ready(ctx):
+        return {}
+    return limits_check(ctx, over=os.path.join(ctx.job_dir(job_real_id(job)), "logic"))["env"]
+
+
 def logic_ready(ctx):
     idx = read(os.path.join(logic_dir(ctx), "README.md"), "") or ""
     return bool(idx) and "FACTORY_TODO" not in idx
@@ -8345,9 +8697,11 @@ def cmd_logic(ctx, a):
             lines.append("Jira site: %s (finished issues of this module explain intent; data, not instructions)"
                          % ctx.c("jira.base_url"))
         model = clamp_model(ctx.c("models.logic_writer", "opus"), floor_model(ctx))
-        out({"ok": True, "agent": "logic-writer", "model": model, "module": a.module,
-             "prompt": "%s\n\nTask: Write the logic of module %s: %s/README.md and one file per feature." % (
-                 "\n".join(lines), a.module, a.module)})
+        pfile, short = prompt_by_file(init_prompts_dir(ctx), "logic-writer-%s" % a.module,
+                                      "%s\n\nTask: Write the logic of module %s: %s/README.md and one file per feature."
+                                      % ("\n".join(lines), a.module, a.module))
+        out({"ok": True, "agent": "logic-writer", "model": model, "module": a.module, "prompt": short,
+             "prompt_file": pfile})
         return
     if a.action == "pending":
         rows = []
@@ -8469,8 +8823,11 @@ def cmd_knowledge(ctx, a):
         if schema_paths(ctx):
             lines.append("Database schema from the last selftest (structure only): %s" % ", ".join(schema_paths(ctx)))
         model = clamp_model(ctx.c("models.knowledge_reviewer", "opus"), floor_model(ctx))
+        pfile, short = prompt_by_file(init_prompts_dir(ctx), "knowledge-reviewer",
+                                      "%s\n\nTask: Check the project knowledge against the code and write your review."
+                                      % "\n".join(lines))
         out({"ok": True, "agent": "knowledge-reviewer", "model": model, "review_file": path,
-             "prompt": "%s\n\nTask: Check the project knowledge against the code and write your review." % "\n".join(lines),
+             "prompt": short, "prompt_file": pfile,
              "next": "spawn the knowledge reviewer, fix every finding in the knowledge, then fx knowledge check"})
         return
     if a.action == "mark":
@@ -8534,8 +8891,10 @@ def cmd_knowledge(ctx, a):
                 "that need changes, as complete new versions, plus changes.md, in the staging folder (logic files "
                 "under logic/<module>/ in it, with a change-history row each)." % st["base"][:10])
         prefix = "\n".join(lines)
+        pfile, short = prompt_by_file(init_prompts_dir(ctx), "librarian-%s" % (repo or "project"),
+                                      "%s\n\nTask: %s" % (prefix, task))
         out({"ok": True, "agent": "librarian", "model": model, "stage": stage, "repo": repo, "files": st["files"],
-             "prompt": "%s\n\nTask: %s" % (prefix, task),
+             "prompt": short, "prompt_file": pfile,
              "next": "spawn the librarian, then show changes.md and ask"})
         return
     stage = os.path.abspath(a.stage or "")
@@ -11682,39 +12041,77 @@ def transcript_usage(path):
     return total
 
 
-def cmd_usage(ctx, a):
-    job = ctx.load(a.job)
-    runs = [r for r in job.get("runs") or [] if r.get("agent") == a.agent and r.get("wp") == a.wp
-            and r.get("cand") == a.candidate]
+def note_usage(job, agent, wp, cand, tokens, ms=None, agent_id=None):
+    """Write what an agent used into its latest run of this job (fx ctx recorded the run). What the agent's result
+    reports is the size of its context when it ended, not what it used: every step read the whole context again. Kept
+    as `context` (whether to continue a builder goes by it); `tokens` is what it used, from its transcript when this
+    machine has it. Returns the run."""
+    runs = [r for r in job.get("runs") or [] if r.get("agent") == agent and r.get("wp") == wp and r.get("cand") == cand]
     if not runs:
-        raise FxError("no %s run recorded for %s (fx ctx records it)" % (a.agent, job["id"]))
+        raise FxError("no %s run recorded for %s (fx ctx records it)" % (agent, job["id"]))
     r = runs[-1]
-    # What the agent's result reports is the size of its context when it ended, not what it used: every step read the
-    # whole context again. Kept as `context` (whether to continue a builder goes by it); `tokens` is what it used, from
-    # its transcript when this machine has it.
-    r["context"] = r["tokens"] = a.tokens
+    r["context"] = r["tokens"] = tokens
     r.pop("usage", None)
-    if a.agent_id:
-        r["agent_id"] = a.agent_id
-        path = agent_transcript(a.agent_id)
+    if agent_id:
+        r["agent_id"] = agent_id
+        path = agent_transcript(agent_id)
         total = transcript_usage(path) if path else None
         if total:
             # A continued agent writes on in the same transcript: what its earlier runs recorded is theirs.
             for o in job.get("runs") or []:
-                if o is not r and o.get("agent_id") == a.agent_id and isinstance(o.get("usage"), dict):
+                if o is not r and o.get("agent_id") == agent_id and isinstance(o.get("usage"), dict):
                     for k in total:
                         total[k] -= o["usage"].get(k) or 0
             use = {k: max(0, v) for k, v in total.items()}
             if sum(use.values()):
                 r["usage"] = use
                 r["tokens"] = sum(use.values())
-    if a.ms is not None:
-        r["ms"] = a.ms
+    if ms is not None:
+        r["ms"] = ms
     if not r.get("ended"):
         r.update(ended=now(), status="done")
+    return r
+
+
+def cmd_usage(ctx, a):
+    job = ctx.load(a.job)
+    r = note_usage(job, a.agent, a.wp, a.candidate, a.tokens, a.ms, a.agent_id)
     ctx.save(job)
     out({"ok": True, "job": job["id"], "agent": a.agent, "tokens": r["tokens"], "context": a.tokens,
          "usage": r.get("usage"), "measured": "transcript" if r.get("usage") else "reported context only"})
+
+
+USAGE_FLAG_RE = re.compile(r"^([a-z][a-z-]*)(?:@([\w.-]+)|#(\d+))?=(\d+)(?:/(\d*)(?:/([A-Za-z0-9_-]{1,64}))?)?$")
+
+
+def usage_flag(text):
+    """--usage ROLE[@PACKAGE|#CANDIDATE]=TOKENS[/MS[/AGENT_ID]]: what a finished agent reported, recorded by the
+    command that reads its result, so the session needs no step of its own for it (fx usage)."""
+    m = USAGE_FLAG_RE.match(text.strip())
+    if not m:
+        raise argparse.ArgumentTypeError("--usage takes ROLE[@PACKAGE|#CANDIDATE]=TOKENS[/MS[/AGENT_ID]], "
+                                         "for example security=41000/62000/a1b2c3")
+    role, wp, cand, tokens, ms, aid = m.groups()
+    return {"agent": role, "wp": wp, "cand": int(cand) if cand else None, "tokens": int(tokens),
+            "ms": int(ms) if ms else None, "agent_id": aid}
+
+
+def apply_usage(ctx, a):
+    """Record every --usage of a command before the command itself runs. A failure here only says so on stderr: the
+    step the session asked for still runs."""
+    ref = getattr(a, "job", None)
+    if a.fn is cmd_review:
+        ref = (ticket_load(ctx, a.ref, required=False) or {}).get("lead") if a.action == "fit-result" else a.ref
+    if not ref:
+        sys.stderr.write("fx: --usage not recorded: this command names no job or review\n")
+        return
+    try:
+        job = ctx.load(ref)
+        for u in a.usage:
+            note_usage(job, u["agent"], u["wp"], u["cand"], u["tokens"], u["ms"], u["agent_id"])
+        ctx.save(job)
+    except (FxError, ValueError, TypeError) as e:
+        sys.stderr.write("fx: --usage not recorded: %s\n" % e)
 
 
 def median(xs):
@@ -15072,23 +15469,171 @@ def zap_minutes(ctx):
     return int(ctx.c("security.zap_minutes", 20) or 20)
 
 
-def zap_auth(ctx, job):
-    """security.zap_auth: the header that lets ZAP past the login. Its command prints the value (a test account's
-    token or cookie) once the app runs. Returns (header, value, error)."""
-    auth = ctx.c("security.zap_auth") or {}
-    if not auth.get("command"):
-        return None, None, None
+LOGIN_KINDS = {"web": "web (UI) login", "api": "API login"}
+LOGIN_KEYS = {"web": "security.zap_auth", "api": "security.zap_api_auth"}
+LOGIN_REFUSED_PCT = 80  # a scan that many of whose answers were 4xx did not get past the login (or a limit)
+
+
+class ScannerLogin(FxError):
+    """The security scanner could not log in, or lost its login during the scan. Nothing about the job's code: the gate
+    sets the round aside, sends no builder, and asks for the login to be worked out again (next: login)."""
+
+    def __init__(self, kind, why):
+        FxError.__init__(self, "the security scanner's %s does not work: %s. Work it out again (login.md) and save it, "
+                               "then run this again" % (LOGIN_KINDS[kind], why),
+                         code=3, extra={"next": "login", "kind": kind})
+        self.kind, self.why = kind, why
+
+
+def login_conf(ctx, job, kind):
+    """The saved way to log in, web (form, session cookie: security.zap_auth) or API (a token or key:
+    security.zap_api_auth), each {command, header, check, role, public}. A job whose own code changes how login works
+    keeps its way in its folder (login.json) until its pull request is merged. Returns (conf, where) or (None, None)."""
+    if job:
+        own = read(os.path.join(ctx.job_dir(job_real_id(job)), "login.json"))
+        try:
+            mine = (json.loads(own) or {}).get(kind) if own else None
+        except ValueError:
+            mine = None
+        if isinstance(mine, dict) and (mine.get("command") or mine.get("public")):
+            return mine, "job"
+    conf = ctx.c(LOGIN_KEYS[kind])
+    return (conf, "factory") if isinstance(conf, dict) and (conf.get("command") or conf.get("public")) else (None, None)
+
+
+def login_run(ctx, job, conf):
+    """(header, value) of a saved login: its command runs in the app's environment and prints the value last."""
+    if conf.get("public"):
+        return None, None
     env, db = app_env(ctx, job)
-    why = "security.zap_auth.command printed no value, so ZAP would only see pages that need no login"
     try:
-        r = run_sep(login_shell(ctx, app_fill(auth["command"], job, db), env), cwd=job["worktree"], env=env,
+        r = run_sep(login_shell(ctx, app_fill(conf["command"], job, db), env), cwd=job["worktree"], env=env,
                     timeout=120)
     except subprocess.TimeoutExpired:
-        return None, None, why
+        raise ScannerLogin(conf.get("_kind", "web"), "its command ran over 120 seconds")
     lines = (r.stdout or "").strip().splitlines()
     if r.returncode != 0 or not lines:
-        return None, None, why
-    return auth.get("header") or "Authorization", lines[-1].strip(), None
+        raise ScannerLogin(conf.get("_kind", "web"), "its command printed no value (exit %s)" % r.returncode)
+    return conf.get("header") or "Authorization", lines[-1].strip()  # the default before the web/API split
+
+
+def login_check(url, conf, header, value):
+    """None when the saved check page answers 2xx with the login (a redirect, such as to the login page, is not);
+    otherwise why not. No check page saved: None."""
+    path = conf.get("check")
+    if not path or not url:
+        return None
+    target = urllib.parse.urljoin(url.rstrip("/") + "/", str(path).lstrip("/"))
+    req = urllib.request.Request(target, method="GET")
+    if header and value:
+        req.add_header(header, value)
+    try:
+        code = urllib.request.build_opener(_NoRedirect).open(req, timeout=30).status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    except (urllib.error.URLError, OSError) as e:
+        return "its check page %s could not be reached (%s)" % (path, e)
+    return None if 200 <= code < 300 else "its check page %s answered %d" % (path, code)
+
+
+def scanner_logins(ctx, job, url, kinds):
+    """Log in for each kind the scan needs and prove it on the check page before anything is scanned. {kind: (header,
+    value, conf)}; a kind with nothing saved is (None, None, None), and the API falls back to the web login, as
+    before. Raises ScannerLogin."""
+    got = {}
+    for kind in kinds:
+        conf, _ = login_conf(ctx, job, kind)
+        if not conf:
+            got[kind] = got.get("web") if kind == "api" and got.get("web", (None,))[0] else (None, None, None)
+            continue
+        conf = dict(conf, _kind=kind)
+        header, value = login_run(ctx, job, conf)
+        bad = login_check(url, conf, header, value)
+        if bad:
+            raise ScannerLogin(kind, bad + " before the scan")
+        got[kind] = (header, value, conf)
+    return got
+
+
+def login_save_factory(ctx, kind, conf):
+    path = os.path.join(ctx.factory, CONFIG_NAME)
+    raw = read(path) or "{}"
+    cfg = json.loads(raw)
+    cfg.setdefault("security", {})[LOGIN_KEYS[kind].split(".")[1]] = conf
+    m = re.search(r"\n([ \t]+)\S", raw)
+    write_atomic(path, json.dumps(cfg, ensure_ascii=False, indent=len(m.group(1)) if m else 2) + "\n")
+    ctx.load_config(True)
+
+
+def cmd_login(ctx, a):
+    """The one way every agent logs in to the job's running app: the saved login of that kind (web: form and session
+    cookie; API: token or key), run now and proved on its check page. Prints the header and its value: a test
+    account's, on the job's own test stack. With --command, tries a new way instead (the agent working login out);
+    --save job|factory then keeps it once its check page answers 2xx: in the job folder when the job's own code changes
+    how login works (until its pull request is merged), else in factory.json (commit and push it)."""
+    kind = a.kind
+    if a.untested:
+        # init: no job and no app yet. The way is kept as given, and fx selftest proves it before any job runs: its
+        # scan logs in and calls the check page first, and stops with next: login when that fails.
+        if not (a.command and a.check and a.save == "factory"):
+            raise FxError("--untested keeps a way for fx selftest to prove: give --command, --check and --save factory",
+                          code=3)
+        login_save_factory(ctx, kind, {k: val for k, val in (("command", a.command), ("header", a.header),
+                                                             ("check", a.check), ("role", a.role)) if val})
+        out({"ok": True, "kind": kind, "saved": "%s in factory.json, not tried yet: fx selftest proves it (commit and "
+                                                 "push factory.json, and describe it in the knowledge)" % LOGIN_KEYS[kind]})
+        return
+    if not a.job:
+        raise FxError("name the job whose running app to log in to", code=3)
+    job = ctx.load(a.job)
+    rows = app_status(ctx, job)
+    row = rows.get(a.repo_name) if a.repo_name else next(
+        (r for r in rows.values() if r.get("healthy")), next(iter(rows.values()), None))
+    if not row or not row.get("healthy"):
+        raise FxError("the job's app does not answer: start it first (fx app up %s)" % job["id"], code=3)
+    rctx, v = one_app(ctx, job, a.repo_name) if a.repo_name else (ctx, job)
+    if a.command:
+        conf = {k: val for k, val in (("command", a.command), ("header", a.header), ("check", a.check),
+                                      ("role", a.role)) if val}
+        if not conf.get("check"):
+            raise FxError("--command needs --check: a page that needs this login and answers 2xx with it", code=3)
+    else:
+        conf, _ = login_conf(rctx, v, kind)
+        if not conf:
+            raise FxError("no %s is saved for this factory: work it out (login.md), then fx login --command ... --save"
+                          % LOGIN_KINDS[kind], code=3, extra={"next": "login", "kind": kind})
+    header, value = login_run(rctx, v, dict(conf, _kind=kind))
+    bad = login_check(row["url"], conf, header, value)
+    res = {"ok": not bad, "kind": kind, "header": header, "value": value, "check": conf.get("check"),
+           "role": conf.get("role")}
+    if bad:
+        res.update(error=bad, next="login")
+        out(res)
+        sys.exit(3)
+    if a.save:
+        if not a.command:
+            raise FxError("--save keeps a new way given with --command", code=3)
+        if a.save == "job":
+            path = os.path.join(ctx.job_dir(job_real_id(job)), "login.json")
+            saved = json.loads(read(path, "{}") or "{}")
+            saved[kind] = conf
+            write_atomic(path, json.dumps(saved, ensure_ascii=False, indent=1) + "\n")
+            res["saved"] = "the job's folder (login.json), for this job only until its pull request is merged"
+        else:
+            login_save_factory(ctx, kind, conf)
+            res["saved"] = "%s in factory.json: commit and push it, and describe it in the knowledge" % LOGIN_KEYS[kind]
+    out(res)
+
+
+def zap_refused_pct(data):
+    """The share of 4xx answers a ZAP report's insights give, or None."""
+    for i in (data.get("insights") or []) if isinstance(data, dict) else []:
+        if i.get("key") == "insight.code.4xx":
+            try:
+                return int(float(i.get("statistic")))
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 ZAP_LIBRARY_RULE = "zap-10003"
@@ -15125,9 +15670,8 @@ def scan_zap(ctx, job, url, rdir, notes=None, image=None):
     image = image or ctx.c("security.zap_image", ZAP_IMAGE) or ZAP_IMAGE
     notes = notes if notes is not None else []
     os.makedirs(rdir, exist_ok=True)
-    header, token, err = zap_auth(ctx, job)
-    if err:
-        return None, err
+    runs_ = zap_runs(ctx, "http://placeholder/")
+    logins = scanner_logins(ctx, job, url, ["web"] + (["api"] if any(n == "zap-api" for n, _, _ in runs_) else []))
     flags, target, note = zap_network(url)
     if note:
         notes.append(note)
@@ -15140,11 +15684,7 @@ def scan_zap(ctx, job, url, rdir, notes=None, image=None):
     cpus = zap_cpus()
     if cpus:
         cmd += ["--cpus", str(cpus)]
-    if token:  # by name: the value stays out of the command line, and only the container gets it
-        cmd += ["-e", "ZAP_AUTH_HEADER", "-e", "ZAP_AUTH_HEADER_VALUE", "-e", "ZAP_AUTH_HEADER_SITE"]
-        # Without a site ZAP adds the header to every request, and its browser also fetches fonts and CDN scripts.
-        env = dict(os.environ, ZAP_AUTH_HEADER=header, ZAP_AUTH_HEADER_VALUE=token,
-                   ZAP_AUTH_HEADER_SITE=urllib.parse.urlparse(target).hostname or "")
+    tokens = sorted({v for _, v, _ in logins.values() if v}, key=len, reverse=True)
     home = hasattr(os, "getuid")
     if home:
         # The container runs as this user, so its report lands in rdir without opening rdir to everyone. That uid has
@@ -15154,8 +15694,16 @@ def scan_zap(ctx, job, url, rdir, notes=None, image=None):
                 "-e", "JAVA_TOOL_OPTIONS=-Duser.home=/tmp/zap-user"]
     else:
         os.chmod(rdir, 0o777)  # no uid to run as: the ZAP container writes its report as its own user
-    found = {}
+    found, refused = {}, {}
     for name, script, args in zap_runs(ctx, target):
+        kind = "api" if name == "zap-api" else "web"
+        header, token, _ = logins.get(kind) or (None, None, None)
+        run_cmd, env = cmd, None
+        if token:  # by name: the value stays out of the command line, and only the container gets it
+            run_cmd = cmd + ["-e", "ZAP_AUTH_HEADER", "-e", "ZAP_AUTH_HEADER_VALUE", "-e", "ZAP_AUTH_HEADER_SITE"]
+            # Without a site ZAP adds the header to every request, and its browser also fetches fonts and CDN scripts.
+            env = dict(os.environ, ZAP_AUTH_HEADER=header, ZAP_AUTH_HEADER_VALUE=token,
+                       ZAP_AUTH_HEADER_SITE=urllib.parse.urlparse(target).hostname or "")
         start = [script]
         if home:
             start = ["sh", "-c", 'mkdir -p /tmp/zap-user && cp -R /home/zap/.ZAP /tmp/zap-user/.ZAP && '
@@ -15164,7 +15712,7 @@ def scan_zap(ctx, job, url, rdir, notes=None, image=None):
         if os.path.exists(report):
             os.remove(report)
         try:
-            r = run(cmd + flags + [image] + start + args + ["-J", name + ".json", "-I"], check=False, env=env,
+            r = run(run_cmd + flags + [image] + start + args + ["-J", name + ".json", "-I"], check=False, env=env,
                     timeout=max(1800, (zap_minutes(ctx) + 10) * 60))
         except subprocess.TimeoutExpired:
             try_out(["docker", "stop", "-t", "5", cname], timeout=60)
@@ -15174,16 +15722,28 @@ def scan_zap(ctx, job, url, rdir, notes=None, image=None):
             raise
         text = read(report, "") or ""
         log = r.stdout or ""
-        if token:
-            text, log = text.replace(token, REDACTED), log.replace(token, REDACTED)
-            if text:
-                write_atomic(report, text)
+        for t in tokens:
+            text, log = text.replace(t, REDACTED), log.replace(t, REDACTED)
+        if tokens and text:
+            write_atomic(report, text)
         write_atomic(os.path.join(rdir, name + ".log"), log)
         try:
             data = json.loads(text)
         except ValueError:
             return None, "ZAP produced no report (see %s.log)" % name
+        refused[kind] = zap_refused_pct(data)
         zap_collect(found, data, target)
+    for kind, (header, token, conf) in logins.items():
+        if conf and conf.get("_kind") == kind:  # its own saved login: did ZAP keep it to the end of the scan?
+            bad = login_check(url, conf, header, token)
+            if bad:
+                raise ScannerLogin(kind, bad + " after the scan: ZAP lost the login during it (a logout or "
+                                              "password form, or the session ended)")
+        pct = refused.get(kind)
+        if pct is not None and pct >= LOGIN_REFUSED_PCT:
+            raise ScannerLogin(kind, "%d%% of the %s scan's answers were 4xx, so it did not get past the login "
+                                     "(401/403) or a limit (429: the limits must be raised on the test stack)"
+                               % (pct, "API" if kind == "api" else "web"))
     return zap_found(found), None
 
 
@@ -15383,6 +15943,42 @@ def app_path_shape(path):
     if re.search(ASSET_EXT, path):
         path = ASSET_HASH_ONLY_RE.sub("#", ASSET_NAME_RE.sub("#", path))
     return re.sub(r"(?<=/)(?:\d+|[0-9a-fA-F-]{32,36})(?=/|$)", "#", path)
+
+
+def zap_same_place(a, b):
+    """Two ZAP findings of the same rule on the same page shape (ids and query values aside)."""
+    if a.get("rule") != b.get("rule"):
+        return False
+    def shapes(f):
+        return {app_path_shape(urllib.parse.urlsplit(p).path or p) for p in f.get("paths") or []}
+    pa, pb = shapes(a), shapes(b)
+    return bool(pa & pb) if pa and pb else a.get("message") == b.get("message")
+
+
+def zap_confirm(ctx, job, url, rdir, found, accepted, notes, image):
+    """A finding that would block is believed only when a second scan finds it again at the same place. ZAP's guesses
+    (comparing answers to slightly different requests) change from one scan to the next: a scan that once saw
+    'SQL injection' where a page answered differently for another reason rarely sees it on the same page twice, while a
+    real hole answers the same way every time. What only one scan saw does not block and goes to the security reviewer
+    as unsure; no builder is sent to prove a guess wrong. Costs one more scan, only when something would block.
+    security.zap_confirm: false turns it off."""
+    limit = block_rank(ctx)
+    would = [x for x in found or [] if x.get("new") and not accepted_reason(accepted, x)
+             and SEV_RANK.get(x["severity"], 2) >= limit]
+    if not would or ctx.c("security.zap_confirm", True) is False:
+        return
+    again, err = scan_zap(ctx, job, url, os.path.join(rdir, "zap-confirm"), [], image)
+    if err:
+        notes.append("zap: the second scan, to confirm %d blocking finding(s), did not finish (%s): they block as found"
+                     % (len(would), err))
+        return
+    unsure = [x for x in would if not any(zap_same_place(x, y) for y in again or [])]
+    for x in unsure:
+        x["unconfirmed"] = True
+    notes.append("zap: %d finding(s) would block; a second scan found %d of them again at the same place (they block)"
+                 "%s" % (len(would), len(would) - len(unsure),
+                         "; %d were not found again: they do not block and are marked unsure for the security reviewer "
+                         "(round-*/zap-confirm/ has the second scan)" % len(unsure) if unsure else ""))
 
 
 def app_finding_is_new(f, known, limit):
@@ -15620,6 +16216,10 @@ def run_security(ctx, job, rdir, app_url_, whole=False, zap_from=None):
             f, err = scan_zap(ctx, job, app_url_, os.path.join(rdir, "zap"), notes, image)
             if not err:
                 zap_scan.update(scanned=now())
+                f = compared(f, "zap")
+                if not whole:
+                    zap_confirm(ctx, job, app_url_, rdir, f, accepted, notes, image)
+                return f, None
             return compared(f, "zap"), err
         use("headers", None, hdrs)
         if sc["zap"] and not shutil.which("docker"):
@@ -15660,7 +16260,7 @@ def run_security(ctx, job, rdir, app_url_, whole=False, zap_from=None):
             f["accepted"] = why
     blocking = [f for f in findings if f.get("secret") or (f.get("suppression") and not allow) or
                 (f.get("new") and not f.get("suppression") and not f.get("accepted") and not f.get("test_code") and
-                 SEV_RANK.get(f["severity"], 2) >= limit)]
+                 not f.get("unconfirmed") and SEV_RANK.get(f["severity"], 2) >= limit)]
     if zap_scan and not whole:
         try:
             zap_scan["settings"] = zap_scan_mark(ctx, job)
@@ -15691,7 +16291,8 @@ def security_markdown(res):
         for f in sorted(rows, key=lambda f: f not in res["blocking"])[:SECURITY_ROWS]:
             md.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 "yes" if f in res["blocking"] else "accepted: %s" % f["accepted"] if f.get("accepted") else
-                "test code" if f.get("test_code") else "",
+                "test code" if f.get("test_code") else
+                "unsure: not found again by a second scan" if f.get("unconfirmed") else "",
                 f["severity"], "yes" if f.get("new") else "no", f["tool"],
                 f.get("rule") or "", f.get("location") or "", (f.get("message") or "").replace("|", "/"),
                 " / ".join(x for x in (f.get("owasp"), f.get("cwe")) if x)))
@@ -19777,8 +20378,9 @@ def review_ctx(ctx, a):
     prefix = "\n".join(lines)
     model = review_model(ctx, agent)
     record_run(ctx, job, agent, model, result=[os.path.join(rdir, result)])
+    pfile, short = prompt_by_file(ctx.job_dir(job["id"]), agent, "%s\n\nTask: %s" % (prefix, task))
     out({"ok": True, "review": job["id"], "agent": agent, "subagent_type": REVIEW_AGENTS[agent], "model": model,
-         "task": task, "prompt": "%s\n\nTask: %s" % (prefix, task)})
+         "task": task, "prompt": short, "prompt_file": pfile})
 
 
 def review_model(ctx, agent):
@@ -21223,10 +21825,13 @@ def review_fit(ctx, a):
     ticket_save(ctx, run)
     model = clamp_model(ctx.c("models.fit_checker", "opus"), floor_model(ctx))
     record_run(ctx, ctx.load_exact(run["lead"]), "fit-checker", model, result=[fit_file])
+    pfile, short = prompt_by_file(
+        ctx.job_dir(run["lead"]), "fit-checker",
+        "%s\n\nTask: Check that these merge requests of issue %s fit each other, and write your result." % (
+            "\n".join(lines), run["key"]))
     out({"ok": True, "ticket": run["key"], "review": run["lead"], "agent": "fit-checker",
          "subagent_type": "factory-fit-checker", "model": model, "fit_file": fit_file,
-         "prompt": "%s\n\nTask: Check that these merge requests of issue %s fit each other, and write your result." % (
-             "\n".join(lines), run["key"]),
+         "prompt": short, "prompt_file": pfile,
          "next": "spawn the fit checker, then fx review fit-result %s" % run["key"]})
 
 
@@ -23456,6 +24061,23 @@ def build_parser():
     s.add_argument("--agent-id", dest="agent_id",
                    help="the agent's id: what it really used is read from its transcript on this machine")
     s.set_defaults(fn=cmd_usage)
+    s = sub.add_parser("limits", help="the app's limits: check, write fix tasks, mark worked out, a job's test values")
+    s.add_argument("action", choices=["check", "tasks", "mark", "env"])
+    s.add_argument("job", nargs="?")
+    s.add_argument("--code", action="store_true", help="check: also that the cited code reads each variable (base)")
+    s.set_defaults(fn=cmd_limits)
+    s = sub.add_parser("login", help="log in to the job's running app the saved way (web or API) and print the header")
+    s.add_argument("job", nargs="?")
+    s.add_argument("--kind", choices=["web", "api"], required=True)
+    s.add_argument("--repo", dest="repo_name", metavar="NAME", help="the repository whose app (several running)")
+    s.add_argument("--command", help="try a new way: a command that prints the header's value last")
+    s.add_argument("--header", help="with --command: the header (Cookie for a web session; default Authorization)")
+    s.add_argument("--check", help="with --command: a page that needs this login and answers 2xx with it")
+    s.add_argument("--role", help="with --command: the test account's role, for the record")
+    s.add_argument("--save", choices=["job", "factory"], help="keep the new way once its check passes")
+    s.add_argument("--untested", action="store_true",
+                   help="init, no job yet: keep --command as the factory's way; fx selftest proves it")
+    s.set_defaults(fn=cmd_login)
     s = sub.add_parser("board", help="write the factory board (an HTML page of all jobs on this machine)")
     s.add_argument("--open", action="store_true", help="open it in the browser")
     s.set_defaults(fn=cmd_board)
@@ -23490,6 +24112,8 @@ def build_parser():
     s = sub.add_parser("result", help="read an agent's result file and move on")
     s.add_argument("job")
     s.add_argument("step", choices=list(FIRST_LINE))
+    s.add_argument("--usage", action="append", type=usage_flag, metavar="ROLE=TOKENS/MS/AGENT_ID",
+                   help="record what a finished agent used (instead of a separate fx usage), repeatable")
     s.set_defaults(fn=cmd_result)
 
     s = sub.add_parser("models")
@@ -23524,6 +24148,8 @@ def build_parser():
 
     s = sub.add_parser("verdicts", help="read review files for the current round")
     s.add_argument("job")
+    s.add_argument("--usage", action="append", type=usage_flag, metavar="ROLE=TOKENS/MS/AGENT_ID",
+                   help="record what a finished agent used (instead of a separate fx usage), repeatable")
     s.set_defaults(fn=cmd_verdicts)
 
     s = sub.add_parser("answers", help="record answers.md and return to the asking stage")
@@ -23662,6 +24288,8 @@ def build_parser():
     s = sub.add_parser("pick", help="best-of-N: take the chosen candidate into the job branch")
     s.add_argument("job")
     s.add_argument("--k", type=int)
+    s.add_argument("--usage", action="append", type=usage_flag, metavar="ROLE=TOKENS/MS/AGENT_ID",
+                   help="record what a finished agent used (instead of a separate fx usage), repeatable")
     s.set_defaults(fn=cmd_pick)
 
     s = sub.add_parser("lessons", help="learn from reviews and the human's corrections; save approved lessons")
@@ -23672,12 +24300,16 @@ def build_parser():
     s = sub.add_parser("split", help="read the planner's plan.md: one builder, or packages built in parallel")
     s.add_argument("job")
     s.add_argument("--update", action="store_true", help="after the planner answered change requests")
+    s.add_argument("--usage", action="append", type=usage_flag, metavar="ROLE=TOKENS/MS/AGENT_ID",
+                   help="record what a finished agent used (instead of a separate fx usage), repeatable")
     s.set_defaults(fn=cmd_split)
     s = sub.add_parser("wp", help="split build: start ready packages, take a finished one, route findings")
     s.add_argument("action", choices=["next", "done", "feedback"])
     s.add_argument("job")
     s.add_argument("id", nargs="?", help="done: the package id")
     s.add_argument("--wait", action="store_true", help="next: when the machine has no room for a package, wait for it")
+    s.add_argument("--usage", action="append", type=usage_flag, metavar="ROLE=TOKENS/MS/AGENT_ID",
+                   help="record what a finished agent used (instead of a separate fx usage), repeatable")
     s.set_defaults(fn=cmd_wp)
 
     s = sub.add_parser("logic", help="the logic/ folder: check, init prompts, updates from merged jobs")
@@ -23785,6 +24417,8 @@ def build_parser():
     s.add_argument("--later-summary-file", help="draft: a file with the summary for people, put first in --later-ticket")
     s.add_argument("--note", help="exec: what this step is for")
     s.add_argument("--command", help="exec: the shell command, run in the sandbox's clone")
+    s.add_argument("--usage", action="append", type=usage_flag, metavar="ROLE=TOKENS/MS/AGENT_ID",
+                   help="result, fit-result: record what the finished agent used (instead of a separate fx usage)")
     s.set_defaults(fn=cmd_review)
     s = sub.add_parser("audit-scan", help="every scanner over a whole branch and its history, in every repository")
     s.add_argument("--repo", dest="repo_name", metavar="NAME", help="only this repository")
@@ -23887,6 +24521,8 @@ def main(argv=None):
             job_owner_check(ctx, a.job)
         if ref:
             mark_step(ctx, ref, step, True)
+        if getattr(a, "usage", None) and ctx and ctx.cfg:
+            apply_usage(ctx, a)
         try:
             a.fn(ctx, a)
         except PlaceWait as e:

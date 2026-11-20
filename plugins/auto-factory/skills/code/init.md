@@ -214,10 +214,17 @@ answers did not settle:
      finds SQL injection and XSS that watching traffic never does, adds minutes
      to a gate, and writes junk through every form. Recommend it only when
      `app.up` gives each job a throw-away database; never decide it for the user.
-   - How can a test account log in, so ZAP sees more than the login page? Set
-     `security.zap_auth.command` to print the header's value, such as
-     `curl -s -d 'email=t@example.test&password=t' http://127.0.0.1:$FACTORY_PORT/login | jq -r '"Bearer " + .token'`,
-     using test data only. With several repositories, ZAP scans each changed
+   - How does a test account log in, so ZAP (and every agent, through `fx login`) sees
+     more than the login page? Do not write it yourself: spawn the login agent as
+     **Scanner login** in SKILL.md says, with `init` and both kinds (`web`, and `api`
+     when the app has an API). It works the web login and the API login out from the
+     code, each on its own, saves them with `--untested` (`security.zap_auth`,
+     `security.zap_api_auth`, each with a `check` page and the account's `role`),
+     describes them in the knowledge, and asks you what the code does not tell. Show
+     the user the role it chose and the pages only another role opens. `fx selftest`
+     (Phase 10) proves both logins; with `next: login` it goes back to the agent.
+     The command reads passwords and keys when it runs and never holds one.
+     With several repositories, ZAP scans each changed
      repository's app and runs the command in that app's environment, where
      `$FACTORY_PORT` is that app's port: set `security.zap_auth` in each
      repository's entry, or log in at the app that holds the accounts with
@@ -279,6 +286,10 @@ per feature). Write it for **every** feature:
    **conflict** the writers found (back end vs front end, code vs issue or
    Confluence) and the most important open points; record each answer in the
    logic file (into the rules, with a change-history row) or leave it open.
+
+Then the app's limits: follow **/auto-factory:code limits** in SKILL.md (steps 2 to 6). Every
+limit that can stop tests or the scanner gets its environment variable and test value in its module's
+table, and one the code does not read so becomes a fix task that every job waits for.
 
 Then prove the knowledge and the logic, before the user sees them:
 1. `python3 ${CLAUDE_SKILL_DIR}/fx knowledge check` checks every cited path, line range and excerpt

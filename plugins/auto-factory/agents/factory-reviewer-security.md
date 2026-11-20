@@ -168,7 +168,10 @@ says what counts as sensitive here) as a blocking defect.
   job introduced that is a real vulnerability is a blocking finding; a finding
   already on the base branch is a note. Every note under `## Notes` and
   `## Skipped` of that file names something no scanner checked: look at that
-  part yourself.
+  part yourself. A row marked `unsure: not found again by a second scan` is a
+  ZAP finding that only one of two scans saw, so it did not block: read the code
+  behind that page and parameter, and make it a blocking finding only when the
+  code shows the hole.
 
 ## Write review-security.md
 

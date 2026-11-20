@@ -19,7 +19,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from test_security import STUB, SECRET_ENV, fx, load_json, sh, slurp, write
+from test_security import STUB, SECRET_ENV, fx, load_json, sh, slurp, write, prompt_text
 
 KEY = "PROJ-7"
 CHECKS = "#!/usr/bin/env bash\nexit 0\n"
@@ -566,7 +566,7 @@ class DeferredClonesTest(ProjectCase):
         self.assertTrue(self.res["repos_after_intake"])
         self.assertIsNone(self.res["worktree"])
         self.assertFalse(os.path.exists(self.work(self.job)))
-        prompt = self.ok("ctx", self.job, "--agent", "intake")["prompt"]
+        prompt = prompt_text(self.ok("ctx", self.job, "--agent", "intake"))
         self.assertIn("REPOS:", prompt)
         self.assertIn("be (%s, base main)" % self.origin["be"], prompt)
         code, res = self.fx("ctx", self.job, "--agent", "spec")
@@ -593,7 +593,7 @@ class DeferredClonesTest(ProjectCase):
         self.assertTrue(os.path.exists(os.path.join(self.work(self.job, "fe"), "only-on-develop.txt")))
         self.assertEqual(raw["repos"]["be"]["branch"], raw["repos"]["fe"]["branch"])
         self.assertIn("- be: change; worktree %s;" % self.work(self.job, "be"),
-                      self.ok("ctx", self.job, "--agent", "spec")["prompt"])
+                      prompt_text(self.ok("ctx", self.job, "--agent", "spec")))
 
     def test_one_repository_named(self):
         self.intake(self.job, "INTAKE: ACCEPT\nREPOS: fe\n")

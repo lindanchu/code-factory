@@ -121,6 +121,11 @@ of several jobs together. Or open a Claude Code session for each ticket, in one 
 factory repository or in several projects'. Either way the jobs share the machine through
 fx, with no server and nothing to set up.
 
+One session drives at most 3 jobs over its life: each job stays in its context, read again at
+every step, so a fourth makes every step of the others dearer too. Given more, the session runs
+what it has room for and prints the commands to paste into new sessions, 3 tickets each; the
+board shows every session's jobs on one page.
+
 - **Ports.** Every clone that runs the project's stack (a job, a package, a candidate, a
   review's sandbox) gets its own block of `ports.step` ports, handed out for the whole
   machine. Two projects never get the same ones, and a port something else already
@@ -194,6 +199,26 @@ How many tickets finish in a day is still set by the heaviest step. On a machine
 fits one gate, two gates overlap only where one's checks fit beside the other's scans.
 
 ## What blocks a job
+
+**A limit of the app the environment cannot set.** Tests and the security scanner call the app far more often than a
+person does, and meet its limits: an answer 429 after 60 calls a minute, an account locked after 5 wrong passwords,
+a captcha. They then misread what they see (a scanner took a 429 for SQL injection) and cost whole rounds. So every
+such limit is read by the code from an environment variable, and the job's test stack runs with it raised:
+
+- The limits live in the parameter table of each module's `logic/<module>/README.md`, with two columns: **Env** (the
+  variable the code reads it from) and **Test value** (what the test stack runs with). Agents find them in the code,
+  per project and per feature (`/auto-factory:code limits`, also part of `init`), and you approve them.
+- fx gives the test values to the job's app (`app.limits_env`: as a process's environment, or the file
+  `$FACTORY_LIMITS_ENV` names, which a container stack must load), and checks that the line the table cites holds
+  the variable.
+- A limit the code does not read so (`MISSING`) stops **every** job of the project, except the fix task fx writes for
+  it (read it from the environment, today's value as the default); jobs start again once it is merged. A factory
+  whose limits were never worked out gets no job either.
+- Limits nobody listed are caught three ways, each stopping until fixed: the code reviewer (a limit the job adds),
+  the librarian (one that reached the base from elsewhere) and the gate (a scan the app refused).
+- Nothing turns this off.
+
+The rest:
 
 - A changed repository's checks script, `checks/<repo>.sh` (your lint, type check, tests,
   build), failing. The gate goes through the changed repositories in merge order and stops at
@@ -326,8 +351,14 @@ apply to your factory.
 | To see | Set | Note |
 |---|---|---|
 | Attacks on the running app: SQL injection, XSS and the like | `security.zap_mode: "full"` | Off by default: ZAP writes junk through every form it finds, so `app.up` must give each job a throw-away database. Stops after `security.zap_minutes`. |
-| Pages behind the login | `security.zap_auth.command` | Prints the header's value for a test account once the app runs. The value goes only to the ZAP container, which sends it only to the app's host, and is taken out of its reports. |
-| API routes no page links to | `security.zap_openapi` | Where the app serves its OpenAPI description, such as `/openapi.json`. |
+| Pages behind the login | `security.zap_auth` (web login) | Worked out from the code by an agent at `init` (`login.md`), never written by hand: a command that prints a test account's session cookie, a `check` page that must answer 2xx with it, and the account's `role`. The value goes only to the ZAP container, which sends it only to the app's host, and is taken out of its reports. |
+| API routes no page links to | `security.zap_openapi` and `security.zap_api_auth` (API login) | Where the app serves its OpenAPI description, such as `/openapi.json`, and how a client of the API logs in (a token or key), kept apart from the web login. |
+
+Every scan logs in first and calls each `check` page, and calls it again after the scan. A check that fails, a
+login lost during the scan, or a scan most of whose answers were 4xx (401/403: no login; 429: a limit) stops the
+gate without a builder (`next: login`): the agent works the login out again, and asks you what the code does not
+tell. A job whose own change alters login keeps its way for itself until its pull requests are merged. Every agent
+that needs to log in uses the same saved way, through `fx login <job> --kind web|api`.
 | What is already in the code and its history | `fx audit-scan` | Every scanner over a whole branch. One task file per rule to fix, ready for `fx new --local`. |
 
 Run `fx selftest` again after changing `zap_mode`, `zap_openapi`, `zap_auth` or the ZAP
@@ -1058,6 +1089,19 @@ once the plugin is updated:
 
 What a factory made before 3.4 keeps from its own `factory.json`: `models.high.builder` and `models.librarian`
 stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit and push.
+
+### Upgrading to 3.5: what to do before the next job
+
+- **The app's limits** (**What blocks a job**): a factory gets no new job until `/auto-factory:code limits` has
+  worked them out. Run it once in each factory repository; a limit the code does not read from the environment
+  becomes a fix task that the other jobs wait for.
+- **The scanner's logins**: run `fx selftest` again. When it stops with `next: login`, the login agent works the web
+  login and the API login out (`security.zap_auth`, `security.zap_api_auth`), each with a check page. Until then a
+  gate whose scan cannot log in stops without a builder.
+- One session drives at most 3 jobs; agents get their instructions from a file fx writes (`prompt_file`), and the
+  tokens an agent used are recorded on the command that reads its result (`--usage`).
+- A gate no longer sends a builder for what is not in the code: a ZAP finding a second scan does not see again is
+  marked unsure, and a run the machine broke (a browser crash, a timeout) runs once more.
 
 ## Set up a project: `init`
 

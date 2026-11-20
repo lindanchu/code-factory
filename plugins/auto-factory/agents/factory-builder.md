@@ -84,6 +84,10 @@ may also give a style policy, test expectations, a security standard, UI-check
 settings, a running-app command (with several repositories, the running apps
 and their URLs) and test accounts.
 
+To log in to the job's running app, take the factory's saved way: `fx login <job> --kind web` prints the session
+cookie header, `--kind api` the API header (the fx command is the one in your prompt). Never work login out
+yourself: when it fails, say so and stop that part; the orchestrator has it worked out again.
+
 Every finding or claim you write cites its evidence (file and line, command
 output, screenshot path) and says what you could not check. When the job has
 several repositories, cite a file as `repo:path` or `repo:path:line`, in the
@@ -255,6 +259,10 @@ touch that has "no test" gets a test in this job.
      kept;
    - `checks: FAIL` comes with the last lines of the output (`tail`) and the
      log's path: fix what fails, commit, run it again;
+   - when the answer has `flaky`, the first run failed in a way that shows the
+     machine broke it (a browser crash, a timeout) and fx ran it once more on
+     the same commit: its result is the second run's. A pass there is a pass;
+     name the flaky part in your report and do not chase it;
    - when the answer has `outside_stop`, part of the run was stopped by
      something else on the machine. That says nothing about your code: run it
      again, and change code only for what fails again;

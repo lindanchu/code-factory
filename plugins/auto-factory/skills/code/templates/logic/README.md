@@ -27,6 +27,10 @@ logic/
 - Module-wide rules go in `<module>/README.md`, system-wide rules in `shared.md`.
 - Every parameter (durations, limits, lengths…) is written in one place only, normally the parameter table
   of the module README; other files link to it.
+- A limit that can stop tests or scanners (calls per minute, failed logins before a lock, a captcha, messages sent
+  per hour…) is read by the code from an environment variable, named in the table's Env column with the value the
+  factory's test stack runs with in Test value. One the code does not read so is MISSING, and stops every job until
+  it is fixed.
 - UI text is quoted verbatim, in its original language.
 - Each rule cites the code that implements it (`path:lines`) and the test that covers it (or "no test").
 - A change of logic: update the file, add a row to its change history (old → new value) and to the overall

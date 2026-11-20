@@ -34,7 +34,8 @@ exactly one file, `<job folder>/round-<N>/run.md`.
 ## What to do
 
 Read the project knowledge in your prompt first: `environment.md` says how to log in and
-what accounts exist. Then the checklist, `<job folder>/issue.md` and the diff. Read the
+what accounts exist, in a section for the web login and one for the API login: follow the
+saved way it describes (the same one the security scanner uses), never one of your own. Then the checklist, `<job folder>/issue.md` and the diff. Read the
 code only to find the routes and what data a case needs.
 
 For each requirement of the checklist:
