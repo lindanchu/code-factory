@@ -76,7 +76,8 @@ You can filter by project, show only what waits for you, or find a job by key.
 Below the office, one row per job opens its steps (with several repositories, each one's
 branch and pull request), its timeline (parallel
 builders side by side), the expected finish (from the typical time of each step
-in your earlier jobs), tokens the agents reported (and a rough cost when
+in your earlier jobs), the tokens the agents used, read from each agent's transcript
+on this machine with every step's re-read context counted (and a rough cost when
 `dashboard.usd_per_mtok` is set) and links to its files; then recent activity
 and the finished jobs. Click an agent for what it does and its recent runs.
 The page reloads itself every few seconds and every fx command rewrites it:
@@ -85,8 +86,11 @@ server, nothing to install.
 
 ## Several builders on one ticket
 
-After the spec, a planner decides what finishes the job fastest. A small or
-tightly knit job keeps one builder. Otherwise it is split into packages:
+After the spec, a planner decides what builds the job with the fewest tokens;
+time does not count. Every extra builder pays again for reading the spec, the
+knowledge and the code, so a job keeps one builder unless it has large parts
+that are truly separate, where one builder would carry them all in a context
+that costs more at every step. Then it is split into packages:
 
 - **One owner per file.** Every package lists the files it may change, and no
   file belongs to two packages. A package that changes anything else is not
@@ -1035,6 +1039,26 @@ since 3.0.0 cannot read a factory once it is converted. Then, in each factory re
 
 Then step 6 above.
 
+### Upgrading to 3.4: fewer tokens
+
+3.4 spends far fewer tokens on each job, most of all when one session drives several. What changes by itself
+once the plugin is updated:
+
+- `/auto-factory:code` and `/auto-factory:review` run on Sonnet, whatever model the session was on, and the
+  rules of `init`, `audit`, `install` and the review sit in files of their own, read only when that command runs.
+- Jira updates and reading an issue without a token go to small agents; the session keeps one line of each.
+- The planner aims at the fewest tokens, not the shortest time, and keeps one builder unless the job has large
+  parts that are truly separate.
+- A later round continues the builder only while its context is small (`builder_resume_max_tokens`, default
+  150000); otherwise a new builder starts from `build.md` and the branch. The builder reads each file once and
+  opens only the screenshots it needs.
+- The spec written again after your answers starts from its own draft, on Sonnet (`models.spec_after_answers`).
+  The review's runner, which calls the API, runs on Sonnet.
+- The board shows the tokens agents really used, read from their transcripts, priced per kind of token.
+
+What a factory made before 3.4 keeps from its own `factory.json`: `models.high.builder` and `models.librarian`
+stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit and push.
+
 ## Set up a project: `init`
 
 1. Create an empty private repository for the project's factory (for example
@@ -1230,8 +1254,13 @@ each project repository           receives only factory/<KEY>-… branches and p
 ```
 .claude-plugin/marketplace.json
 plugins/auto-factory/.claude-plugin/plugin.json
-plugins/auto-factory/skills/code/     SKILL.md (/auto-factory:code), fx, mobile.py, desktop.py, factory-ui.js, factory-desktop.js, templates/
+plugins/auto-factory/skills/code/     SKILL.md (/auto-factory:code), fx, mobile.py, desktop.py, factory-ui.js, factory-desktop.js, templates/;
+                                      init.md, review.md, audit.md, install.md: the rules of those
+                                      commands, read only when one runs, so a job does not carry them;
+                                      jira-push.md, jira-fetch.md: what the small agents that update
+                                      Jira and read an issue without a token follow
 plugins/auto-factory/skills/review/   SKILL.md (/auto-factory:review): follows the rules of code/SKILL.md
+                                      and code/review.md
 plugins/auto-factory/skills/code/shared/  what the UI checks measure with: the screen comparer, the app
                                       runtime, the reading of a design package
 plugins/auto-factory/agents/          factory-*: intake, spec-writer, builder, 4 reviewers,

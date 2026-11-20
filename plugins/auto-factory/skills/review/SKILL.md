@@ -2,6 +2,7 @@
 name: review
 description: Review a colleague's merge request against its Jira ticket with the software factory - a checklist from the ticket, the code run in a throw-away sandbox, reviewers for the requirements, the code, security and the screens, and the findings posted only after the user confirms. Only when the user types /auto-factory:review with a merge request link or a Jira key, or with nothing to choose one.
 argument-hint: [<MR link or Jira key>]
+model: sonnet
 disable-model-invocation: true
 ---
 
@@ -14,7 +15,8 @@ in one file with the code command, so that a review and a job never follow two v
 
 1. Read the whole of the code command's file: `SKILL.md` in the folder next to this one named `code`, that is
    `${CLAUDE_SKILL_DIR}/../code/SKILL.md` (installed with install.sh as personal skills, the folder is named
-   `auto-factory-code` instead). It is long: read it in parts, to the end, before the first step.
+   `auto-factory-code` instead). It is long: read it in parts, to the end, before the first step. Its
+   **/auto-factory:review** section sends you to `review.md` in that same folder: read that whole file too.
 2. Be the orchestrator it describes, for its command **/auto-factory:review**, with the arguments
    `review $ARGUMENTS`.
 3. That file names its own folder with the variable CLAUDE_SKILL_DIR, written with a dollar sign and braces. It is the

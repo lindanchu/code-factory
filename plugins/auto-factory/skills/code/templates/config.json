@@ -16,6 +16,8 @@
   },
   "_doc_clone": "filter: partial clone that downloads file contents on demand (faster); empty for full clones.",
   "max_rounds": 3,
+  "_doc_builder_resume_max_tokens": "A later round continues the job's builder only when its last run ended with at most this many tokens in its context (the size it reported); a larger builder would read all of it again at every step, so a new one starts from build.md and the branch instead. 0: always continue.",
+  "builder_resume_max_tokens": 150000,
   "ports": {
     "base": 5100,
     "step": 10
@@ -179,6 +181,7 @@
   },
   "models": {
     "review": {
+      "runner": "sonnet",
       "checklist": "sonnet",
       "requirement": "opus",
       "code": "sonnet",
@@ -187,7 +190,7 @@
       "ui": "opus",
       "verifier": "opus"
     },
-    "_doc": "Never below sonnet: fx raises anything lower to sonnet. high = intake rated the issue high risk.",
+    "_doc": "Never below sonnet: fx raises anything lower to sonnet. high = intake rated the issue high risk. The builder is sonnet at both risks: it is the agent that runs longest and reads the most, so on opus it costs several times more, while the security reviewer, its verifier and the approver stay on opus. builder_last_round still gives the last allowed round opus.",
     "floor": "sonnet",
     "low": {
       "intake": "sonnet",
@@ -202,7 +205,7 @@
     "high": {
       "intake": "sonnet",
       "spec": "opus",
-      "builder": "opus",
+      "builder": "sonnet",
       "security": "opus",
       "code": "sonnet",
       "ux": "sonnet",
@@ -210,9 +213,11 @@
       "approver": "opus"
     },
     "builder_last_round": "opus",
+    "_doc_spec_after_answers": "The spec writer's model when it writes the spec again after the human answered its questions: it starts from its own draft, so the hard part is done.",
+    "spec_after_answers": "sonnet",
     "judge": "opus",
     "verifier": "opus",
-    "librarian": "opus",
+    "librarian": "sonnet",
     "knowledge_reviewer": "opus",
     "logic_writer": "opus",
     "planner": "opus",
@@ -385,7 +390,7 @@
     "max_tries": 2
   },
   "dashboard": {
-    "_doc": "The factory board (fx board): an HTML page of every job on this machine, rewritten by every fx command. usd_per_mtok, optional: a rough price per million tokens for each model name (for example {\"opus\": 30, \"sonnet\": 6}), to show an estimated cost next to the tokens agents report; leave it empty to show tokens only.",
+    "_doc": "The factory board (fx board): an HTML page of every job on this machine, rewritten by every fx command. usd_per_mtok, optional: the input price per million tokens for each model name (for example {\"opus\": 5, \"sonnet\": 3}), or every price of one, as {\"input\": 5, \"output\": 25, \"cache_read\": 0.5, \"cache_write\": 6.25}; a price left out is the input price times Anthropic's ratio (output 5, cache read 0.1, cache write 1.25). It shows an estimated cost next to the tokens agents used (read from each agent's transcript when fx usage has its --agent-id; otherwise only the size of its context at the end, priced as input); leave it empty to show tokens only.",
     "usd_per_mtok": {}
   }
 }

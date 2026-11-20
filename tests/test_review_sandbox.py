@@ -529,7 +529,8 @@ class RunnerAgentTest(SandboxCase):
 
     def test_the_orchestrator_may_not_review_by_itself(self):
         from test_review import ROOT
-        text = " ".join(slurp(os.path.join(ROOT, "plugins", "auto-factory", "skills", "code", "SKILL.md")).split())
+        code = os.path.join(ROOT, "plugins", "auto-factory", "skills", "code")
+        text = " ".join((slurp(os.path.join(code, "SKILL.md")) + slurp(os.path.join(code, "review.md"))).split())
         self.assertIn('never offer a "direct review"', text)
         self.assertNotIn("code never runs here", text)
 
@@ -1022,9 +1023,13 @@ class DecisionsAndRulesTest(SandboxCase):
 
     def test_the_skill_asks_one_thing_at_a_time(self):
         from test_review import ROOT
-        text = " ".join(slurp(os.path.join(ROOT, "plugins", "auto-factory", "skills", "code", "SKILL.md")).split())
+        code = os.path.join(ROOT, "plugins", "auto-factory", "skills", "code")
+        review = " ".join(slurp(os.path.join(code, "review.md")).split())
+        text = " ".join(slurp(os.path.join(code, "SKILL.md")).split()) + " " + review
         self.assertIn("One question at a time", text)
-        review = text[text.index("### `/auto-factory:review"):text.index("### `/auto-factory:code audit`")]
+        # SKILL.md only points to review.md; the review's rules are there and nowhere else
+        self.assertIn("${CLAUDE_SKILL_DIR}/review.md", text)
+        self.assertTrue(review.startswith("### `/auto-factory:review"))
         for rule in ("explain first, then ask", "Every question is in plain words", "Short, but complete",
                      "Two versions of every explanation", "Summary, for people", "--summary-file", "--fix-summary-file",
                      "--design-summary-file"):

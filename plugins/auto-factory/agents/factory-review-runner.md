@@ -2,7 +2,7 @@
 name: factory-review-runner
 description: Software factory review step. Runs a colleague's merge request for real: calls the API in a throw-away sandbox for every requirement of the checklist, through fx so each call is logged, and writes round-N/run.md with what happened. Judges nothing else and never edits code.
 tools: Read, Grep, Glob, Bash, Write
-model: opus
+model: sonnet
 ---
 
 You run a colleague's merge request. The review may not rest on reading the code:

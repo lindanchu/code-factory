@@ -25,6 +25,7 @@ import configparser
 import contextlib
 import datetime as _dt
 import fnmatch
+import glob
 import hashlib
 import hmac
 import http.client
@@ -1362,6 +1363,32 @@ def builder_model(ctx, job):
         if MODEL_RANK[last] > MODEL_RANK[m]:
             m = last
     return m
+
+
+def spec_draft(ctx, job):
+    """The spec draft that asked the human, newest first (fx renamed spec.md to spec-asked-<k>.md when the answers
+    came), or None when the spec never asked."""
+    jd = ctx.job_dir(job["id"])
+    drafts = []
+    for name in os.listdir(jd) if os.path.isdir(jd) else []:
+        m = re.fullmatch(r"spec-asked-(\d+)\.md", name)
+        if m:
+            drafts.append((int(m.group(1)), os.path.join(jd, name)))
+    return max(drafts)[1] if drafts else None
+
+
+def builder_context_small(ctx, job):
+    """Whether the job's builder may be continued instead of started fresh. A continued builder carries everything it
+    read and ran so far, and reads all of it again at every step: past builder_resume_max_tokens (the size the agent
+    reported when its last run ended) a new builder that reads build.md and the branch costs less. Without that size,
+    start fresh. 0 turns the limit off."""
+    limit = int(ctx.c("builder_resume_max_tokens", 150000) or 0)
+    if limit <= 0:
+        return True
+    runs = [r for r in job.get("runs") or [] if r.get("agent") == "builder" and not r.get("wp")
+            and r.get("cand") is None]
+    size = (runs[-1].get("context") or runs[-1].get("tokens")) if runs else None
+    return bool(size) and size <= limit
 
 
 # --------------------------------------------------------------------------
@@ -2999,6 +3026,13 @@ def task_line(ctx, job, agent):
     if agent == "intake":
         return "Run intake again. The human's answers are in qa-log.md." if has_qa else "Run intake."
     if agent == "spec":
+        draft = spec_draft(ctx, job)
+        if draft:
+            return ("Write the spec. The human answered the questions of your earlier draft: the answers are in "
+                    "qa-log.md (latest round) and the draft is %s. Start from that draft: keep what the answers do not "
+                    "touch, change what they decide, and check again only the parts they change (the code, logic and "
+                    "schema behind those parts); do not read again what the draft already cites for the rest."
+                    % os.path.basename(draft))
         return "Write the spec." + (" The human's answers are in qa-log.md." if has_qa else "")
     if agent == "approver":
         return "Decide."
@@ -3231,9 +3265,10 @@ def cmd_ctx(ctx, a):
     if agent == "planner":
         cap = int(ctx.c("split.max_builders", 0) or 0)
         lines.append("Plan file: %s" % os.path.join(jd, "plan.md"))
-        lines.append("Parallel builders: %s. The goal is the shortest time to a finished job." % (
-            "at most %d at a time" % cap if cap else "no limit of the plan's; fx starts as many packages at once as the "
-            "machine has room for, so use as many as can truly run at once"))
+        lines.append("Parallel builders: %s. The goal is the fewest tokens for a finished job; time does not count, "
+                     "and every package costs another builder's reading." % (
+                         "at most %d at a time" % cap if cap else "no limit of the plan's; fx starts as many packages "
+                         "at once as the machine has room for"))
         if len(changed) > 1:
             lines.append("Each package belongs to one repository of this job (%s): give every package of the json "
                          "block its \"repo\", and let it own files of that repository only" % ", ".join(changed))
@@ -3318,11 +3353,16 @@ def cmd_ctx(ctx, a):
             lines.append("Dev server command: not configured; see AGENTS.md or CLAUDE.md for how to run the app")
     lines += baselines_prompt_lines(ctx, job, agent, cand, wp)
     res = {"job": job["id"], "agent": agent}
+    fresh = ""
     if agent == "builder":
         model = builder_model(ctx, job)
         if job.get("builder_agent_id") and job.get("builder_agent_model") == model \
-                and job.get("build_reason") in ("feedback", "answers"):
+                and job.get("build_reason") in ("feedback", "answers") and builder_context_small(ctx, job):
             res["resume_agent_id"] = job["builder_agent_id"]
+        elif job.get("build_reason") in ("feedback", "answers") and not wp and not cand:
+            fresh = ("You are a new builder on a job an earlier builder started: what it built is committed on the "
+                     "branch (git log and git diff against the base in each clone) and described in build.md. Read "
+                     "build.md first, then the files the task needs; do not rebuild what is there. ")
     elif agent == "judge":
         model = clamp_model(ctx.c("models.judge", "opus"), floor_model(ctx))
     elif agent == "verifier":
@@ -3331,7 +3371,10 @@ def cmd_ctx(ctx, a):
         model = clamp_model(ctx.c("models.planner", "opus"), floor_model(ctx))
     else:
         model = (job.get("models") or {}).get(agent) or floor_model(ctx)
-    task = task_line(ctx, job, agent)
+        if agent == "spec" and spec_draft(ctx, job):
+            # After the human's answers the spec is written again from the draft that asked: the hard part is done.
+            model = clamp_model(ctx.c("models.spec_after_answers", "sonnet") or model, floor_model(ctx))
+    task = fresh + task_line(ctx, job, agent)
     if wp:
         res.pop("resume_agent_id", None)
         task = ("Build package %s only. Other builders build the other packages of plan.md at the same time in "
@@ -8486,7 +8529,7 @@ def cmd_knowledge(ctx, a):
                                            " and %d more" % v["more"] if v["more"] else ""))
         if lessons_file(ctx):
             lines.append("Lessons (for context): %s" % lessons_file(ctx))
-        model = clamp_model(ctx.c("models.librarian", "opus"), floor_model(ctx))
+        model = clamp_model(ctx.c("models.librarian", "sonnet"), floor_model(ctx))
         task = ("Update the knowledge files listed above so they describe the code at %s. Write only the files "
                 "that need changes, as complete new versions, plus changes.md, in the staging folder (logic files "
                 "under logic/<module>/ in it, with a change-history row each)." % st["base"][:10])
@@ -11595,6 +11638,50 @@ def mark_step(ctx, ref, name, start, result=None, only_one=False, lease=None):
     ctx.save(job)
 
 
+# What an agent used, by kind, as the API counts it, and what each kind costs next to an input token (Anthropic's
+# price ratios): a cache read is a tenth of an input token, writing the cache a quarter more, output five times.
+USAGE_KINDS = (("input_tokens", "input"), ("output_tokens", "output"), ("cache_read_input_tokens", "cache_read"),
+               ("cache_creation_input_tokens", "cache_write"))
+PRICE_RATIO = {"input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25}
+
+
+def agent_transcript(agent_id):
+    """Claude Code's transcript of one subagent: <config>/projects/<project>/<session>/subagents/agent-<id>.jsonl.
+    None when the id is not one or no such file is on this machine (another layout, another machine)."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agent_id or ""):
+        return None
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    hits = glob.glob(os.path.join(glob.escape(base), "projects", "*", "*", "subagents", "agent-%s.jsonl" % agent_id))
+    return max(hits, key=os.path.getmtime) if hits else None
+
+
+def transcript_usage(path):
+    """Every API call of a transcript added up by kind. One call written as several lines (one per content block)
+    carries the same message id and the same usage: it counts once."""
+    total, seen = dict.fromkeys(PRICE_RATIO, 0), set()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    m = json.loads(line)
+                except ValueError:
+                    continue
+                msg = m.get("message") if isinstance(m, dict) and m.get("type") == "assistant" else None
+                u = msg.get("usage") if isinstance(msg, dict) else None
+                if not isinstance(u, dict):
+                    continue
+                key = msg.get("id") or line
+                if key in seen:
+                    continue
+                seen.add(key)
+                for src, k in USAGE_KINDS:
+                    if isinstance(u.get(src), int):
+                        total[k] += u[src]
+    except OSError:
+        return None
+    return total
+
+
 def cmd_usage(ctx, a):
     job = ctx.load(a.job)
     runs = [r for r in job.get("runs") or [] if r.get("agent") == a.agent and r.get("wp") == a.wp
@@ -11602,13 +11689,32 @@ def cmd_usage(ctx, a):
     if not runs:
         raise FxError("no %s run recorded for %s (fx ctx records it)" % (a.agent, job["id"]))
     r = runs[-1]
-    r["tokens"] = a.tokens
+    # What the agent's result reports is the size of its context when it ended, not what it used: every step read the
+    # whole context again. Kept as `context` (whether to continue a builder goes by it); `tokens` is what it used, from
+    # its transcript when this machine has it.
+    r["context"] = r["tokens"] = a.tokens
+    r.pop("usage", None)
+    if a.agent_id:
+        r["agent_id"] = a.agent_id
+        path = agent_transcript(a.agent_id)
+        total = transcript_usage(path) if path else None
+        if total:
+            # A continued agent writes on in the same transcript: what its earlier runs recorded is theirs.
+            for o in job.get("runs") or []:
+                if o is not r and o.get("agent_id") == a.agent_id and isinstance(o.get("usage"), dict):
+                    for k in total:
+                        total[k] -= o["usage"].get(k) or 0
+            use = {k: max(0, v) for k, v in total.items()}
+            if sum(use.values()):
+                r["usage"] = use
+                r["tokens"] = sum(use.values())
     if a.ms is not None:
         r["ms"] = a.ms
     if not r.get("ended"):
         r.update(ended=now(), status="done")
     ctx.save(job)
-    out({"ok": True, "job": job["id"], "agent": a.agent, "tokens": a.tokens})
+    out({"ok": True, "job": job["id"], "agent": a.agent, "tokens": r["tokens"], "context": a.tokens,
+         "usage": r.get("usage"), "measured": "transcript" if r.get("usage") else "reported context only"})
 
 
 def median(xs):
@@ -11702,13 +11808,31 @@ def board_segments(runs, steps, waits=()):
     return segs
 
 
+def run_cost(r, rate):
+    """Dollars for one run. rate is the model's input price per million tokens, or {input, output, cache_read,
+    cache_write} prices; a kind it leaves out is priced from input with PRICE_RATIO. A run recorded without its usage by
+    kind (older ones, or no transcript) is priced as input tokens."""
+    if isinstance(rate, dict):
+        base = rate.get("input")
+        prices = {k: rate.get(k) if rate.get(k) is not None else (None if base is None else float(base) * x)
+                  for k, x in PRICE_RATIO.items()}
+    elif rate is not None:
+        prices = {k: float(rate) * x for k, x in PRICE_RATIO.items()}
+    else:
+        return None
+    use = r.get("usage") if isinstance(r.get("usage"), dict) else {"input": r.get("tokens") or 0}
+    if any(prices.get(k) is None for k, v in use.items() if v):
+        return None
+    return sum((v or 0) * float(prices[k]) for k, v in use.items() if k in prices) / 1e6
+
+
 def board_cost(runs, rates):
     tokens = sum(r.get("tokens") or 0 for r in runs)
     cost = None
     if tokens and rates:
-        priced = [(r.get("tokens") or 0, rates.get(r.get("model"))) for r in runs if r.get("tokens")]
-        if all(rate is not None for _, rate in priced):
-            cost = round(sum(t * float(rate) / 1e6 for t, rate in priced), 2)
+        priced = [run_cost(r, rates.get(r.get("model"))) for r in runs if r.get("tokens")]
+        if all(c is not None for c in priced):
+            cost = round(sum(priced), 2)
     return tokens, cost
 
 
@@ -19041,7 +19165,7 @@ REVIEW_AGENTS = {"checklist": "factory-review-checklist", "requirement": "factor
                  "code": "factory-reviewer-code", "security": "factory-reviewer-security",
                  "ux": "factory-reviewer-ux", "ui": "factory-reviewer-ui", "verifier": "factory-security-verifier",
                  "runner": "factory-review-runner"}
-REVIEW_MODELS = {"runner": "opus", "checklist": "sonnet", "requirement": "opus", "code": "sonnet", "security": "opus", "ux": "sonnet",
+REVIEW_MODELS = {"runner": "sonnet", "checklist": "sonnet", "requirement": "opus", "code": "sonnet", "security": "opus", "ux": "sonnet",
                  "ui": "opus", "verifier": "opus"}
 REVIEW_LESSONS = {"runner": ("review",), "checklist": ("spec",), "requirement": ("spec", "code", "review"), "code": ("review",),
                   "security": ("review",), "ux": ("review",), "ui": ("review",), "verifier": ("review",)}
@@ -23327,8 +23451,10 @@ def build_parser():
     s.add_argument("--agent", required=True)
     s.add_argument("--wp")
     s.add_argument("--candidate", type=int)
-    s.add_argument("--tokens", type=int, required=True)
+    s.add_argument("--tokens", type=int, required=True, help="total_tokens of the agent's result (its context at the end)")
     s.add_argument("--ms", type=int)
+    s.add_argument("--agent-id", dest="agent_id",
+                   help="the agent's id: what it really used is read from its transcript on this machine")
     s.set_defaults(fn=cmd_usage)
     s = sub.add_parser("board", help="write the factory board (an HTML page of all jobs on this machine)")
     s.add_argument("--open", action="store_true", help="open it in the browser")

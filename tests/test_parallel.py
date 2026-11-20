@@ -1831,5 +1831,110 @@ class ReadingTest(unittest.TestCase):
         self.assertEqual(sorted(fx.pool_capacity(fx.MACHINE_DEFAULTS, reading)), ["cpu", "host_mb"])
 
 
+# --------------------------------------------------------------------------
+# tokens: what an agent really used, and when a builder is continued
+
+class TokenUseTest(BoxCase):
+    @staticmethod
+    def call(mid, inp, out, read, wrote):
+        return {"type": "assistant", "message": {"id": mid, "model": "claude-sonnet", "usage": {
+            "input_tokens": inp, "output_tokens": out, "cache_read_input_tokens": read,
+            "cache_creation_input_tokens": wrote}}}
+
+    def transcript(self, agent_id, calls):
+        cfg = os.path.join(self.tmp, "claude-config")
+        path = os.path.join(cfg, "projects", "-some-project", "session-1", "subagents", "agent-%s.jsonl" % agent_id)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            for c in calls:
+                f.write(json.dumps(c) + "\n")
+        return dict(self.box.env, CLAUDE_CONFIG_DIR=cfg)
+
+    def test_usage_is_read_from_the_transcript_and_a_continued_agent_counts_only_its_new_calls(self):
+        f = self.box.factory("tok")
+        job = self.box.new(f, "TOK-1")["job"]
+        self.box.to_build(f, job)
+        # one call written as two lines (one per content block) counts once
+        env = self.transcript("abc123", [self.call("m1", 10, 100, 1000, 50), self.call("m1", 10, 100, 1000, 50),
+                                         {"type": "user", "message": {"content": "x"}},
+                                         self.call("m2", 1, 20, 3000, 5)])
+        self.assertEqual(self.box.fx(f, "ctx", job, "--agent", "builder", env=env)[0], 0)
+        code, res = self.box.fx(f, "usage", job, "--agent", "builder", "--tokens", "4100", "--ms", "9",
+                                "--agent-id", "abc123", env=env)
+        self.assertEqual(code, 0, res)
+        self.assertEqual(res["usage"], {"input": 11, "output": 120, "cache_read": 4000, "cache_write": 55})
+        self.assertEqual((res["tokens"], res["context"]), (4186, 4100))
+        # continued (same agent, same transcript): the second run is only what came after the first
+        env = self.transcript("abc123", [self.call("m3", 2, 30, 5000, 0)])
+        self.assertEqual(self.box.fx(f, "ctx", job, "--agent", "builder", env=env)[0], 0)
+        code, res = self.box.fx(f, "usage", job, "--agent", "builder", "--tokens", "5032", "--agent-id", "abc123",
+                                env=env)
+        self.assertEqual(code, 0, res)
+        self.assertEqual(res["usage"], {"input": 2, "output": 30, "cache_read": 5000, "cache_write": 0})
+        runs = [r for r in self.box.job(f, job)["runs"] if r["agent"] == "builder"]
+        self.assertEqual([r["tokens"] for r in runs], [4186, 5032])
+        self.assertEqual([r["context"] for r in runs], [4100, 5032])
+
+    def test_without_a_transcript_the_reported_number_stays_and_says_what_it_is(self):
+        f = self.box.factory("tok2")
+        job = self.box.new(f, "TOK-2")["job"]
+        self.box.to_build(f, job)
+        env = dict(self.box.env, CLAUDE_CONFIG_DIR=os.path.join(self.tmp, "empty-config"))
+        self.assertEqual(self.box.fx(f, "ctx", job, "--agent", "builder", env=env)[0], 0)
+        for agent_id in ("nothere", "../../etc/passwd"):
+            code, res = self.box.fx(f, "usage", job, "--agent", "builder", "--tokens", "700", "--agent-id", agent_id,
+                                    env=env)
+            self.assertEqual(code, 0, res)
+            self.assertEqual((res["tokens"], res["usage"], res["measured"]), (700, None, "reported context only"))
+
+    def builder_ctx(self, f, job, context):
+        self.box.edit(f, job, stage="build", round=1, round_start=0, max_rounds=3, build_reason="feedback",
+                      builder_agent_id="agent-1", builder_agent_model="opus",
+                      runs=[{"agent": "builder", "name": "builder", "wp": None, "cand": None, "round": 0,
+                             "model": "opus", "status": "done", "started": "2026-01-01T00:00:00+00:00",
+                             "ended": "2026-01-01T00:10:00+00:00", "result": [], "tokens": 9, "context": context}])
+        code, res = self.box.fx(f, "ctx", job, "--agent", "builder")
+        self.assertEqual(code, 0, res)
+        return res
+
+    def test_a_builder_is_continued_only_while_its_context_is_small(self):
+        f = self.box.factory("res")
+        job = self.box.new(f, "RES-1")["job"]
+        self.box.to_build(f, job)
+        small = self.builder_ctx(f, job, 40000)
+        self.assertEqual(small.get("resume_agent_id"), "agent-1")
+        self.assertFalse(small["task"].startswith("You are a new builder"), small["task"])
+        large = self.builder_ctx(f, job, 400000)
+        self.assertNotIn("resume_agent_id", large)
+        self.assertTrue(large["task"].startswith("You are a new builder"), large["task"])
+        self.assertIn("build.md", large["task"])
+        self.assertIn("Round 1 feedback", large["task"])
+
+    def test_the_spec_written_again_after_answers_starts_from_its_draft_on_sonnet(self):
+        f = self.box.factory("spa")
+        job = self.box.new(f, "SPA-1")["job"]
+        self.box.edit(f, job, stage="spec", risk="high", models={"intake": "sonnet", "spec": "opus"})
+        code, first = self.box.fx(f, "ctx", job, "--agent", "spec")
+        self.assertEqual(code, 0, first)
+        self.assertEqual(first["model"], "opus")
+        jd = os.path.join(f, "jobs", job)
+        write(os.path.join(jd, "spec-asked-1.md"), "SPEC: NEEDS-INFO\n")
+        write(os.path.join(jd, "spec-asked-2.md"), "SPEC: NEEDS-INFO\n")
+        write(os.path.join(jd, "qa-log.md"), "# Questions and answers\n")
+        code, again = self.box.fx(f, "ctx", job, "--agent", "spec")
+        self.assertEqual(code, 0, again)
+        self.assertEqual(again["model"], "sonnet")
+        self.assertIn("spec-asked-2.md", again["task"])
+
+    def test_the_cost_of_a_run_prices_each_kind(self):
+        use = {"input": 10 ** 6, "output": 10 ** 6, "cache_read": 10 ** 6, "cache_write": 10 ** 6}
+        self.assertAlmostEqual(fx.run_cost({"usage": use, "tokens": 4 * 10 ** 6}, 5), 5 + 25 + 0.5 + 6.25)
+        self.assertAlmostEqual(fx.run_cost({"usage": use}, {"input": 5, "output": 20}), 5 + 20 + 0.5 + 6.25)
+        self.assertAlmostEqual(fx.run_cost({"tokens": 2 * 10 ** 6}, 5), 10)  # recorded before: priced as input
+        self.assertIsNone(fx.run_cost({"usage": use}, None))
+        self.assertEqual(fx.board_cost([{"model": "opus", "tokens": 4 * 10 ** 6, "usage": use}], {"opus": 5}),
+                         (4 * 10 ** 6, 36.75))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

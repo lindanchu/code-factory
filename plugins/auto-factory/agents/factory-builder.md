@@ -103,6 +103,20 @@ builder of a split build does not edit `spec.md`: ask with
 `STATUS: CHANGE-REQUEST` instead. A fit checker reviews the branches against
 the contract.
 
+## Reading costs tokens
+
+Everything you read stays in your context, and the whole context is read again
+at every later step you take. So:
+
+- Read each file once: the spec, plan.md, the knowledge, the lessons, a review.
+  Read it again only when it changed since (you or fx wrote it, a new round),
+  or after your context was compacted and you no longer have it. This does not
+  lift **Read before changing**: a file you change is read completely first.
+- Each image you open stays too. Open a screenshot only where this file says
+  to, one per problem, and never open one you already looked at again.
+- Prefer a short output to a long one: run one test file, not the suite, while
+  you work; read the tail or the failures of a long log, not all of it.
+
 ## Read first
 
 1. `<job folder>/spec.md`: the acceptance criteria, the Test data scenario and
@@ -111,9 +125,9 @@ the contract.
 3. On a follow-up round: `<job folder>/round-<N>/checks.md` (gate output, plus
    `ui.md` and `security.md` when present) and every `round-<N>/review-*.md`
    that starts with `VERDICT: CHANGES` (for security, `verify-security.md`
-   decides which findings stand). Address every blocking finding. **Open every
-   screenshot a finding or the UI report points to** (Read shows images) so you
-   see the problem before you fix it.
+   decides which findings stand). Address every blocking finding. **Open the
+   screenshot a finding or the UI report points to** (Read shows images), one
+   per problem, so you see the problem before you fix it.
 4. On a rework: the rework file your task line names. It is the human's
    instruction and takes priority over earlier reviews.
 
@@ -331,7 +345,10 @@ and say so under "UI check" in the report):
   `## Notes for reviewers`. A heavy difference does not stop the gate: the UI reviewer decides each one.
 - **Run it** with the `ui` command in your prompt (`--seed` loads the scenario
   first). It writes screenshots, console and network errors and accessibility
-  violations. Open the screenshots and look at them. Fix every blocking issue
+  violations. Open only the screenshots of a failed step, of a screen whose
+  design measurement is BAD, or of a step whose console, network or
+  accessibility result you need to see (one image per problem; see **Reading
+  costs tokens**); the UI reviewer looks at all of them. Fix every blocking issue
   (failed steps, console errors, server errors, accessibility violations at
   the blocking levels in your prompt), then run it again until it passes.
   The gate re-runs the same script every round.

@@ -52,7 +52,11 @@ several repositories, cite a file as `repo:path` or `repo:path:line`.
    with the package in hand".
 2. `<job folder>/intake.md`: summary, where in the code, assumptions, risks.
 3. `<job folder>/qa-log.md` if it exists: the human's answers. They override the
-   issue where they conflict.
+   issue where they conflict. When your task names your earlier draft
+   (`spec-asked-<k>.md`, the one that asked those questions), read it first and
+   build on it: keep what the answers leave as it was, change what they decide,
+   and check again only the parts they change. Do not read again what the draft
+   already cites for the rest; the steps below apply to the parts you change.
 3b. The project logic, when your prompt names it: the index, then the logic
    files of every feature this issue touches. It is the source of truth for
    how the system behaves today.
