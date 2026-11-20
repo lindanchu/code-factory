@@ -122,6 +122,16 @@ several repositories, cite a file as `repo:path` or `repo:path:line`.
   variable (name it in the project's style) with the decided value as default,
   and its row in the module's parameter table gives that variable in Env and the
   test stack's value in Test value. List it under Logic changes.
+- **Permissions.** When the issue adds a route, or changes who may use one
+  (a role, the owner of the data, an API key), write the rows the job needs in
+  the module's `## Permissions` section (the job's staged logic, as for every
+  logic change: one row per method and route, a cell `yes`, `no` or `own` per
+  kind of user, as the factory's table names them) from what the issue says,
+  and a criterion that the gate's permission table passes: copy the module's
+  README from the factory's `logic/` to the job folder's
+  `logic/<module>/README.md` (unless it is there already) and change only its
+  `## Permissions` rows. List it under Logic changes. When the issue does not say who may use a new route, ask
+  (questions.md): never take it from the code.
 - Name the project conventions that apply (from the knowledge files) in
   Context so the builder follows them.
 

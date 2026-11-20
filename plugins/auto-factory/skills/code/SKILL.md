@@ -1,7 +1,7 @@
 ---
 name: code
-description: Run the software factory on Jira issues or local tasks (intake → spec → build → gate → reviews → approver → pull request). Only when the user types /auto-factory:code with a Jira link or key, or /auto-factory:code task | audit | resume | rework | lessons | limits | status | board | capacity | install | init | cleanup. A colleague's merge request is /auto-factory:review, which follows this file too.
-argument-hint: <jira-link> [more, space or comma separated] [--best-of N] | task "<what to do>" | audit | resume <KEY> | rework <KEY> "<note>" | lessons | limits | status | board | capacity | install | init | cleanup <KEY>
+description: Run the software factory on Jira issues or local tasks (intake → spec → build → gate → reviews → approver → pull request). Only when the user types /auto-factory:code with a Jira link or key, or /auto-factory:code task | audit | resume | rework | lessons | limits | permissions | status | board | capacity | install | init | cleanup. A colleague's merge request is /auto-factory:review, which follows this file too.
+argument-hint: <jira-link> [more, space or comma separated] [--best-of N] | task "<what to do>" | audit | resume <KEY> | rework <KEY> "<note>" | lessons | limits | permissions | status | board | capacity | install | init | cleanup <KEY>
 model: sonnet
 disable-model-invocation: true
 ---
@@ -102,6 +102,11 @@ them to create a separate repository for the factory (for example
   - `next: limits` (exit code 3, from `fx new` or the gate): a limit of the app cannot be
     set through the environment, or the limits were never worked out. No job starts and
     no builder is sent: **/auto-factory:code limits**. Never work around it.
+  - `next: permissions` (exit code 3, from `fx new`, the gate or `fx selftest`): the
+    permission table was never worked out and confirmed, its technical part or rows have a
+    problem, or the gate found routes of the job without a row. No job starts and no
+    builder is sent: **/auto-factory:code permissions** (the rows of a job's own routes:
+    its step "Rows of a job"). Never work around it.
   - `next: login` (exit code 3, from the gate, `fx selftest` or `fx login`; `kind` is
     `web` or `api`): **Scanner login.** The saved way to log in does not work, or the
     scanner lost its login during the scan, or most of a scan's answers were 4xx. It is
@@ -423,6 +428,41 @@ a factory whose limits were never worked out (after the update to this version, 
 
 `next: limits` from the gate of a running job: the round did not count, no builder. Run the steps above; the job
 goes on from its gate once the fixes are merged.
+
+### `/auto-factory:code permissions`
+
+The permission table says, for every route of the app, which kind of user may call it (not logged in, each role, an
+API key) and on whose data. The gate calls every cell on the job's own test stack, reads and writes, and checks that
+a refusal looks like one and leaves the data unchanged, that an allowed write changes it, and that a refused id
+answers like one that exists nowhere. `fx selftest` runs it on the base branch, so the gate tells what the job brings
+from what was already there. Until the table is worked out, confirmed by the user and run on the base branch, no job
+starts (`next: permissions`); nothing turns this off and you never work around it. The user writes nothing: they
+confirm rules in plain words.
+
+1. `python3 ${CLAUDE_SKILL_DIR}/fx permissions check`. `ok: true` and no `base` lines → say so in one line and stop.
+2. Not `confirmed`, or `problems` → spawn one `general-purpose` agent with `model: opus` and the prompt `Follow
+   ${CLAUDE_SKILL_DIR}/permissions.md` (the absolute path), then the fx command, the factory repository, where the
+   code is and `factory`. It writes the rows into `logic/` and the technical part into `stack/`.
+3. Show the user its `rule:` lines and every `doubt:` line, in plain words, and ask whether they are right; each
+   `ask:` too. Never the whole table. Give the answers to the same agent (SendMessage) until it has none left.
+4. `fx permissions check` again: `problems` → back to the agent once with them.
+5. `fx permissions mark` (only after the user confirmed), commit `logic/` and `stack/` and push.
+6. `fx selftest`: it runs the table on the base branch. Its `permissions` step failing → the agent again with fx's
+   error, then selftest again.
+7. `fx permissions check`: `base` lines are what the base branch already gets wrong. Tell the user. Mismatches →
+   `fx permissions tasks` writes a fix task for each route: start them **first**, before other jobs
+   (`fx new --local "<title>" --issue-file <task_file> --base <branch>`, at most 3 jobs per session). Its `ask` lines
+   (a route without a row, a row without a route) → back to the agent with `ask <lines>`, the user's answers, steps
+   3 to 6.
+
+**Rows of a job.** `next: permissions` from the gate of a running job: the round did not count, no builder.
+- Routes without a row, or rows without a route: spawn the agent with `model: sonnet`, the prompt above and
+  `job <KEY>` and the routes fx named. It writes the rows from the ticket, or answers `ask`: ask the user, give the
+  agent the answer. Never let the builder write rows. Then the gate again.
+- Anything else (a user cannot log in, a command failed, the technical part lacks a value): the same agent with
+  `job <KEY>` and fx's error; it fixes the technical part (the factory's, or the job's own
+  `jobs/<KEY>/permissions.json`); commit and push what it changed in the factory, then the gate again.
+- Already wrong on the base branch and touched by this job: the job waits for that route's fix task (step 7).
 
 ### `/auto-factory:code lessons`
 
@@ -1045,7 +1085,10 @@ factory repository may be pulled first (**Baselines on S3**): report its
 commands never get fx's tokens (`JIRA_*`, `GH_TOKEN`, `GITHUB_TOKEN`,
 `GITLAB_TOKEN`, `GLAB_*`, `CI_JOB_TOKEN`…). Report its `notes` (risk raised, UI
 reviewers added, scanner settings changed, security notes such as an unpinned
-ZAP image) and its `skipped` list to the user. Then:
+ZAP image) and its `skipped` list to the user. A note `permissions: … already wrong on
+the base branch` → tell the user in plain words what the base branch lets through, then
+`fx permissions tasks` and start its tasks first (**/auto-factory:code permissions** step 7);
+no job waits for them but one that touches the same route. Then:
 
 - `next: review` → **Review**, using the `reviewers` it printed (`agents` maps
   each to its `subagent_type` when the fit reviewer is among them).
@@ -1379,6 +1422,9 @@ is saved without the user's approval.
    `python3 ${CLAUDE_SKILL_DIR}/fx login --kind <web|api> --command '<its command>' --header <its header>
    --check <its check> --role <its role> --untested --save factory`, commit `factory.json` and push.
    The next scan proves it on its check page (**Scanner login** if not).
+4c. **Permissions of merged jobs.** A job that added routes kept their requests in `jobs/<KEY>/permissions.json`.
+   Once all its pull requests are merged: `python3 ${CLAUDE_SKILL_DIR}/fx permissions apply <KEY>`, commit what it
+   names and push. Its rows came into `logic/` with its logic (step 4).
 5. Knowledge, when `learning.knowledge_refresh` is on (logic files whose cited
    code changed outside the factory are refreshed the same way), one repository
    at a time: `python3 ${CLAUDE_SKILL_DIR}/fx knowledge stale` lists in `stale_repos` the

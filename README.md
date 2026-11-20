@@ -218,6 +218,25 @@ such limit is read by the code from an environment variable, and the job's test 
   the librarian (one that reached the base from elsewhere) and the gate (a scan the app refused).
 - Nothing turns this off.
 
+**A route the wrong user can call.** The permission table says, for every route of the app, which kind of user may
+call it: not logged in, each role, an API key, and whether only on its own data. In every gate fx logs in as each of
+them on the job's own test stack and calls every route, reads and writes:
+
+- A refused call must look like a refusal and leave the data as it was (fx compares a fingerprint of the database
+  before and after); a refused id must answer exactly like an id that exists nowhere, so nobody learns what exists;
+  an allowed write must change the data. After each allowed write the database is put back from a snapshot.
+- The table's human part is the `## Permissions` section of each module's logic (a cell `yes`, `no` or `own` per
+  kind of user); the technical part (logins, ids, bodies, snapshot commands, and a script that adds the accounts and
+  data the project's seed lacks, on the test stack only) is `stack/permissions.json` of the factory. An agent works
+  both out from the code (`/auto-factory:code permissions`, also part of `init`); you only confirm a few rules in
+  plain words and the rows it doubts.
+- `fx selftest` runs the table on the base branch. What the job brings stops it: a mismatch goes to the builder; a
+  route it adds without a row waits for its rows, which come from the ticket or from you, never from the builder.
+  What the base branch already gets wrong stops no job but one that touches that route: you hear of it at once and
+  its fix task runs first.
+- No job starts until the table is confirmed and run on the base branch. It costs no tokens, a few minutes of each
+  gate. Nothing turns this off.
+
 The rest:
 
 - A changed repository's checks script, `checks/<repo>.sh` (your lint, type check, tests,
@@ -1102,6 +1121,13 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
   tokens an agent used are recorded on the command that reads its result (`--usage`).
 - A gate no longer sends a builder for what is not in the code: a ZAP finding a second scan does not see again is
   marked unsure, and a run the machine broke (a browser crash, a timeout) runs once more.
+
+### Upgrading to 3.6: the permission table
+
+- A factory gets no new job until `/auto-factory:code permissions` has worked the table out, you confirmed it and
+  `fx selftest` ran it on the base branch. Run it once in each factory repository; jobs already running finish
+  without it.
+- What the base branch already gets wrong is listed for you, and each route becomes a fix task to start first.
 
 ## Set up a project: `init`
 

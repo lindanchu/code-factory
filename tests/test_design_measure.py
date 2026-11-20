@@ -16,7 +16,7 @@ import tempfile
 import unittest
 import zipfile
 
-from test_security import FxTestCase, ROOT, fx, load_json, sh, slurp, write
+from test_security import FxTestCase, ROOT, fx, load_json, sh, slurp, write, prompt_text
 
 FIXTURE = os.path.join(ROOT, "tests", "autotest-fixture")
 PACKAGE = os.path.join(FIXTURE, "design-src", "v0.1")
@@ -319,7 +319,7 @@ class TicketPackageTest(DesignCase):
         self.assertIn("1 row(s) are not ready", note)
         code, res = self.fx("ctx", self.f.job()["id"], "--agent", "spec")
         self.assertEqual(code, 0, res)
-        self.assertIn(note, res["prompt"])
+        self.assertIn(note, prompt_text(res))
 
     def test_a_state_table_made_by_an_older_reading_is_made_again(self):
         files = self.package_files("v0.2/")

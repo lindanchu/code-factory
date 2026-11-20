@@ -31,6 +31,9 @@ logic/
   per hour…) is read by the code from an environment variable, named in the table's Env column with the value the
   factory's test stack runs with in Test value. One the code does not read so is MISSING, and stops every job until
   it is fixed.
+- Who may call each route is in the `## Permissions` section of its module README (yes, no or own per kind of
+  user). The factory calls every cell on its test stack in every gate; the user confirmed the table, and a new route
+  gets its rows from its ticket.
 - UI text is quoted verbatim, in its original language.
 - Each rule cites the code that implements it (`path:lines`) and the test that covers it (or "no test").
 - A change of logic: update the file, add a row to its change history (old → new value) and to the overall

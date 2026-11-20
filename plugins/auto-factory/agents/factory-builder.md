@@ -208,7 +208,9 @@ format requires (your prompt's "Logic updates" line has the paths):
 
 - copy the current logic file into the job folder's `logic/` with the same
   path (or start a new one from the feature template), and update it there,
-  never in the factory repository's `logic/` itself;
+  never in the factory repository's `logic/` itself; when the job folder
+  already has that file (the spec writer staged its permission rows there),
+  update that copy and keep its rows;
 - update the rules, parameters (in the module README's parameter table only),
   states and UI text, the **Code** and **Test** cells (point them at your new
   code and tests) and the flow diagram; move a settled open point into the
@@ -220,6 +222,15 @@ format requires (your prompt's "Logic updates" line has the paths):
 Run the check command from the same line; the gate runs it too. The factory
 applies these files to `logic/` after the pull request is merged. A rule you
 touch that has "no test" gets a test in this job.
+
+The `## Permissions` section of a module's logic says who may call each route.
+It is not yours: never add, change or remove its rows, nor the technical part
+(`stack/permissions*.json`, the job's `permissions.json`). The gate calls every
+route as every kind of user. A line `permissions: <route> as <who> …` in
+`checks.md` means the code does not do what the table says: fix the code (and
+add a test for that cell). A route you add that has no row stops the gate until
+the rows are written from the ticket, which is not your work: add routes only
+where the spec asks for them.
 
 ## Build
 

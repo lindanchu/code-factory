@@ -291,6 +291,10 @@ Then the app's limits: follow **/auto-factory:code limits** in SKILL.md (steps 2
 limit that can stop tests or the scanner gets its environment variable and test value in its module's
 table, and one the code does not read so becomes a fix task that every job waits for.
 
+Then the permission table: follow **/auto-factory:code permissions** in SKILL.md (steps 2 to 5; the
+`fx selftest` of init runs it on the base branch, and its step 7 comes after that selftest). The user
+confirms who may call what, in plain words; no job starts before.
+
 Then prove the knowledge and the logic, before the user sees them:
 1. `python3 ${CLAUDE_SKILL_DIR}/fx knowledge check` checks every cited path, line range and excerpt
    against the code of the repository it names (a plain path is an error with
@@ -488,7 +492,10 @@ constraints): fix the knowledge where the models or migrations misled you,
 and run `fx knowledge check` again. Agents get the schema's path in their
 prompts. Fix what fails and run it again until it
 passes, or until what fails is a pre-existing problem the user accepts (record
-it in that repository's `environment.md`). Record the timings there too.
+it in that repository's `environment.md`). Record the timings there too. Selftest
+also runs the permission table on the base branch (its `permissions` step): when that
+step fails, **/auto-factory:code permissions** step 6; then its step 7 (what the base
+branch already gets wrong, told to the user, its fix tasks started first).
 
 **Phase 11 · What is already vulnerable.** Run `/auto-factory:code audit`'s scanner step
 (`fx audit-scan`), which costs no usage allowance, report it, and show the row

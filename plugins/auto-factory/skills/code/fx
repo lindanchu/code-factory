@@ -2034,6 +2034,7 @@ def limits_gate_new(ctx, a):
 def new_job(ctx, a, claim):
     store_warnings = []
     limits_fix = limits_gate_new(ctx, a)
+    perms_gate_new(ctx, a)
     change = new_job_repos(ctx, a)
     bases = parse_bases(ctx, a.base, change)
     if a.local:
@@ -4193,6 +4194,13 @@ def gate_round_repos(ctx, job, a, place):
         d = os.path.join(rdir, "security-%s" % n)
         os.makedirs(d, exist_ok=True)
         return d
+    perm_outs = {}
+    if not problems and started:
+        for n in change:
+            if n in urls and n not in idle:
+                perm_outs[n] = permissions_gate(ctx, job, views[n], rctxs[n], urls[n], rdir,
+                                                "-%s" % n if len(urls) > 1 else "")
+        problems += perm_gate_take(ctx, job, rn, rdir, place, perm_outs)
     if not problems and started and os.path.exists(os.path.join(jd, "ui", "seed.sh")):
         if not run_seed(ctx, job, os.path.join(jd, "ui", "seed.sh"), rdir):
             problems.append("ui/seed.sh failed (round-%d/seed.log)" % rn)
@@ -4287,6 +4295,7 @@ def gate_round_repos(ctx, job, a, place):
             "- %s: %s (logs: %s, %s)" % (x["script"], ", ".join(x["signs"]), x["first_log"], x["second_log"])
             for x in FLAKY_NOTED] + [""]
         job["flaky"] = (job.get("flaky") or []) + [dict(x, round=rn) for x in FLAKY_NOTED]
+    md += perm_gate_md(perm_outs)
     skipped_all = job["skipped_checks"] + job["security_skipped"]
     if skipped_all:
         md += ["## Skipped checks", ""] + ["- " + x for x in skipped_all] + [""]
@@ -4336,7 +4345,7 @@ def gate_round_repos(ctx, job, a, place):
         md += ["## Repo: %s" % n, ""] + md_demote(part)
     write_atomic(os.path.join(rdir, "checks.md"), "\n".join(md) + "\n")
 
-    notes = []
+    notes = [n_ for o in perm_outs.values() if o for n_ in o.get("notes") or []]
     job["gate"] = "PASS" if passed else "FAIL"
     job["flags"] = flags
     if flags and job.get("risk") == "low":
@@ -4620,6 +4629,10 @@ def gate_round_one(ctx, job, a, place):
             if e.extra.get("port_taken"):
                 gate_void(ctx, job["id"], rn, rdir, place, str(e))
             problems.append("the app could not start: %s" % e)
+    perm_outs = {}
+    if not problems and app_url_:
+        perm_outs[""] = permissions_gate(ctx, job, job, ctx, app_url_, rdir)
+        problems += perm_gate_take(ctx, job, rn, rdir, place, perm_outs)
     if not problems and app_url_ and os.path.exists(os.path.join(jd, "ui", "seed.sh")):
         if not run_seed(ctx, job, os.path.join(jd, "ui", "seed.sh"), rdir):
             problems.append("ui/seed.sh failed (round-%d/seed.log)" % rn)
@@ -4695,6 +4708,7 @@ def gate_round_one(ctx, job, a, place):
             "- %s: %s (logs: %s, %s)" % (x["script"], ", ".join(x["signs"]), x["first_log"], x["second_log"])
             for x in FLAKY_NOTED] + [""]
         job["flaky"] = (job.get("flaky") or []) + [dict(x, round=rn) for x in FLAKY_NOTED]
+    md += perm_gate_md(perm_outs)
     skipped_all = job["skipped_checks"] + job["security_skipped"]
     if skipped_all:
         md += ["## Skipped checks", ""] + ["- " + x for x in skipped_all] + [""]
@@ -4735,7 +4749,7 @@ def gate_round_one(ctx, job, a, place):
                for f in sec["blocking"][:30]] + [""]
     write_atomic(os.path.join(rdir, "checks.md"), "\n".join(md) + "\n")
 
-    notes = []
+    notes = [n_ for o in perm_outs.values() if o for n_ in o.get("notes") or []]
     job["gate"] = "PASS" if passed else "FAIL"
     job["flags"] = flags
     if flags and job.get("risk") == "low":
@@ -8546,6 +8560,828 @@ def limits_env(ctx, job):
 def logic_ready(ctx):
     idx = read(os.path.join(logic_dir(ctx), "README.md"), "") or ""
     return bool(idx) and "FACTORY_TODO" not in idx
+
+
+# --------------------------------------------------------------------------
+# Permissions: who may call each route of the app, checked by calling every one. The human part is a "Permissions"
+# section in each module's logic (logic/<module>/README.md): one row per route, one column per kind of user, each cell
+# yes, no or own (allowed on the caller's own data only). The technical part is a file of the factory
+# (stack/permissions.json): how each kind of user logs in, what a refusal looks like to it, the values of each route's
+# ids (the caller's own data, someone else's, one that does not exist), a valid body for each write, and the commands
+# that list the routes, seed the extra test data, snapshot and restore the database and print its fingerprint.
+# The gate calls every cell on the job's own test stack; fx selftest does the same on the base branch, so a mismatch
+# already there is told from one the job brings. The user confirms the table once (fx permissions mark): until then no
+# job starts. Nothing turns this off.
+
+PERMS_MARK = "permissions.json"  # logic/permissions.json: the user confirmed the table (fx permissions mark)
+PERMS_DIR = "_permissions"  # jobs/_permissions/: fix tasks of the mismatches already on the base branch
+PERM_CELLS = {"yes": "yes", "có": "yes", "no": "no", "không": "no", "own": "own", "riêng": "own", "của mình": "own"}
+PERM_HEADING_RE = re.compile(r"(?im)^##[ \t]+(?:\d+\.[ \t]*)?(?:permissions|quyền)\b[^\n]*$")
+PERM_PARAM_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\??\}")
+PERM_READ = ("GET", "HEAD", "OPTIONS", "QUERY")  # safe methods: any other one is called as a write
+PERM_BODY = ("POST", "PUT", "PATCH")
+PERM_NOTE_COLS = ("note", "notes", "ghi chú", "why", "lý do")
+PERM_TOKEN_RE = re.compile(r"[A-Za-z0-9+/=_\-]{32,}")
+PERM_COMMANDS = {"routes": "prints every route of the app (for example `php artisan route:list --json`)",
+                 "snapshot": "saves the job's database as it is",
+                 "restore": "puts the saved database back",
+                 "fingerprint": "prints a line that changes whenever the data changes (sessions, logs and counters "
+                                "left out)"}
+
+
+class PermsSetup(FxError):
+    """The permission table could not run: a kind of user cannot log in, a command of the technical file failed, or it
+    lacks what a row needs. Nothing about the job's code: the gate sets the round aside and asks for the permissions to
+    be worked out again (next: permissions)."""
+
+    def __init__(self, why):
+        FxError.__init__(self, "the permission table cannot run: %s. Work it out again (permissions.md), then run this "
+                               "again" % why, code=3, extra={"next": "permissions"})
+        self.why = why
+
+
+def perm_app_repos(ctx):
+    """The repositories whose app the factory runs: those the table is about."""
+    names = ctx.repo_names() or [None]
+    return [n for n in names if repo_ctx(ctx, n).c("app.up")]
+
+
+def perm_needed(ctx):
+    return logic_ready(ctx) and bool(perm_app_repos(ctx))
+
+
+def perm_file(rctx):
+    """The technical part for rctx's repository: permissions.file, else stack/permissions.json (one repository) or
+    stack/permissions-<repo>.json."""
+    rel = rctx.c("permissions.file")
+    if not rel:
+        several = len(perm_app_repos(rctx)) > 1
+        rel = "stack/permissions-%s.json" % rctx.scope if several and rctx.scope else "stack/permissions.json"
+    return os.path.join(rctx.factory, rel)
+
+
+def perm_job_file(rctx, job):
+    """A job's own additions to the technical part (the requests of the routes it adds): in its folder until its pull
+    request is merged (fx permissions apply)."""
+    return os.path.join(rctx.job_dir(job_real_id(job)), os.path.basename(perm_file(rctx)))
+
+
+def perm_deny_rules(conf):
+    """who.<x>.deny as a list of rules: one object (every route), or a list whose rules may name a prefix."""
+    d = (conf or {}).get("deny")
+    return [d] if isinstance(d, dict) else d if isinstance(d, list) else []
+
+
+def perm_deny(conf, route):
+    """The refusal rule for a route: the first rule whose prefix the route starts with, else the first without one."""
+    rules = perm_deny_rules(conf)
+    for d in rules:
+        pre = d.get("prefix") if isinstance(d, dict) else None
+        for p in [pre] if isinstance(pre, str) else pre or []:
+            if route.startswith(p):
+                return d
+    return next((d for d in rules if isinstance(d, dict) and not d.get("prefix")), {})
+
+
+def perm_route_norm(path):
+    p = "/" + str(path).strip().strip("`").strip().lstrip("/")
+    return p.rstrip("/") if len(p) > 1 else p
+
+
+def perm_key_norm(key):
+    parts = str(key).split(None, 1)
+    return "%s %s" % (parts[0].upper(), perm_route_norm(parts[1])) if len(parts) == 2 else str(key)
+
+
+def perm_tech(rctx, job=None):
+    """(technical part, problems). With a job: its own additions over the factory's (requests, not_app, who)."""
+    path = perm_file(rctx)
+    rel = os.path.relpath(path, rctx.factory)
+    raw = read(path)
+    if raw is None:
+        return None, ["%s does not exist" % rel]
+    try:
+        t = json.loads(raw)
+    except ValueError as e:
+        return None, ["%s is not valid JSON: %s" % (rel, e)]
+    if not isinstance(t, dict):
+        return None, ["%s is not a JSON object" % rel]
+    if job is not None:
+        own = read(perm_job_file(rctx, job))
+        try:
+            extra = json.loads(own) if own else {}
+        except ValueError as e:
+            return None, ["the job's %s is not valid JSON: %s" % (os.path.basename(path), e)]
+        for k in ("requests", "not_app", "who"):
+            if isinstance(extra.get(k), dict):
+                t[k] = dict(t.get(k) or {}, **extra[k])
+    if t.get("none"):
+        return t, []  # the repository serves no route of its own: "none" says why
+    probs = []
+    whos = t.get("who")
+    if not isinstance(whos, dict) or not whos:
+        probs.append("%s: \"who\" names each kind of user (one not logged in among them)" % rel)
+    else:
+        for w, c in whos.items():
+            if not isinstance(c, dict):
+                probs.append("%s: who.%s is not an object" % (rel, w))
+                continue
+            rules = perm_deny_rules(c)
+            if not rules or any(not isinstance(d, dict) or not d.get("status") for d in rules):
+                probs.append("%s: who.%s.deny: the answer a refusal gives this user ({\"status\": [404]}), or a list of "
+                             "them by route prefix ([{\"prefix\": \"/api/\", \"status\": [401]}, {\"status\": [302], "
+                             "\"location\": \"/login\"}])" % (rel, w))
+            login = c.get("login")
+            if login is not None and not (isinstance(login, dict) and login.get("command") and login.get("check")):
+                probs.append("%s: who.%s.login: a command and a check page (null only for a user not logged in)"
+                             % (rel, w))
+    for k, what in PERM_COMMANDS.items():
+        if not t.get(k):
+            probs.append("%s: \"%s\": the command that %s" % (rel, k, what))
+    return t, probs
+
+
+def perm_tables(rctx, over=None):
+    """The permission rows of every module's logic (the section headed Permissions, or Quyền), with a job's staged
+    logic (over) in place of the factory's: {rows: {"METHOD /route": {module, cells: {who: yes|no|own}}}, whos,
+    problems}. In a project of several apps the heading names its repository (## Permissions: api)."""
+    ldir = logic_dir(rctx)
+    several = len(perm_app_repos(rctx)) > 1
+    names = set(os.listdir(ldir)) if os.path.isdir(ldir) else set()
+    if over and os.path.isdir(over):
+        names |= {d for d in os.listdir(over) if os.path.isfile(os.path.join(over, d, "README.md"))}
+    rows, whos, problems = {}, set(), []
+    for d in sorted(names):
+        path = os.path.join(over, d, "README.md") if over and os.path.isfile(os.path.join(over, d, "README.md")) \
+            else os.path.join(ldir, d, "README.md")
+        if not os.path.isfile(path):
+            continue
+        text = read(path, "") or ""
+        where = "logic/%s/README.md" % d
+        for m in PERM_HEADING_RE.finditer(text):
+            named = re.search(r"[:(][ \t]*([\w.-]+)[ \t]*\)?[ \t]*$", m.group(0))
+            repo = named.group(1) if named else None
+            if several and not repo:
+                problems.append("%s: the Permissions heading names its repository in a project of several apps "
+                                "(## Permissions: <repo>)" % where)
+                continue
+            if repo and rctx.scope and repo != rctx.scope:
+                continue
+            rest = text[m.end():]
+            nxt = re.search(r"(?m)^## ", rest)
+            lines = [l for l in (rest[:nxt.start()] if nxt else rest).splitlines() if l.strip().startswith("|")]
+            if len(lines) < 2:
+                continue
+            split = lambda l: [c.strip().strip("`").strip() for c in l.strip().strip("|").split("|")]
+            head = [c.lower() for c in split(lines[0])]
+            if len(head) < 3 or head[0] not in ("method", "phương thức") or head[1] not in ("route", "đường dẫn"):
+                problems.append("%s: the Permissions table starts with the columns Method and Route, then one column "
+                                "per kind of user" % where)
+                continue
+            for l in lines[2:]:
+                cells = split(l)
+                if len(cells) < 2 or not cells[1]:
+                    continue
+                cellmap = {}
+                for i, who in enumerate(head[2:]):
+                    if who in PERM_NOTE_COLS:
+                        continue
+                    raw = cells[2 + i] if 2 + i < len(cells) else ""
+                    v = PERM_CELLS.get(raw.lower())
+                    if not v:
+                        problems.append("%s: %s %s, %s: %r is not yes, no or own" % (where, cells[0], cells[1], who,
+                                                                                    raw))
+                        continue
+                    cellmap[who] = v
+                    whos.add(who)
+                for method in [x.strip().upper() for x in re.split(r"[,/]", cells[0]) if x.strip()]:
+                    key = "%s %s" % (method, perm_route_norm(cells[1]))
+                    if key in rows and rows[key]["module"] != d:
+                        problems.append("%s: %s also has a row in logic/%s/README.md" % (where, key,
+                                                                                         rows[key]["module"]))
+                    rows[key] = {"module": d, "cells": cellmap}
+    return {"rows": rows, "whos": whos, "problems": problems}
+
+
+def perm_runs(rctx, job=None):
+    """The technical part when the table can run for rctx's repository, else None."""
+    tech, probs = perm_tech(rctx, job)
+    return tech if tech and not probs and not tech.get("none") else None
+
+
+def perm_state(ctx):
+    """Whether jobs may start: the table was confirmed (logic/permissions.json), every app's technical part and rows
+    hold, and fx selftest ran the table on the base branch. Also what the base branch already gets wrong (that stops
+    no job). {ok, confirmed, repos: {name: {...}}, words, base}."""
+    mark = read(os.path.join(logic_dir(ctx), PERMS_MARK))
+    words, repos, base_all = [], {}, []
+    if not mark:
+        words.append("the permission table was never worked out and confirmed: run /auto-factory:code permissions")
+    several = len(perm_app_repos(ctx)) > 1
+    for n in perm_app_repos(ctx):
+        rc = repo_ctx(ctx, n)
+        lab = "%s: " % n if several else ""
+        tech, tp = perm_tech(rc)
+        info = {"technical": os.path.relpath(perm_file(rc), ctx.factory)}
+        if tech and tech.get("none"):
+            info["none"] = tech["none"]
+            repos[n or ""] = info
+            continue
+        tab = perm_tables(rc)
+        unknown = sorted(tab["whos"] - set(((tech or {}).get("who") or {})))
+        if tech and unknown:
+            tp = tp + ["the tables name users the technical part does not: %s" % ", ".join(unknown)]
+        info.update(problems=tp + tab["problems"], rows=len(tab["rows"]))
+        words += [lab + p for p in tp + tab["problems"]]
+        base = baseline_of(rc).get("permissions")
+        info["base_run"] = bool(base)
+        if mark and not tp and not tab["problems"] and not base:
+            words.append(lab + "the base branch was never run through the permission table: fx selftest")
+        if base:
+            issues = perm_base_issues(base)
+            info["base"] = issues
+            base_all += [dict(x, repo=n) for x in issues]
+        repos[n or ""] = info
+    return {"ok": bool(mark) and not words, "confirmed": bool(mark), "repos": repos, "words": words,
+            "base": base_all}
+
+
+def perm_base_issues(base):
+    """What the base branch already gets wrong, in lines: mismatches, routes with no row, rows with no route."""
+    got = [{"kind": "mismatch", "route": c["route"], "who": c["who"], "data": c["data"], "why": c.get("why", "")}
+           for c in base.get("mismatches") or []]
+    got += [{"kind": "no row", "route": r} for r in base.get("unrowed") or []]
+    got += [{"kind": "no route", "route": r} for r in base.get("stale") or []]
+    return got
+
+
+def perm_cmd(rctx, job, cmd, what, timeout=300):
+    """A command of the technical part, in the app's folder and environment (like a saved login). Its output."""
+    env, db = app_env(rctx, job)
+    try:
+        r = run_sep(login_shell(rctx, app_fill(cmd, job, db), env), cwd=job["worktree"], env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise PermsSetup("its %s command ran over %d seconds" % (what, timeout))
+    if r.returncode != 0:
+        tail = ((r.stderr or "") + "\n" + (r.stdout or "")).strip()[-300:]
+        raise PermsSetup("its %s command exited %d: %s" % (what, r.returncode, tail))
+    return r.stdout or ""
+
+
+def perm_routes_parse(text):
+    """The routes a routes command printed: JSON (a list of objects with method(s) and uri or path, or of "METHOD
+    /path" strings), else one "METHOD /path [action]" per line. {"METHOD /path": action}; HEAD goes with its GET."""
+    found = {}
+
+    def add(methods, path, action=""):
+        ms = [m.strip().upper() for m in re.split(r"[|,\s]+", str(methods)) if m.strip()]
+        if len(ms) > 1:
+            ms = [m for m in ms if m not in ("HEAD", "OPTIONS")] or ms
+        for m in ms:
+            found["%s %s" % (m, perm_route_norm(path))] = str(action or "")
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        data = data.get("routes")
+    if isinstance(data, list):
+        for x in data:
+            if isinstance(x, str) and len(x.split(None, 1)) == 2:
+                add(*x.split(None, 1))
+            elif isinstance(x, dict):
+                ms = x.get("method") or x.get("methods") or ""
+                p = x.get("uri") or x.get("path") or x.get("route")
+                if p:
+                    add("|".join(ms) if isinstance(ms, list) else ms, p, x.get("action") or x.get("controller"))
+        return found
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and re.match(r"^[A-Z|,]+$", parts[0]) and parts[1].startswith("/"):
+            add(parts[0], parts[1], parts[2] if len(parts) > 2 else "")
+    return found
+
+
+def perm_http(url, method, headers, body=None, kind="form"):
+    """One call, never following a redirect: {status, location, cookies, body}; status None when nothing answered."""
+    data, h = None, dict(headers or {})
+    if body is not None and method not in PERM_READ:
+        if kind == "json":
+            data, h["Content-Type"] = json.dumps(body).encode(), "application/json"
+        else:
+            data = urllib.parse.urlencode(body, doseq=True).encode()
+            h["Content-Type"] = "application/x-www-form-urlencoded"
+    req = urllib.request.Request(url, data=data, method=method)
+    for k, v in h.items():
+        req.add_header(k, v)
+    try:
+        r = urllib.request.build_opener(_NoRedirect).open(req, timeout=30)
+        status, hdrs, raw = r.status, r.headers, r.read()
+    except urllib.error.HTTPError as e:
+        status, hdrs = e.code, e.headers
+        try:
+            raw = e.read()
+        except OSError:
+            raw = b""
+        finally:
+            e.close()
+    except (urllib.error.URLError, OSError) as e:
+        return {"status": None, "error": str(e), "location": "", "cookies": [], "body": ""}
+    return {"status": status, "location": (hdrs.get("Location") if hdrs else "") or "",
+            "cookies": (hdrs.get_all("Set-Cookie") if hdrs else None) or [],
+            "body": (raw or b"")[:200000].decode("utf-8", "replace")}
+
+
+def perm_cookie_merge(cookie, set_cookies):
+    jar = {}
+    for part in (cookie or "").split(";"):
+        k, _, v = part.strip().partition("=")
+        if k:
+            jar[k] = v
+    for sc in set_cookies or []:
+        k, _, v = sc.split(";", 1)[0].strip().partition("=")
+        if k:
+            jar[k] = v
+    return "; ".join("%s=%s" % kv for kv in jar.items())
+
+
+def perm_norm_body(text, sent=None):
+    """An answer's body without what differs on every call (tokens, nonces, spacing) and without the values the caller
+    sent (sent: the route's values): "No feature with id 5" tells nothing the caller did not say."""
+    text = re.sub(r"\s+", " ", text or "")
+    for v in sorted({str(x) for x in (sent or {}).values() if str(x)}, key=len, reverse=True):
+        text = re.sub(r"(?<![\w])%s(?![\w])" % re.escape(v), "{sent}", text)
+    return PERM_TOKEN_RE.sub("~", text).strip()
+
+
+def perm_login(rctx, job, url, who, conf):
+    """The headers a kind of user calls with: its saved login run now and proved on its check page."""
+    h = {str(k): str(v) for k, v in (conf.get("headers") or {}).items()}
+    login = conf.get("login")
+    if login:
+        try:
+            header, value = login_run(rctx, job, dict(login, _kind="web"))
+        except ScannerLogin as e:
+            raise PermsSetup("%s cannot log in: %s" % (who, e.why))
+        bad = login_check(url, login, header, value)
+        if bad:
+            raise PermsSetup("%s cannot log in: %s" % (who, bad))
+        h[header] = value
+    return h
+
+
+def perm_csrf(url, who, conf, headers):
+    """(headers, body fields) a write needs to get past the CSRF check, so that the answer is about permissions: the
+    token is read from a page this user can open (who.<x>.csrf: from, regex, field or header)."""
+    c = conf.get("csrf")
+    if not c:
+        return headers, {}
+    import html as _html
+    # The token is in a page's HTML: ask for that page as a browser does, whatever this user's calls Accept.
+    r = perm_http(urllib.parse.urljoin(url.rstrip("/") + "/", str(c.get("from") or "/").lstrip("/")), "GET",
+                  dict(headers, Accept="text/html,application/xhtml+xml"))
+    h = dict(headers)
+    if r["cookies"]:
+        h["Cookie"] = perm_cookie_merge(h.get("Cookie", ""), r["cookies"])
+    m = re.search(c.get("regex") or r'name="_token"[^>]*value="([^"]+)"', r["body"])
+    if not m:
+        raise PermsSetup("%s: no CSRF token on %s (who.%s.csrf)" % (who, c.get("from") or "/", who))
+    tok = _html.unescape(m.group(1))
+    if c.get("header"):
+        h[c["header"]] = tok
+        return h, {}
+    return h, {c.get("field") or "_token": tok}
+
+
+def perm_plan(tech, rows, routes):
+    """Every cell to call: (route, who, data, want, values), and what the technical part lacks for them."""
+    reqs = {perm_key_norm(k): v for k, v in (tech.get("requests") or {}).items()}
+    whos = tech.get("who") or {}
+    plan, lacks = [], []
+    for key in sorted(k for k in rows if k in routes):
+        method, route = key.split(" ", 1)
+        names = PERM_PARAM_RE.findall(route)
+        req = reqs.get(key) or {}
+        if method in PERM_BODY and req.get("body") is None:
+            lacks.append("requests[\"%s\"].body: a valid body, so that an answer is about permissions and not the "
+                         "data sent" % key)
+        for who, cell in sorted(rows[key]["cells"].items()):
+            conf = whos.get(who)
+            if not isinstance(conf, dict):
+                continue
+            if not names:
+                plan.append((key, who, "any", "deny" if cell == "no" else "allow", {}))
+                continue
+            own = dict(req.get("own") or {}, **((req.get("own_by") or {}).get(who) or {}))
+            variants = [("own", own), ("other", req.get("other") or {})] if conf.get("login") else \
+                [("other", req.get("other") or {})]
+            if perm_deny(conf, route).get("same_as_missing") and cell != "yes":
+                miss = req.get("missing") or {}
+                if any(p not in miss for p in names):
+                    lacks.append("requests[\"%s\"].missing: values of %s that exist nowhere (a refusal must look "
+                                 "like them)" % (key, ", ".join(names)))
+            for vn, vals in variants:
+                gap = [p for p in names if p not in vals]
+                if gap:
+                    lacks.append("requests[\"%s\"].%s: the value of %s%s" % (
+                        key, vn, ", ".join(gap), " (own_by.%s for this user)" % who if vn == "own" else ""))
+                    continue
+                want = "allow" if cell == "yes" or (cell == "own" and vn == "own") else "deny"
+                plan.append((key, who, vn, want, vals))
+    return plan, sorted(set(lacks)), reqs
+
+
+def perm_matrix(rctx, job, url, tech, rows):
+    """Every cell of the table, called on the app running at url. Reads first, then the writes that must be refused
+    (the data must stay as it was), then the allowed writes (the data must change; the snapshot is put back after
+    each). {routes, cells, mismatches, unrowed, stale, calls, seconds}. Raises PermsSetup."""
+    t0 = time.time()
+    routes = perm_routes_parse(perm_cmd(rctx, job, tech["routes"], "routes"))
+    if not routes:
+        raise PermsSetup("its routes command printed no route")
+    outside = {perm_key_norm(k) for k in (tech.get("not_app") or {})}
+    unrowed = sorted(k for k in routes if k not in rows and k not in outside)
+    stale = sorted(k for k in rows if k not in routes)
+    plan, lacks, reqs = perm_plan(tech, rows, routes)
+    if lacks:
+        raise PermsSetup("the technical part lacks:\n- " + "\n- ".join(lacks[:30]))
+    whos = tech["who"]
+    if tech.get("seed"):
+        perm_cmd(rctx, job, tech["seed"], "seed", 900)
+    perm_cmd(rctx, job, tech["snapshot"], "snapshot", 900)
+    fp_cmd = lambda: perm_cmd(rctx, job, tech["fingerprint"], "fingerprint").strip()
+    fp0 = fp_cmd()
+    sessions, missing, cells, mismatches, unchecked, count = {}, {}, [], [], [], [0]
+
+    def restore():
+        perm_cmd(rctx, job, tech["restore"], "restore", 900)
+        sessions.clear()
+        if fp_cmd() != fp0:
+            raise PermsSetup("its restore command does not bring the data back (the fingerprint differs)")
+
+    def prepare(key, who):
+        if who not in sessions:
+            sessions[who] = perm_login(rctx, job, url, who, whos[who])
+        h, form = sessions[who], {}
+        if key.split(" ", 1)[0] not in PERM_READ:
+            h, form = perm_csrf(url, who, whos[who], h)
+        return h, form
+
+    def call(key, who, vals, prepared=None):
+        method, route = key.split(" ", 1)
+        path = PERM_PARAM_RE.sub(lambda m: urllib.parse.quote(str(vals[m.group(1)]), safe=""), route)
+        req = reqs.get(key) or {}
+        h, form = prepared or prepare(key, who)
+        body = dict(req.get("body") or {}, **form) if method not in PERM_READ else None
+        names = set(PERM_PARAM_RE.findall(route))
+        # A value of own, other or missing that is no part of the route goes into the query string: each kind of data
+        # with its own (a result's ?run= belongs to its own project's case).
+        query = dict(req.get("query") or {}, **{k: v for k, v in vals.items() if k not in names})
+        if query:
+            path += "?" + urllib.parse.urlencode(query, doseq=True)
+        count[0] += 1
+        r = perm_http(urllib.parse.urljoin(url.rstrip("/") + "/", path.lstrip("/")), method, h, body,
+                      req.get("type") or "form")
+        if r["status"] is None:
+            raise PermsSetup("the app stopped answering (%s as %s: %s)" % (key, who, r["error"]))
+        return r
+
+    def refused(who, r, key):
+        d = perm_deny(whos[who], key.split(" ", 1)[1])
+        if not d.get("status"):
+            return False, "who.%s.deny has no rule for this route" % who
+        st = [int(x) for x in (d["status"] if isinstance(d["status"], list) else [d["status"]])]
+        if r["status"] not in st:
+            return False, "answered %s%s; a refusal is %s" % (
+                r["status"], " (to %s)" % r["location"] if r["location"] else "", "/".join(map(str, st)))
+        if d.get("location") and d["location"] not in r["location"]:
+            return False, "went to %s; a refusal goes to %s" % (r["location"] or "nowhere", d["location"])
+        return True, ""
+
+    def allowed(key, who, r):
+        want = (reqs.get(key) or {}).get("allow_status")
+        if want:
+            ok = r["status"] in [int(x) for x in want]
+        else:
+            ok = r["status"] < 400 and not refused(who, r, key)[0]
+        return ok, "" if ok else "answered %s%s, as a refusal" % (
+            r["status"], " (to %s)" % r["location"] if r["location"] else "")
+
+    def keep(key, who, vn, want, ok, why):
+        c = {"route": key, "who": who, "data": vn, "want": want, "ok": ok}
+        if ok is None:
+            c["why"] = why
+            unchecked.append(c)
+        elif not ok:
+            c["why"] = why
+            mismatches.append(c)
+        cells.append(c)
+
+    def unreached(key, r):
+        """A 501 is the web server's (it does not know the method): the call never reached the app."""
+        return r["status"] == 501 and "the test stack's web server does not implement %s (501): the call never " \
+                                      "reached the app" % key.split(" ", 1)[0]
+
+    reads = [p for p in plan if p[0].split(" ", 1)[0] in PERM_READ]
+    writes = sorted((p for p in plan if p[0].split(" ", 1)[0] not in PERM_READ), key=lambda p: p[3] == "allow")
+    for key, who, vn, want, vals in reads:
+        r = call(key, who, vals)
+        if unreached(key, r):
+            keep(key, who, vn, want, None, unreached(key, r))
+            continue
+        if want == "allow":
+            ok, why = allowed(key, who, r)
+        else:
+            ok, why = refused(who, r, key)
+            if ok and vn == "other" and perm_deny(whos[who], key.split(" ", 1)[1]).get("same_as_missing"):
+                if (key, who) not in missing:
+                    missing[(key, who)] = call(key, who, (reqs.get(key) or {}).get("missing") or {})
+                m_ = missing[(key, who)]
+                # Both answers without the values of both calls: a value sent once ("2") is also text of the other page.
+                sent = [str(v) for v in list(vals.values()) + list(((reqs.get(key) or {}).get("missing") or {}).values())]
+                sent = {str(i): v for i, v in enumerate(sent)}
+                if (m_["status"], perm_norm_body(m_["body"], sent)) != (r["status"], perm_norm_body(r["body"], sent)):
+                    ok, why = False, ("its refusal is not the answer for an id that exists nowhere (%s and %s): it "
+                                      "tells that the data exists" % (r["status"], m_["status"]))
+        keep(key, who, vn, want, ok, why)
+    for key, who, vn, want, vals in writes:
+        prepared = prepare(key, who)
+        before = fp_cmd()
+        r = call(key, who, vals, prepared)
+        changed = fp_cmd() != before
+        if unreached(key, r) and not changed:
+            keep(key, who, vn, want, None, unreached(key, r))
+            continue
+        if want == "deny":
+            ok, why = refused(who, r, key)
+            if changed:
+                ok, why = False, "the data changed although %s" % ("it was refused" if ok else why)
+                restore()
+        else:
+            ok, why = allowed(key, who, r)
+            if ok and not changed and not (reqs.get(key) or {}).get("no_change"):
+                ok, why = False, "answered %s but no data changed" % r["status"]
+            restore()
+        keep(key, who, vn, want, ok, why)
+    restore()
+    return {"routes": routes, "cells": cells, "mismatches": mismatches, "unchecked": unchecked, "unrowed": unrowed,
+            "stale": stale, "calls": count[0], "seconds": int(time.time() - t0)}
+
+
+def perm_cell_key(c):
+    return "%s|%s|%s" % (c["route"], c["who"], c["data"])
+
+
+def perm_markdown(res, title="Permission table"):
+    ok = sum(1 for c in res["cells"] if c["ok"])
+    md = ["# %s" % title, "", "%d cell(s) called (%d calls, %ds): %d as the table says, %d not, %d not checked." % (
+        len(res["cells"]), res["calls"], res["seconds"], ok, len(res["mismatches"]), len(res.get("unchecked") or [])),
+        ""]
+    if res["mismatches"]:
+        md += ["## Not as the table says", "", "| Route | Who | Data | Table | What happened |", "|---|---|---|---|---|"]
+        md += ["| %s | %s | %s | %s | %s |" % (c["route"], c["who"], c["data"], c["want"],
+                                              c.get("why", "").replace("|", "/")) for c in res["mismatches"]] + [""]
+    if res.get("unchecked"):
+        md += ["## Not checked", ""] + ["- %s as %s (%s data): %s" % (c["route"], c["who"], c["data"], c["why"])
+                                        for c in res["unchecked"]] + [""]
+    if res["unrowed"]:
+        md += ["## Routes with no row", ""] + ["- %s" % r for r in res["unrowed"]] + [""]
+    if res["stale"]:
+        md += ["## Rows with no route in the app", ""] + ["- %s" % r for r in res["stale"]] + [""]
+    return "\n".join(md) + "\n"
+
+
+def perm_touched(view, staged, factory, routes):
+    """Whether the job touches a route: it changes the route's rows, or a file named after the route's handler."""
+    try:
+        files = {os.path.basename(p).split(".")[0] for _, ps in changed_files(view) for p in ps}
+    except (FxError, KeyError, subprocess.SubprocessError):
+        files = set()
+
+    def touched(key):
+        if (staged.get(key) or {}).get("cells") != (factory.get(key) or {}).get("cells"):
+            return True
+        act = routes.get(key) or ""
+        cls = re.split(r"[@:]", act)[0].replace("/", "\\").split("\\")[-1] if act else ""
+        return bool(cls) and cls in files
+    return touched
+
+
+def permissions_gate(ctx, job, view, rctx, url, rdir, suffix=""):
+    """The gate's run of the table on the job's app. A mismatch, a route without a row or a row without a route that
+    the base branch has too is the base's (fx selftest ran the table there): it stops no job but one that touches that
+    route, and the user hears of it. Of the job's own: a mismatch is the builder's to fix; a route without a row (or a
+    row left without a route) waits for the rows, which the builder never writes (void, next: permissions).
+    {problems, void, notes, skipped, summary} or None."""
+    if not url or not perm_needed(ctx):
+        return None
+    tech, tp = perm_tech(rctx, job)
+    if tech and tech.get("none"):
+        return None
+    st = perm_state(ctx)
+    if not st["confirmed"] or not baseline_of(rctx).get("permissions"):
+        return {"skipped": "permissions: the table was not worked out and run on the base branch when this job "
+                           "started (/auto-factory:code permissions, then fx selftest)"}
+    if tp:
+        return {"void": ["the permission table's technical part has problems:\n- " + "\n- ".join(tp)]}
+    staged = perm_tables(rctx, over=os.path.join(ctx.job_dir(job_real_id(job)), "logic"))
+    if staged["problems"]:
+        return {"void": ["the permission rows have problems:\n- " + "\n- ".join(staged["problems"][:20])]}
+    try:
+        res = perm_matrix(rctx, view, url, tech, staged["rows"])
+    except PermsSetup as e:
+        return {"void": [e.why]}
+    write_atomic(os.path.join(rdir, "permissions%s.md" % suffix), perm_markdown(res))
+    write_atomic(os.path.join(rdir, "permissions%s.json" % suffix), json.dumps(
+        {k: res.get(k) for k in ("cells", "unchecked", "unrowed", "stale", "calls", "seconds")}, indent=1,
+        ensure_ascii=False) + "\n")
+    base = baseline_of(rctx).get("permissions") or {}
+    base_bad = {perm_cell_key(c) for c in base.get("mismatches") or []}
+    base_routes = set(base.get("routes") or {})
+    base_unrowed, base_stale = set(base.get("unrowed") or []), set(base.get("stale") or [])
+    touched = perm_touched(view, staged["rows"], perm_tables(rctx)["rows"], res["routes"])
+    out_ = {"problems": [], "void": [], "notes": [], "base": []}
+    for c in res["mismatches"]:
+        line = "%s as %s (%s data): the table says %s, it %s" % (c["route"], c["who"], c["data"], c["want"], c["why"])
+        if perm_cell_key(c) not in base_bad:
+            out_["problems"].append("permissions: " + line)
+        elif touched(c["route"]):
+            out_["void"].append("%s is already wrong on the base branch and this job touches it: it waits for the fix "
+                                "(fx permissions tasks)" % line)
+        else:
+            out_["base"].append(line)
+    for r in res["unrowed"]:
+        if r in base_unrowed and not touched(r):
+            out_["base"].append("%s has no row in the permission table" % r)
+        else:
+            out_["void"].append("%s has no row in the permission table: the rows say who may call it (from the "
+                                "ticket, or the user), never the builder" % r)
+    for r in res["stale"]:
+        if r in base_stale or (r not in base_routes and not touched(r)):
+            out_["base"].append("the permission table has a row for %s, which the app does not have" % r)
+        else:
+            out_["void"].append("the permission table has a row for %s, which the job's app no longer has: its row "
+                                "goes from the job's staged logic" % r)
+    out_["summary"] = "permissions: %d cell(s), %d not as the table says%s (%ds)" % (
+        len(res["cells"]), len(res["mismatches"]),
+        ", %d already so on the base branch" % len(out_["base"]) if out_["base"] else "", res["seconds"])
+    if res.get("unchecked"):
+        out_["notes"].append("permissions: %d cell(s) not checked: %s" % (
+            len(res["unchecked"]), "; ".join(sorted({c["why"] for c in res["unchecked"]}))))
+    if out_["base"]:
+        out_["notes"].append("permissions: %d thing(s) already wrong on the base branch (no job waits for them but one "
+                             "that touches them): tell the user, then fx permissions tasks" % len(out_["base"]))
+    return out_
+
+
+def perm_gate_take(ctx, job, rn, rdir, place, outs):
+    """What the gate does with permissions_gate's answers (one per app): a round set aside first (void), then the
+    builder's problems; skipped and the base's lines are kept for checks.md."""
+    void = [w for o in outs.values() if o for w in o.get("void") or []]
+    if void:
+        gate_void(ctx, job["id"], rn, rdir, place, "the permission table cannot judge this round:\n- " +
+                  "\n- ".join(void), next_step="permissions")
+    for o in outs.values():
+        if o and o.get("skipped") and o["skipped"] not in job["skipped_checks"]:
+            job["skipped_checks"].append(o["skipped"])
+    return [p for o in outs.values() if o for p in o.get("problems") or []]
+
+
+def perm_gate_md(outs):
+    md = []
+    for n, o in sorted(outs.items()):
+        if not o or not o.get("summary"):
+            continue
+        md += ["## Permissions%s" % (": %s" % n if n else ""), "", "- " + o["summary"] + " (see permissions%s.md)" % (
+            "-%s" % n if n and len([x for x in outs.values() if x]) > 1 else "")]
+        md += ["- already on the base branch: %s" % b for b in o.get("base") or []] + [""]
+    return md
+
+
+def perm_task_text(repo, route, lines):
+    return ("# Permissions of %s\n\n"
+            "%s"
+            "The factory's permission table found this on the base branch: the code does not do what the table says "
+            "(confirmed by the user), so a user may reach what they should not, or be refused what they may do.\n\n"
+            "%s\n\n"
+            "## Acceptance criteria\n\n"
+            "1. Every cell above answers as the table says: a refusal the way the table's technical part describes "
+            "it, with the data left unchanged; an allowed call does what it should.\n"
+            "2. A test for each cell that was wrong.\n"
+            "3. fx's permission table passes for this route in the gate.\n"
+            % (route, "Repository `%s`.\n\n" % repo if repo else "", "\n".join("- %s" % l for l in lines)))
+
+
+def cmd_permissions(ctx, a):
+    """The permission table: check it, try it on a job's running app, mark it confirmed by the user, write the fix
+    tasks of what the base branch gets wrong, or keep a merged job's additions to the technical part."""
+    if a.action == "check":
+        st = perm_state(ctx)
+        if not perm_needed(ctx):
+            out({"ok": True, "needed": False, "note": "no logic or no app to run: nothing to check"})
+            return
+        out(dict(st, next="go on" if st["ok"] else "permissions",
+                 tell_user=bool(st["base"]),
+                 note="base issues stop no job; tell the user and run fx permissions tasks" if st["base"] else None))
+        return
+    if a.action == "try":
+        if not a.job:
+            raise FxError("fx permissions try <job>: the job whose running app to call", code=3)
+        job = ctx.load(a.job)
+        rows = app_status(ctx, job)
+        name = a.repo_name or next((n for n, r in rows.items() if r.get("healthy")), None)
+        row = rows.get(name) if name else None
+        if not row or not row.get("healthy"):
+            raise FxError("the job's app does not answer: start it first (fx app up %s)" % job["id"], code=3)
+        rctx, v = one_app(ctx, job, a.repo_name) if a.repo_name else (ctx, job)
+        tech, tp = perm_tech(rctx, job)
+        if tp:
+            raise FxError("the technical part has problems:\n- " + "\n- ".join(tp), code=3, extra={"problems": tp})
+        tab = perm_tables(rctx, over=os.path.join(ctx.job_dir(job_real_id(job)), "logic"))
+        if tab["problems"]:
+            raise FxError("the rows have problems:\n- " + "\n- ".join(tab["problems"]), code=3,
+                          extra={"problems": tab["problems"]})
+        res = perm_matrix(rctx, v, row["url"], tech, tab["rows"])
+        out({"ok": not (res["mismatches"] or res["unrowed"] or res["stale"]), "cells": len(res["cells"]),
+             "calls": res["calls"], "seconds": res["seconds"], "mismatches": res["mismatches"],
+             "unrowed": res["unrowed"], "stale": res["stale"]})
+        return
+    if a.action == "mark":
+        st = perm_state(ctx)
+        left = [w for w in st["words"] if "never worked out" not in w and "never run through" not in w]
+        if left:
+            raise FxError("the permission table cannot be marked confirmed yet:\n- %s" % "\n- ".join(left), code=3)
+        whos, rows = set(), 0
+        for n in perm_app_repos(ctx):
+            tab = perm_tables(repo_ctx(ctx, n))
+            whos |= tab["whos"]
+            rows += len(tab["rows"])
+        write_atomic(os.path.join(logic_dir(ctx), PERMS_MARK), json.dumps(
+            {"confirmed": now(), "by": "the user", "rows": rows, "who": sorted(whos)}, indent=1) + "\n")
+        out({"ok": True, "rows": rows, "who": sorted(whos),
+             "next": "commit logic/ and the technical part, push, then fx selftest (it runs the table on the base "
+                     "branch)"})
+        return
+    if a.action == "tasks":
+        st = perm_state(ctx)
+        folder = os.path.join(ctx.jobs, PERMS_DIR)
+        os.makedirs(folder, exist_ok=True)
+        by = {}
+        for x in st["base"]:
+            if x["kind"] == "mismatch":
+                by.setdefault((x.get("repo"), x["route"]), []).append(
+                    "as %s (%s data): %s" % (x["who"], x["data"], x["why"]))
+        tasks = []
+        for (repo, route), lines in sorted(by.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
+            slug = re.sub(r"[^a-z0-9]+", "-", ("%s-%s" % (repo or "", route)).lower()).strip("-")[:60]
+            path = os.path.join(folder, slug + ".md")
+            write_atomic(path, perm_task_text(repo if len(perm_app_repos(ctx)) > 1 else None, route, lines))
+            tasks.append({"route": route, "repo": repo, "task_file": path,
+                          "start": "fx new --local \"Permissions of %s\" --issue-file %s" % (route, path)})
+        ask = [x for x in st["base"] if x["kind"] != "mismatch"]
+        out({"ok": True, "tasks": tasks, "ask": ask,
+             "next": "tell the user; start each task first (fx new --local ... --issue-file <task_file>); for each "
+                     "line of ask, the rows are worked out with the user (permissions.md)"})
+        return
+    if a.action == "apply":
+        if not a.job:
+            raise FxError("fx permissions apply <job>", code=3)
+        job = ctx.load(a.job)
+        done = []
+        for n in perm_app_repos(ctx):
+            rc = repo_ctx(ctx, n)
+            src = perm_job_file(rc, job)
+            raw = read(src)
+            if not raw:
+                continue
+            extra = json.loads(raw)
+            path = perm_file(rc)
+            t = json.loads(read(path, "{}") or "{}")
+            for k in ("requests", "not_app", "who"):
+                if isinstance(extra.get(k), dict):
+                    t[k] = dict(t.get(k) or {}, **extra[k])
+            write_atomic(path, json.dumps(t, ensure_ascii=False, indent=1) + "\n")
+            os.replace(src, src + ".applied")
+            done.append(os.path.relpath(path, ctx.factory))
+        out({"ok": True, "applied": done, "next": "commit and push %s" % ", ".join(done) if done else "nothing to apply"})
+        return
+    raise FxError("fx permissions check | try <job> | mark | tasks | apply <job>", code=3)
+
+
+def perms_gate_new(ctx, a):
+    """No job starts until the permission table was worked out, confirmed by the user and run on the base branch,
+    but the fix tasks fx wrote (jobs/_limits/, jobs/_permissions/). Nothing turns this off. What the base branch already
+    gets wrong stops no job here."""
+    if not perm_needed(ctx):
+        return
+    st = perm_state(ctx)
+    if st["ok"]:
+        return
+    task = os.path.realpath(a.issue_file) if getattr(a, "local", False) and getattr(a, "issue_file", None) else ""
+    if task and any(path_under(task, os.path.realpath(os.path.join(ctx.jobs, d))) for d in (LIMITS_DIR, PERMS_DIR)):
+        return
+    raise FxError("no new job until the permission table is worked out, confirmed and run on the base branch:\n- %s"
+                  % "\n- ".join(st["words"]), code=3, extra={"next": "permissions"})
 
 
 def logic_check(ctx, ldir, code, only=None, check_index=True, link_roots=()):
@@ -23915,6 +24751,24 @@ def selftest_repo(ctx, a, n, port, logdir, clone_of, bl_cfg, bl_pre, first):
                             p.returncode, "\n".join((p.stdout or "").splitlines()[-10:]))
                 except subprocess.TimeoutExpired:
                     res["schema_error"] = "app.schema timed out"
+            tech = perm_runs(rctx) if perm_needed(ctx) else None
+            if tech:
+                # The base branch through the permission table: what the gate tells apart from a job's own.
+                tab = perm_tables(rctx)
+                try:
+                    if tab["problems"]:
+                        raise PermsSetup("the rows have problems:\n- " + "\n- ".join(tab["problems"][:20]))
+                    pr = perm_matrix(rctx, view, info["url"], tech, tab["rows"])
+                    write_atomic(os.path.join(logdir, "permissions.md"), perm_markdown(pr, "Permission table, base "
+                                                                                           "branch"))
+                    res["permissions"] = {"at": now(), "routes": pr["routes"], "mismatches": pr["mismatches"],
+                                          "unrowed": pr["unrowed"], "stale": pr["stale"], "cells": len(pr["cells"]),
+                                          "seconds": pr["seconds"]}
+                    res["steps"]["permissions"] = {"ok": True, "cells": len(pr["cells"]), "seconds": pr["seconds"],
+                                                   "base_issues": len(pr["mismatches"]) + len(pr["unrowed"]) +
+                                                   len(pr["stale"])}
+                except PermsSetup as e:
+                    res["steps"]["permissions"] = {"ok": False, "error": e.why, "next": "permissions"}
             if rctx.c("e2e"):
                 env, db = app_env(rctx, view)
                 extra_env.update({k: v for k, v in env.items() if k.startswith("FACTORY_URL_")},
@@ -24066,6 +24920,12 @@ def build_parser():
     s.add_argument("job", nargs="?")
     s.add_argument("--code", action="store_true", help="check: also that the cited code reads each variable (base)")
     s.set_defaults(fn=cmd_limits)
+    s = sub.add_parser("permissions", help="the permission table: check, try on a job's app, mark confirmed, fix tasks, "
+                                           "apply a merged job's additions")
+    s.add_argument("action", choices=["check", "try", "mark", "tasks", "apply"])
+    s.add_argument("job", nargs="?")
+    s.add_argument("--repo", dest="repo_name", metavar="NAME", help="try: the repository whose app (several running)")
+    s.set_defaults(fn=cmd_permissions)
     s = sub.add_parser("login", help="log in to the job's running app the saved way (web or API) and print the header")
     s.add_argument("job", nargs="?")
     s.add_argument("--kind", choices=["web", "api"], required=True)

@@ -190,6 +190,8 @@
     "strip_env": [],
     "pass_env": []
   },
+  "_doc_permissions": "The permission table (see /auto-factory:code permissions): who may call each route is in the Permissions section of each module's logic; how each kind of user logs in, what a refusal looks like, the ids and bodies of the routes and the database snapshot commands are in stack/permissions.json (stack/permissions-<repo>.json with several apps). file: another path for that file. The gate calls every cell; no job starts until the user confirmed it.",
+  "permissions": {"file": ""},
   "_doc_review": "Optional, for /auto-factory:review only: other repositories whose merge requests this factory reviews, as well as the project. Each: {\"name\": \"fe\", \"url\": \"git@gitlab.com:group/fe.git\", \"ui_paths\": [], \"setup\": \"\", \"app\": {\"up\": \"\", \"down\": \"\", \"health\": \"/\"}} (ui_paths empty means the ones above; setup and app say how to start it in the throw-away sandbox every review runs the code in, in a container, since the code is a colleague's; without them a review of that repository stops and asks you). Their knowledge is in knowledge/repos/<name>/, written with fx review learn <name>. Jobs are still for the project alone. A repository's own \"checks\", like [\"pnpm ds:check\"], run in the sandbox and go to the reviewers (for the project: review.checks here). design_parent: the ticket a sub-task for the design or the Spec goes under, when not next to the reviewed one. design_max_mb: the largest design package fx downloads with a Jira token (default 200). In the jira block, subtask_type names your sub-task type (default Sub-task), and code_owner links the codes other tickets define, like {\"MSG\": \"ABC-1\", \"API-01\": \"ABC-24\"}.",
   "review": {
     "repos": []

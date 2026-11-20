@@ -129,7 +129,12 @@ plain path that more than one repository has goes to no one in particular.
    `<job folder>/round-<N>/build.md`, `<job folder>/round-<N>/checks.md` and
    `<job folder>/round-<N>/security.md` (what the scanners found: secrets,
    vulnerable dependencies, static-analysis hits, ZAP and header findings, and
-   which scanners were skipped).
+   which scanners were skipped), and `<job folder>/round-<N>/permissions*.md`
+   when there is one: fx called every route as every kind of user and found it
+   as the permission table says. The table only knows the routes and data it
+   was given: look for what it cannot see (data reached through another route's
+   answer, a field of someone else's data in a list, a query that filters by
+   owner only in some branches).
 3. The change, in each changed repository's worktree with its own base:
    `git log --oneline <base>..HEAD` and `git diff <base>...HEAD`. Read the
    surrounding code of every changed file, not only the diff.

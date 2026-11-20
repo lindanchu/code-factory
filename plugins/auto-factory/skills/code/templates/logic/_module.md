@@ -19,6 +19,14 @@
      value what the factory's test stack runs with. A limit the code does not read from the environment is
      MISSING (or MISSING: SUGGESTED_NAME), which stops every job until it is fixed. Any other parameter: - in both. -->
 
+## Permissions
+| Method | Route | guest | <role> | <role> | Note |
+| ------ | ----- | ----- | ------ | ------ | ---- |
+<!-- who may call each route of this module: one row per method and route, as the app names it; one column per kind
+     of user, named as in the factory's stack/permissions.json; a cell is yes (on any data), no, or own (on the
+     caller's own data only). The factory calls every cell on its test stack in every gate. The user confirms the
+     table; a new route gets its rows from its ticket, never from its code. -->
+
 ## 3. Open points (module-wide)
 1. ...
 
