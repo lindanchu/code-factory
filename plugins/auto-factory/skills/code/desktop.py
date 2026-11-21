@@ -409,7 +409,14 @@ class WinHost:
 
     # -- what is there
     def node_exe(self):
-        return shutil.which("node.exe")
+        # WSL reads Windows' PATH when it starts: a Node installed since (winget) is found where its installer puts it
+        found = shutil.which("node.exe")
+        if found:
+            return found
+        for top in ("/mnt/c/Program Files/nodejs", "/mnt/c/Program Files (x86)/nodejs"):
+            if os.path.isfile(os.path.join(top, "node.exe")):
+                return os.path.join(top, "node.exe")
+        return None
 
     def cargo(self):
         try:

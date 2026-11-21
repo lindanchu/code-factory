@@ -47,6 +47,9 @@ provision:
      && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs \
      && npm i -g playwright@{PLAYWRIGHT} axe-core@{AXE} && npx -y playwright@{PLAYWRIGHT} install --with-deps chromium \
      && rm -rf /var/lib/apt/lists/*
+    # systemd empties /tmp at each boot: a job's box stops while it waits and starts again, and what it keeps under
+    # /tmp (a clone whose path is there, as the tests' on Linux) must still be there. The box is the job's alone.
+    RUN echo 'd /tmp 1777 root root -' > /etc/tmpfiles.d/tmp.conf
     ENV NODE_PATH=/usr/lib/node_modules
     EOF
     docker build -t fx-box /opt/fx-box

@@ -622,7 +622,17 @@ scripts (`postinstall`, composer's scripts) run the moment it is set up. So fx r
 enforces itself, not one a setting has to remember:
 
 - One Linux VM per machine, `fx-sandbox` (Lima; `fx sandbox install`, part of `/auto-factory:code
-  install`). It mounts nothing of this machine and has its own Docker, never this machine's.
+  install`). It mounts nothing of this machine and has its own Docker, never this machine's. It is set
+  up once per machine; after the machine (or WSL) restarts, `limactl start fx-sandbox` starts it again.
+  - macOS: `brew install lima`.
+  - Linux and Windows (in WSL2, which has the nested virtualization it needs on Windows 11): QEMU
+    (`sudo apt-get install -y qemu-system-x86 qemu-utils`), Lima from its
+    [releases](https://github.com/lima-vm/lima/releases) (`sudo tar -C /usr/local -xzf
+    lima-<version>-Linux-x86_64.tar.gz`), and `sudo usermod -aG kvm $USER`, then a new terminal (WSL:
+    `wsl --shutdown` first). No `/dev/kvm` in WSL: `nestedVirtualization=true` under `[wsl2]` in
+    `%UserProfile%\.wslconfig`. Tried on Windows 11 with Lima 2.3.0: set up in about five minutes, and
+    the app's ports in the VM reach both WSL's and Windows' `127.0.0.1`, so a desktop app's real build
+    on Windows calls the API in its box.
 - Inside it, each review is its own box (a Sysbox container) with its own files, Docker (so a compose
   stack works as it does here), database, volumes and network, deleted when the review ends. Boxes do
   not see each other and share no writable cache. The clone and the factory's scripts are copied in at
@@ -1190,7 +1200,8 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
 ### Upgrading to 3.7: the review sandbox
 
 - `/auto-factory:review` runs nothing of a merge request until this machine has the sandbox VM:
-  `/auto-factory:code install` (step 7) or `fx sandbox install`, after `brew install lima` on macOS.
+  `/auto-factory:code install` (step 7) or `fx sandbox install`, after `brew install lima` on macOS, or
+  QEMU and Lima on Linux and in WSL ("Where the code runs", above).
 - A repository whose setup needs tools (php, composer, a JDK) lists their install commands in
   `sandbox.prepare`; a private registry goes in `sandbox.allow`.
 - Run `/auto-factory:code init` once more: it adds the rules that keep agents from this machine's key
@@ -1200,6 +1211,8 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
 
 - Jobs need the sandbox VM too (above). A job already in progress gets its box at its next command,
   and its setup runs again in there once.
+- A VM set up before 3.8 empties a box's `/tmp` when a waiting job's box starts again: `fx sandbox reset`
+  once (a factory under `/tmp` loses its clone's files otherwise).
 - Run `/auto-factory:code init` once more: it adds the rules that send the agents' project commands
   through `fx run --job`.
 - The VM's memory: one box per job at once (and per candidate or package). Its 6 GB held three small web

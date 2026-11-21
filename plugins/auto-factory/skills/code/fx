@@ -21382,6 +21382,33 @@ SANDBOX_ALLOW = ["registry.npmjs.org", "registry.yarnpkg.com", "repo.packagist.o
 SANDBOX_ENV_DROP = {"PATH", "HOME", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME", "TMPDIR", "SHLVL", "_", "NODE_PATH"}
 
 
+# What the user runs to have Lima (once per machine; sudo asks for their password, so never fx itself).
+SANDBOX_INSTALL = {
+    "macOS": "brew install lima",
+    "Linux and WSL": [
+        "sudo apt-get install -y qemu-system-x86 qemu-utils   (arm64: qemu-system-arm qemu-efi-aarch64)",
+        "Lima from https://github.com/lima-vm/lima/releases (lima-<version>-Linux-<arch>.tar.gz, checked against "
+        "its SHA256SUMS): sudo tar -C /usr/local -xzf lima-<version>-Linux-<arch>.tar.gz",
+        "sudo usermod -aG kvm $USER, then a new terminal (WSL: wsl --shutdown in Windows, then open it again)",
+    ],
+    "after a restart": "the VM does not start by itself: limactl start fx-sandbox",
+}
+
+
+def sandbox_kvm():
+    """Why Lima's QEMU cannot use KVM on this Linux machine ("" when it can, and on macOS). Without it QEMU emulates
+    every instruction: the VM takes hours to set up."""
+    if not sys.platform.startswith("linux"):
+        return ""
+    if not os.path.exists("/dev/kvm"):
+        return ("/dev/kvm is not there: virtualization is off in the BIOS, or (WSL) nested virtualization is off "
+                "(nestedVirtualization=true under [wsl2] in %UserProfile%\\.wslconfig, then wsl --shutdown)")
+    if not os.access("/dev/kvm", os.R_OK | os.W_OK):
+        return ("this terminal cannot use /dev/kvm: sudo usermod -aG kvm $USER, then a new terminal (WSL: wsl "
+                "--shutdown in Windows first); a terminal opened before that keeps the old groups")
+    return ""
+
+
 class NoSandbox(FxError):
     """The sandbox is not there or not as it must be (not installed, stopped, mounting this machine's folders)."""
 
@@ -22243,9 +22270,12 @@ def cmd_sandbox(ctx, a):
         return
     if a.action in ("install", "reset"):
         if not shutil.which("limactl"):
-            out({"ok": False, "why": "Lima is not installed", "install": {
-                "macOS": "brew install lima", "Linux and WSL": "https://lima-vm.io/docs/installation/ (QEMU and KVM)"},
+            out({"ok": False, "why": "Lima is not installed", "install": SANDBOX_INSTALL,
                  "next": "install Lima, then fx sandbox install again"})
+            sys.exit(3)
+        kvm = sandbox_kvm()
+        if kvm:
+            out({"ok": False, "why": kvm, "install": SANDBOX_INSTALL, "next": "fix that, then fx sandbox install again"})
             sys.exit(3)
         if a.action == "reset":
             subprocess.run(["limactl", "delete", "--force", SANDBOX_VM], stdout=subprocess.DEVNULL,

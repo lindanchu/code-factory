@@ -8,6 +8,7 @@ gave the box, and every command is logged. The Real* ones need the real VM: FX_S
 done; they run the review's proof of concept against it, a job's box, and a whole review and job through fx."""
 
 import contextlib
+import glob
 import io
 import json
 import os
@@ -171,6 +172,36 @@ class AllowAndEnvTest(unittest.TestCase):
         self.assertEqual(got.get("LANG"), "en_US.UTF-8")
         online = fx.box_env({"online": True, "proxy_ip": "10.0.0.2"}, {})
         self.assertEqual(online["HTTPS_PROXY"], "http://10.0.0.2:8888")
+
+
+class KvmTest(unittest.TestCase):
+    """Lima's QEMU on Linux and WSL needs /dev/kvm, and a terminal opened before the user joined its group has not."""
+
+    def kvm(self, platform, exists, usable):
+        with mock.patch.object(fx.sys, "platform", platform), \
+                mock.patch.object(fx.os.path, "exists", lambda p: exists if p == "/dev/kvm" else os.path.lexists(p)), \
+                mock.patch.object(fx.os, "access", lambda p, m: usable if p == "/dev/kvm" else True):
+            return fx.sandbox_kvm()
+
+    def test_macos_needs_none(self):
+        self.assertEqual(self.kvm("darwin", False, False), "")
+
+    def test_linux_with_kvm(self):
+        self.assertEqual(self.kvm("linux", True, True), "")
+
+    def test_no_kvm_says_nested_virtualization(self):
+        self.assertIn("nestedVirtualization", self.kvm("linux", False, False))
+
+    def test_a_terminal_without_the_group_says_a_new_one(self):
+        why = self.kvm("linux", True, False)
+        self.assertIn("usermod -aG kvm", why)
+        self.assertIn("new terminal", why)
+
+    def test_the_install_steps_cover_linux_and_wsl(self):
+        steps = " ".join(fx.SANDBOX_INSTALL["Linux and WSL"])
+        for words in ("qemu-system-x86", "lima-vm/lima/releases", "SHA256SUMS", "kvm", "wsl --shutdown"):
+            self.assertIn(words, steps)
+        self.assertIn("limactl start fx-sandbox", fx.SANDBOX_INSTALL["after a restart"])
 
 
 class NoWayAroundTest(unittest.TestCase):
@@ -686,6 +717,95 @@ class RealReviewFlowTest(SandboxCase):
         self.assertIn("box", r["output"])
         self.assertIn("No such file", r["output"])
         self.assertNotIn("exit=0", r["output"])
+        box = self.job()["sandbox"]["box"]
+        self.stop(rid)
+        self.assertIsNone(fx.box_running(box))
+
+
+@unittest.skipUnless(os.environ.get("FX_SANDBOX_REAL") == "1" and os.environ.get("FACTORY_TEST_TAURI") == "1"
+                     and shutil.which("limactl"),
+                     "the real sandbox VM and a real Tauri build on Windows: FX_SANDBOX_REAL=1 FACTORY_TEST_TAURI=1, in WSL")
+class RealDesktopReviewTest(SandboxCase):
+    """A desktop app's merge request through fx, all of it real: its API and website start in the review's box, the
+    website and the app's window are checked by the box's browser, then its real Tauri build is made on Windows, pointed
+    at the box's API, and its check calls that API across the sandbox. The review says the real build was not isolated,
+    and the box is gone at the end."""
+    tools = ("gitleaks", "semgrep", "osv-scanner", "docker")
+    APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "desktop-fixture", "api-app")
+
+    def setUp(self):
+        from test_desktop import D, ico_32, node_modules
+        host = D.WinHost()
+        why = (None if host.wsl else "not in WSL") or host.runner()[1] or \
+            (None if host.cargo() else "no Rust on Windows") or (None if host.msvc() else "no MSVC build tools on Windows") \
+            or (None if node_modules() and shutil.which("node") else "no Node and Playwright for the factory here")
+        if why:
+            self.skipTest(why)
+        # Windows' folders, while this machine's PATH still has cmd.exe
+        win_home, app_data = host.home(), host.to_wsl(host.win_var("LOCALAPPDATA"))
+        # the made-up machine's PATH gets Lima, this machine's Node and Playwright, and what fx runs on Windows (node.exe is
+        # found where its installer put it)
+        progs = [("limactl", LIMACTL), ("node", shutil.which("node"))] + \
+            [(n, shutil.which(n)) for n in ("cmd.exe", "powershell.exe", "netstat.exe")]
+        modules = node_modules()
+        super().setUp()
+        for name, path in progs:
+            os.symlink(path, os.path.join(self.f.bin, name))
+        # the real app's check runs here, with the factory's Playwright (the box has its own)
+        os.makedirs(os.environ["FACTORY_TOOLS_DIR"], exist_ok=True)
+        os.symlink(modules, os.path.join(os.environ["FACTORY_TOOLS_DIR"], "node_modules"))
+        self.set_app(up="node api/server.js {port}", health="/health")
+        path = os.path.join(self.f.factory, "factory.json")
+        cfg = load_json(path)
+        cfg["desktop"] = {"framework": "tauri", "dir": "src-tauri", "build": {"windows": "cd src-tauri && cargo build"},
+                          "build_timeout_sec": 3000, "start_timeout_sec": 120}
+        cfg["e2e_timeout_sec"] = 900
+        write(path, json.dumps(cfg))
+        # the merge request is the app: its files, and the icon Tauri's build wants
+        files = {}
+        for d, _, fs in os.walk(self.APP):
+            for f in fs:
+                files[os.path.relpath(os.path.join(d, f), self.APP)] = slurp(os.path.join(d, f))
+        os.makedirs(os.path.join(self.f.wt, "src-tauri", "icons"), exist_ok=True)
+        with open(os.path.join(self.f.wt, "src-tauri", "icons", "icon.ico"), "wb") as f:
+            f.write(ico_32())
+        subprocess.run(["git", "add", "src-tauri/icons/icon.ico"], cwd=self.f.wt, check=True)
+        self.head = self.push_mr(files, "the app, its API and its window")
+        self.set_mr()
+        # its copy and Rust's target on Windows (about 2 GB), and what WebView2 keeps for it: gone after the test
+        key = re.sub(r"[^A-Za-z0-9_-]", "_", os.path.basename(self.f.factory))
+        self.addCleanup(lambda: [shutil.rmtree(p, True) for d in ("src", "builds")
+                                 for p in glob.glob(os.path.join(win_home, d, key + "-*"))])
+        self.addCleanup(lambda: shutil.rmtree(os.path.join(app_data, "test.factory.apiapp"), True))
+
+    def test_the_api_in_the_box_answers_the_real_app_on_windows(self):
+        rid, res = self.up()
+        self.assertTrue(fx.http_up(res["url"] + "/health"), res)
+        code, r = self.call(rid, "normal", "R1", "/api/greeting")
+        self.assertEqual(code, 0, r)
+        code, r = self.review("exec", rid, "--req", "R1", "--note", "where", "--command",
+                              "ls %s 2>&1; echo exit=$?" % os.path.expanduser("~/.ssh"))
+        self.assertIn("No such file", r["output"])  # the API's box sees nothing of this machine
+        script = os.path.join(self.tmp, "check.js")
+        shutil.copyfile(os.path.join(self.APP, "check.js"), script)
+        t0 = time.time()
+        code, r = self.review("ui", rid, "--req", "R1", "--case", "website, window and the real app", "--script", script)
+        print("\n[review ui: %ds]" % (time.time() - t0))
+        self.assertEqual(code, 0, r)
+        rep = load_json(os.path.join(os.path.dirname(r["report"]), "ui-report.json"))
+        print(json.dumps({"steps": [(s["name"], s["ok"]) for s in rep.get("steps", [])],
+                          "real": (rep.get("desktop") or {}).get("real")}, indent=1))
+        applog = fx.read(os.path.join(os.path.dirname(r["report"]), "ui-app.log"), "") or ""
+        print("[ui-app.log]\n" + applog[-3000:])
+        self.assertIsNone(rep.get("error"), rep.get("error"))
+        self.assertEqual([s["name"] for s in rep["steps"] if not s["ok"]], [])
+        names = [s["name"] for s in rep["steps"]]
+        for kind in ("web", "desktop", "app"):  # in the box's browser twice, then the real app on Windows
+            self.assertTrue(any(n.endswith("%s: the API answered" % kind) for n in names), names)
+        real = rep["desktop"]["real"]
+        self.assertFalse(real.get("skipped") or real.get("build_error") or real.get("error"), real)
+        self.assertTrue(any("real build ran on the reviewer's Windows, not in the sandbox" in n
+                            for n in self.job()["not_checked"]), self.job()["not_checked"])
         box = self.job()["sandbox"]["box"]
         self.stop(rid)
         self.assertIsNone(fx.box_running(box))

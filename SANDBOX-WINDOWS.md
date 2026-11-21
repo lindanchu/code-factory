@@ -190,6 +190,44 @@ Thử trên máy thật:
 Một lỗi đã sửa nhưng chưa thử thật: trước đây fx dò cổng của app trước khi bật nó, mà Lima giữ sẵn cổng của box nên fx
 báo "port already answers" sai. Giờ app chạy trong box thì fx bỏ bước dò này.
 
+## Kết quả trên Windows (2026-11-21)
+
+Máy: Windows 11, WSL2 (nhân 6.18, Ubuntu 26.04, mạng NAT), amd64, 32 nhân, 30 GB RAM.
+
+**Bước 1 chạy được, nên không làm bước 2.**
+
+- Lima 2.3.0 + QEMU 10.2 trong WSL. QEMU chạy với `accel=kvm`.
+- `fx sandbox install` mất khoảng 4,5 phút.
+- Máy ảo không mount gì của máy thật, và không thấy home của WSL.
+- Cổng trên 127.0.0.1 của máy ảo hiện ra cả ở WSL lẫn Windows. `curl.exe` gọi thẳng được, kể cả ở chế độ NAT.
+- Docker 29.1 + Sysbox 0.7.1 chạy được trên nhân WSL2.
+- Mỗi lần gọi `limactl shell` mất 0,11 giây, tức là một lệnh `fx run` thêm khoảng 0,5 giây.
+- Log Lima báo "guest clock adjusted (−6 s)" mỗi 10 giây. Lý do: chính đồng hồ của Windows nhanh 6 giây, còn máy ảo thì đúng giờ. Vô hại.
+
+**Test thật đều qua:**
+
+- `Real*`: `RealSandboxTest`, `RealJobBoxTest`, `RealReviewFlowTest`, `RealJobFlowTest`.
+- `TauriOnWindowsTest`.
+- Test mới `RealDesktopReviewTest` (app giả `tests/desktop-fixture/api-app`): API và web của MR chạy trong box, `.exe` Tauri thật build trên Windows (khoảng 45 giây) gọi `http://127.0.0.1:<port>` và nhận "hello from the API on box". Đi qua `node.exe` ở chế độ NAT.
+- Cả bộ: 1.755 test qua, chạy 6 file song song, không trùng cổng. Test errno-37 trong `test_desktop` cũng qua.
+
+**Đã sửa:**
+
+- **Box xoá `/tmp` khi bật lại.** systemd trong box có quy tắc `D /tmp` nên xoá sạch `/tmp` mỗi lần khởi động. Job chờ người rồi chạy tiếp sẽ mất file nếu clone nằm dưới `/tmp`.
+  - Trên Linux, thư mục tạm của test nằm ở `/tmp` nên `RealJobFlowTest` lỗi. Mac dùng `/var/folders` nên không thấy.
+  - Đã sửa trong image `fx-box` (`/etc/tmpfiles.d/tmp.conf`).
+  - **Máy Mac cần chạy `fx sandbox reset` một lần** để có image mới. README đã ghi ở phần nâng cấp lên 3.8.
+- **`fx sandbox install`** in lệnh cài cụ thể cho Linux/WSL (QEMU, tarball Lima, nhóm `kvm`). Nó cũng kiểm tra `/dev/kvm` trước khi dựng máy ảo:
+  - Thiếu `/dev/kvm`: chỉ cách bật `nestedVirtualization`.
+  - Terminal mở trước khi vào nhóm `kvm`: bảo mở terminal mới.
+  - Có test `KvmTest`. `install.md` bước 7 và README đã có phần cho Linux/WSL.
+- **`desktop.py`:** tìm thấy `node.exe` ở `C:\Program Files\nodejs`. Trước đây Node vừa cài bằng winget phải đợi khởi động lại WSL mới thấy.
+
+**Lưu ý:**
+
+- Máy ảo không tự bật lại sau khi khởi động lại Windows/WSL. Khi đó chạy `limactl start fx-sandbox`. Lệnh này phải chạy từ terminal đã có nhóm `kvm`.
+- Chưa đo RAM với một dự án thật, vì máy này chưa có factory thật. Với các box nhỏ của test, đỉnh là 845 MB trên 6 GB.
+
 ## Những chỗ chưa kiểm chứng
 
 - **Đã chạy thật trên Mac** (Apple Silicon, Lima 2.3.0, máy ảo dựng lại từ đầu bằng template):

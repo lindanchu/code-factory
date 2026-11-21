@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>API App</title></head>
+<body><main>
+<h1>API App</h1>
+<p id="mode"></p><p id="api"></p><p id="greeting">waiting</p>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const T = window.__TAURI__;
+$('mode').textContent = window.isTauri ? 'desktop' : 'web';
+// the website asks its own origin; the real app asks the address its build was pointed at
+const base = T ? T.core.invoke('api_url').catch(() => '') : Promise.resolve('');
+base.then((b) => {
+  $('api').textContent = 'api ' + (b || 'same origin');
+  return fetch((b || '') + '/api/greeting');
+}).then((r) => r.json()).then((g) => { $('greeting').textContent = g.text + ' on ' + g.host; })
+  .catch((e) => { $('greeting').textContent = 'error ' + e; });
+</script>
+</body></html>

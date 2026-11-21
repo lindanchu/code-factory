@@ -48,8 +48,21 @@ project's host (GitHub or GitLab) and whether UI checks are on.
    of this machine's files or keys and reaches only the package registries, and only while it
    installs. Ask
    with AskUserQuestion whether to set it up now. Lima itself is the user's to install (`install`
-   in the output: `brew install lima` on macOS); then `fx sandbox install`. Never install either
-   without their yes.
+   in the output); then `fx sandbox install`. Never install either without their yes. It is done
+   once per machine:
+   - macOS: `brew install lima`.
+   - Linux and WSL (Windows 11's WSL2 has the nested virtualization it needs): first check
+     `ls -l /dev/kvm`; missing on WSL → `nestedVirtualization=true` under `[wsl2]` in
+     `%UserProfile%\.wslconfig`, then `wsl --shutdown`. Then give the user these to run in their
+     own terminal (`sudo` asks for their password): `sudo apt-get install -y qemu-system-x86
+     qemu-utils`; Lima's release tarball from https://github.com/lima-vm/lima/releases
+     (`lima-<version>-Linux-x86_64.tar.gz`; download it yourself and check it against the
+     release's `SHA256SUMS` first), `sudo tar -C /usr/local -xzf <it>`; `sudo usermod -aG kvm $USER`.
+   - The new `kvm` group reaches only terminals opened after it: `fx sandbox install` says so when
+     this one cannot use `/dev/kvm`. Have the user run `fx sandbox install` in a new terminal, or
+     on WSL restart it (`wsl --shutdown`, which also ends this session) and run it yourself.
+   - The VM does not start by itself after the machine (or WSL) restarts: `fx sandbox status`
+     says `limactl start fx-sandbox`, which you may run once this terminal can use `/dev/kvm`.
 
 Never install anything the user did not choose. A missing optional tool is
 fine: the gate skips that check and says so. A missing tool that `need` calls
