@@ -163,13 +163,26 @@ elif name == "limactl":
     def boxlog(what, name, **kw):
         with open(os.environ["STUB_LOG"], "a") as f:
             f.write(json.dumps(dict({"tool": "boxvm", "what": what, "name": name}, **kw)) + "\n")
+    # stopped: the VM is there but stopped (the machine restarted) until limactl start; stopped-nostart: it fails to
+    started = os.path.join(os.path.dirname(os.environ["STUB_LOG"]), "limactl-started")
+    stopped = mode.startswith("stopped") and not os.path.exists(started)
     if args[:1] == ["list"]:
         if mode != "none":
-            print(json.dumps({"name": "fx-sandbox", "status": "Stopped" if mode == "stopped" else "Running"})
+            print(json.dumps({"name": "fx-sandbox", "status": "Stopped" if stopped else "Running"})
                   if "--json" in args else "fx-sandbox")
+        sys.exit(0)
+    if args[:1] == ["start"]:
+        if mode == "stopped-nostart":
+            print("FATA[0001] exiting, status=Broken", file=sys.stderr)
+            sys.exit(1)
+        open(started, "w").close()
         sys.exit(0)
     if args[:1] != ["shell"]:
         sys.exit(0)
+    if stopped:
+        print('FATA[0000] instance "fx-sandbox" is stopped, run `limactl start fx-sandbox` to start the instance',
+              file=sys.stderr)
+        sys.exit(1)
     rest = args[args.index("--") + 1:]
     if rest[:2] == ["test", "-e"]:
         sys.exit(0 if mode == "mounted" else 1)

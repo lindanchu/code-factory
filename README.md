@@ -623,7 +623,8 @@ enforces itself, not one a setting has to remember:
 
 - One Linux VM per machine, `fx-sandbox` (Lima; `fx sandbox install`, part of `/auto-factory:code
   install`). It mounts nothing of this machine and has its own Docker, never this machine's. It is set
-  up once per machine; after the machine (or WSL) restarts, `limactl start fx-sandbox` starts it again.
+  up once per machine; after the machine (or WSL) restarts, the next review or job starts it again (a job
+  keeps its box and what it installed).
   - macOS: `brew install lima`.
   - Linux and Windows (in WSL2, which has the nested virtualization it needs on Windows 11): QEMU
     (`sudo apt-get install -y qemu-system-x86 qemu-utils`), Lima from its

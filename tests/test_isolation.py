@@ -99,8 +99,31 @@ class NoSandboxStopsTest(SandboxCase):
     def test_no_vm(self):
         self.missing("none", "does not exist")
 
-    def test_a_stopped_vm(self):
-        self.missing("stopped", "Stopped")
+    def starts(self):
+        return [c for c in self.f.calls("limactl") if c["argv"][:1] == ["start"]]
+
+    def test_a_stopped_vm_is_started_and_the_review_runs(self):
+        rid, _ = self.scanned()  # the machine restarted: the VM is there, stopped
+        with mock.patch.dict(os.environ, {"STUB_LIMACTL": "stopped"}), \
+                mock.patch.object(fx, "sandbox_kvm", return_value=""):
+            code, res = self.review("sandbox", rid)
+        self.assertEqual(code, 0, res)
+        self.addCleanup(self.stop, rid)
+        self.assertEqual(len(self.starts()), 1)
+        self.assertTrue(self.f.calls("box"))  # it ran in the box, as with a running VM
+
+    def test_a_stopped_vm_that_does_not_start(self):
+        with mock.patch.object(fx, "sandbox_kvm", return_value=""):
+            rid, res = self.failed("stopped-nostart")
+        self.assertIn("Stopped", res["error"])
+        self.assertIn("limactl start failed (exit 1): FATA[0001] exiting, status=Broken", res["error"])
+
+    def test_a_stopped_vm_this_terminal_cannot_start(self):
+        with mock.patch.object(fx, "sandbox_kvm", return_value="this terminal cannot use /dev/kvm: a new terminal"):
+            rid, res = self.failed("stopped")
+        self.assertIn("Stopped", res["error"])
+        self.assertIn("fx cannot start it from here: this terminal cannot use /dev/kvm", res["error"])
+        self.assertFalse(self.starts())
 
     def test_a_vm_not_set_up(self):
         self.missing("unprovisioned", "being set up")
@@ -201,7 +224,7 @@ class KvmTest(unittest.TestCase):
         steps = " ".join(fx.SANDBOX_INSTALL["Linux and WSL"])
         for words in ("qemu-system-x86", "lima-vm/lima/releases", "SHA256SUMS", "kvm", "wsl --shutdown"):
             self.assertIn(words, steps)
-        self.assertIn("limactl start fx-sandbox", fx.SANDBOX_INSTALL["after a restart"])
+        self.assertIn("starts the VM again", fx.SANDBOX_INSTALL["after a restart"])
 
 
 class NoWayAroundTest(unittest.TestCase):
@@ -342,6 +365,19 @@ class JobBoxTest(FxTestCase):
         self.assertEqual(code, 0, text)
         self.assertEqual(len(self.vm("resume")), 1)
         self.assertEqual(len(self.vm("create")), 1)  # the same box: what it installed is still there
+
+    def test_a_restarted_vm_is_started_and_the_job_keeps_its_box(self):
+        self.setup_job()
+        name = self.records()[0][1]["name"]
+        write(os.path.join(self.rundir, "box-" + name), "false")  # the VM stopped with the machine, and its boxes
+        with mock.patch.dict(os.environ, {"STUB_LIMACTL": "stopped"}), \
+                mock.patch.object(fx, "sandbox_kvm", return_value=""):
+            code, text = self.raw("run", "--job", "T-1", "--", "echo", "back")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(len([c for c in self.f.calls("limactl") if c["argv"][:1] == ["start"]]), 1)
+        self.assertEqual(len(self.vm("resume")), 1)
+        self.assertEqual(len(self.vm("create")), 1)  # the same box: what it installed is still there
+        self.assertEqual(self.records()[0][1]["name"], name)
 
     def test_the_box_goes_with_the_job_s_clones(self):
         self.setup_job()

@@ -21391,7 +21391,8 @@ SANDBOX_INSTALL = {
         "its SHA256SUMS): sudo tar -C /usr/local -xzf lima-<version>-Linux-<arch>.tar.gz",
         "sudo usermod -aG kvm $USER, then a new terminal (WSL: wsl --shutdown in Windows, then open it again)",
     ],
-    "after a restart": "the VM does not start by itself: limactl start fx-sandbox",
+    "after a restart": "a review or a job starts the VM again when it needs it, from a terminal that can use /dev/kvm "
+                       "(or limactl start fx-sandbox)",
 }
 
 
@@ -21438,21 +21439,14 @@ def sandbox_state():
     if not shutil.which("limactl"):
         return False, "Lima (limactl) is not installed on this machine: fx sandbox install says how"
     try:
-        p = subprocess.run(["limactl", "list", "--json"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        vm = sandbox_vm_row()
     except (OSError, subprocess.TimeoutExpired) as e:
         return False, "limactl list failed: %s" % e
-    rows = []
-    for line in (p.stdout or b"").decode("utf-8", "replace").splitlines():
-        try:
-            rows.append(json.loads(line))
-        except ValueError:
-            pass
-    vm = next((r for r in rows if isinstance(r, dict) and r.get("name") == SANDBOX_VM), None)
     if not vm:
         return False, "the sandbox VM %s does not exist: fx sandbox install" % SANDBOX_VM
     if vm.get("status") != "Running":
-        return False, "the sandbox VM %s is %s: limactl start %s" % (SANDBOX_VM, vm.get("status") or "not running",
-                                                                     SANDBOX_VM)
+        return False, ("the sandbox VM %s is %s: a review or a job starts it when it needs it (or limactl start %s)"
+                       % (SANDBOX_VM, vm.get("status") or "not running", SANDBOX_VM))
     try:
         if vm_run(["test", "-f", SANDBOX_READY], timeout=60).returncode != 0:
             return False, "the sandbox VM is still being set up, or its set-up failed: fx sandbox install"
@@ -21462,6 +21456,54 @@ def sandbox_state():
     except (OSError, subprocess.TimeoutExpired) as e:
         return False, "the sandbox VM does not answer: %s" % e
     return True, ""
+
+
+def sandbox_vm_row():
+    """Lima's row of the sandbox VM (its status...), None when there is none. Raises what limactl raises."""
+    p = subprocess.run(["limactl", "list", "--json"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    for line in (p.stdout or b"").decode("utf-8", "replace").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("name") == SANDBOX_VM:
+            return row
+    return None
+
+
+def sandbox_up():
+    """sandbox_state, once a VM that is only stopped (the machine or WSL restarted) is started again: a review or a job
+    that needs it starts it, one fx at a time on this machine. A VM that is missing, not set up or mounting this
+    machine's folders is never started: that is fx sandbox install's or reset's."""
+    ok, why = sandbox_state()
+    if ok or not shutil.which("limactl"):
+        return ok, why
+    try:
+        vm = sandbox_vm_row()
+    except (OSError, subprocess.TimeoutExpired):
+        return ok, why
+    if not vm or vm.get("status") != "Stopped":
+        return ok, why
+    kvm = sandbox_kvm()
+    if kvm:
+        return False, "%s; fx cannot start it from here: %s" % (why, kvm)
+    os.makedirs(state_dir(), exist_ok=True)
+    with open(os.path.join(state_dir(), "sandbox-start.lock"), "w") as f:
+        if fcntl is not None:
+            fcntl.flock(f, fcntl.LOCK_EX)
+        ok, why = sandbox_state()  # another fx may have started it while this one waited
+        if ok:
+            return ok, why
+        try:
+            p = subprocess.run(["limactl", "start", "--tty=false", SANDBOX_VM], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE, timeout=900)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return False, "%s; starting it failed: %s" % (why, e)
+        if p.returncode != 0:
+            tail = [x for x in (p.stderr or b"").decode("utf-8", "replace").splitlines() if x.strip()][-1:]
+            return False, "%s; limactl start failed (exit %d)%s" % (why, p.returncode,
+                                                                  ": " + tail[0][-300:] if tail else "")
+        return sandbox_state()
 
 
 def sandbox_allow(ctx):
@@ -21918,18 +21960,20 @@ def job_box_of(ctx, view, start=True, setup=True):
             if not start:
                 return None
             if state is None:
-                ok, why = sandbox_state()
+                ok, why = sandbox_up()
                 if not ok:
                     raise job_no_sandbox(ctx, real, why)
+                state = box_running(box)  # a VM that was only stopped still has the job's box, and what it installed
+            if state is None:
                 job_box_keep(ctx, vid, None)  # the VM was made again or cleaned: a new box, set up again
                 box = None
             else:
-                box_resume(box)
+                box_resume(box)  # its rules too: a restarted VM has none
                 job_box_keep(ctx, vid, box)
         if not start:
             return None
         if not box:
-            ok, why = sandbox_state()
+            ok, why = sandbox_up()
             if not ok:
                 raise job_no_sandbox(ctx, real, why)
             rctx = one_app(ctx, view)[0] if view.get("repos") else ctx
@@ -22793,7 +22837,7 @@ def review_sandbox(ctx, a):
                  "app.up in factory.json" if len(ctx.repos) <= 1 else "`app` of %s in repos in factory.json" % repo["name"])
         review_cannot_run(ctx, job, "%s says nothing about how to start this repository" % where)
     if not on_host:
-        ok, why = sandbox_state()
+        ok, why = sandbox_up()
         if not ok:  # nothing of the merge request has run yet, and nothing does on this machine unless the person says so
             review_cannot_run(ctx, job, "no sandbox on this machine: %s" % why)
     rdir = review_run_dir(ctx, job)

@@ -61,8 +61,9 @@ project's host (GitHub or GitLab) and whether UI checks are on.
    - The new `kvm` group reaches only terminals opened after it: `fx sandbox install` says so when
      this one cannot use `/dev/kvm`. Have the user run `fx sandbox install` in a new terminal, or
      on WSL restart it (`wsl --shutdown`, which also ends this session) and run it yourself.
-   - The VM does not start by itself after the machine (or WSL) restarts: `fx sandbox status`
-     says `limactl start fx-sandbox`, which you may run once this terminal can use `/dev/kvm`.
+   - After the machine (or WSL) restarts, the VM is stopped: a review or a job starts it again when
+     it needs it (about a minute), from a terminal that can use `/dev/kvm`; one that cannot says so
+     and stops before anything runs.
 
 Never install anything the user did not choose. A missing optional tool is
 fine: the gate skips that check and says so. A missing tool that `need` calls

@@ -225,7 +225,9 @@ Máy: Windows 11, WSL2 (nhân 6.18, Ubuntu 26.04, mạng NAT), amd64, 32 nhân, 
 
 **Lưu ý:**
 
-- Máy ảo không tự bật lại sau khi khởi động lại Windows/WSL. Khi đó chạy `limactl start fx-sandbox`. Lệnh này phải chạy từ terminal đã có nhóm `kvm`.
+- Sau khi khởi động lại Windows/WSL, máy ảo tắt. Review hay job cần đến thì fx tự bật lại (`sandbox_up`), và job giữ
+  nguyên box cũ cùng những gì đã cài. Lệnh phải chạy từ terminal đã có nhóm `kvm`. Terminal chưa có thì fx báo rõ
+  và dừng trước khi chạy gì của MR hay job.
 - Chưa đo RAM với một dự án thật, vì máy này chưa có factory thật. Với các box nhỏ của test, đỉnh là 845 MB trên 6 GB.
 
 ## Những chỗ chưa kiểm chứng
