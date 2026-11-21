@@ -23,7 +23,10 @@ program and container names as yours.
   That gives it this clone's own port, database name and id, and its turn on
   the machine. It prints the command's own output. Exit code 75 with
   `next: wait` is not a failure and not something to work around: run the same
-  command again. One test file or a linter needs none of this.
+  command again. Every other command of the project goes the same way, even
+  one test file or a linter: fx runs it in the job's box, away from this
+  machine's keys, and brings back what it changed in the clone. Bare `npm`,
+  `composer`, `php`, `node`, `pytest`, `make`, `docker`... are refused here.
 - The checks script is run only with the `Checks` line of your prompt
   (`fx checks <job>`). It already passed on this commit at the gate, so fx
   answers at once with that result and runs nothing; do not run the script any

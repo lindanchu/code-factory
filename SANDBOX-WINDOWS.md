@@ -156,6 +156,35 @@ Lima. Bump version nếu người dùng muốn.
    - Box có bị xoá sau review không (`fx sandbox status`).
 3. Chạy `fx doctor`: có dòng về deny rule, sandbox và key AWS không.
 
+### Bước 4: thử thật một job (3.8: mỗi job một box)
+
+Từ 3.8, mỗi job (và mỗi bản build thử best-of-N, mỗi gói việc chạy song song) có box riêng trong cùng máy ảo, dùng
+suốt đời job. Các quyết định đã chốt với người dùng:
+
+- **J1:** setup, lệnh của builder (`fx run --job`), checks, e2e, seed, đăng nhập, bảng quyền và app đều chạy trong box.
+- **J2:** chỉ lệnh cài (`fx setup`, `fx run --job <job> --install -- ...`) được ra registry; mọi lệnh khác không có mạng.
+- **J3:** job chờ người (needs-info, approve, pr, handed-off) thì box tạm dừng; xoá clone của job thì xoá box.
+- **J4:** không có sandbox thì job dừng trước setup và hỏi. Muốn chạy trên máy thật thì dùng
+  `fx sandbox host --job <job> --reason ... --confirm <mã>`, mỗi job hỏi một lần, và PR ghi rõ.
+- **J5:** bản build mobile và bản desktop thật vẫn chạy trên máy thật; PR ghi rõ.
+- **J6:** chỉ mang về các file git thấy được. Không mang về file bị ignore, symlink, `.git/`, `.claude/`, `.vscode/`,
+  `.idea/`, `.devcontainer/`, `.envrc`.
+
+Thử trên máy thật:
+
+1. Chạy `/auto-factory:code init` lại để có deny rule mới. Builder gọi thẳng `npm`/`composer`... phải bị chặn.
+2. Chạy một job nhỏ từ đầu đến PR. Xem:
+   - `fx setup` tạo box và cài thư viện (`setup-box-*.log` nếu là job cũ).
+   - Builder chạy test qua `fx run --job`; lockfile mới về clone sau `--install`.
+   - Gate pass. App trong box trả lời trên `127.0.0.1:<port>` của máy thật.
+   - Đặt job vào needs-info thì box dừng (`limactl shell fx-sandbox sudo docker ps -a`).
+3. Đo RAM của máy ảo khi chạy 2–3 job cùng lúc. Nếu thiếu thì báo người dùng, rồi hỏi họ có muốn nâng `memory` không.
+4. Thời gian mỗi lệnh `fx run`: mỗi lệnh gọi `limactl shell` 4 lần (kiểm tra box, đưa file vào, chạy, mang file về).
+   Nếu chậm quá thì báo lại.
+
+Một lỗi đã sửa nhưng chưa thử thật: trước đây fx dò cổng của app trước khi bật nó, mà Lima giữ sẵn cổng của box nên fx
+báo "port already answers" sai. Giờ app chạy trong box thì fx bỏ bước dò này.
+
 ## Những chỗ chưa kiểm chứng
 
 - Chưa từng chạy trên máy ảo thật, kể cả trên Mac.

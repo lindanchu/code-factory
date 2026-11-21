@@ -59,6 +59,19 @@ them to create a separate repository for the factory (for example
 
 ## Ground rules
 
+- **The job's box.** A job's project commands (setup, the agents' `fx run --job`, the gate's
+  checks, e2e, seed.sh, the app) run in a box of their own in the sandbox VM, never on this
+  machine: an install script there finds no key of this machine, and the box reaches the
+  package registries only during an install. Any fx command of a job that answers exit code 3
+  with `next: ask-no-sandbox` has run nothing of the job: **stop** and ask the user with
+  AskUserQuestion: set up the sandbox (`fx sandbox install`, with their yes, as in
+  /auto-factory:code install step 7) and run the same command again / run this job on this
+  machine without isolation / stop. Running it here takes their reason in their own words:
+  the `or_on_host` command with `--reason` and the `waive` code; it holds for this job until it
+  ends, and its pull request says so. Never choose this yourself, and never because it would
+  be quicker. A mobile app's build and a desktop app's real Windows build still run on this
+  machine (their API in the box); the pull request says so.
+
 - fx is the script next to this file. Run it exactly as
   `python3 ${CLAUDE_SKILL_DIR}/fx <command> ...` from the factory repository
   (your session's working directory); the path is already absolute. Where this file
@@ -953,7 +966,8 @@ reviewers and the pull requests use them:
       deletes the candidates' clones).
 1. `python3 ${CLAUDE_SKILL_DIR}/fx setup <job>` installs dependencies in each clone of the job,
    once (`skipped: already done` after that). On failure stop and give the user
-   the log path (`log`, or `logs` per repository).
+   the log path (`log`, or `logs` per repository). It runs in the job's own box in the sandbox
+   VM, like everything of the job after it (see **The job's box**).
 2. `python3 ${CLAUDE_SKILL_DIR}/fx ctx <job> --agent builder`.
 3. If it returned `resume_agent_id` **and** you started that builder in this
    conversation: continue it with SendMessage to that id, using `task` as the

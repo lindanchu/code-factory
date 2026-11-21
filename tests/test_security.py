@@ -158,6 +158,11 @@ elif name == "limactl":
     import shlex, signal, subprocess, tempfile
     rundir = os.environ.get("STUB_RUN_DIR") or tempfile.gettempdir()
     pidfile = lambda p: os.path.join(rundir, os.path.basename(p))
+    # each box's state (running, stopped; gone when its file is) in STUB_RUN_DIR/box-<name>
+    boxfile = lambda n: os.path.join(rundir, "box-" + n)
+    def boxlog(what, name, **kw):
+        with open(os.environ["STUB_LOG"], "a") as f:
+            f.write(json.dumps(dict({"tool": "boxvm", "what": what, "name": name}, **kw)) + "\n")
     if args[:1] == ["list"]:
         if mode != "none":
             print(json.dumps({"name": "fx-sandbox", "status": "Stopped" if mode == "stopped" else "Running"})
@@ -173,11 +178,48 @@ elif name == "limactl":
     if rest[:1] == ["sudo"]:
         rest = rest[1:]
     if rest[:2] == ["bash", "-c"]:
-        if "docker network create" in rest[2]:
+        s_ = rest[2]
+        if "docker network create" in s_:
             if mode == "nobox":
                 print("docker: Error response from daemon: unknown runtime sysbox-runc")
                 sys.exit(1)
+            n_ = re.search(r"--runtime=sysbox-runc --name (\S+)", s_).group(1)
+            open(boxfile(n_), "w").write("true")
+            boxlog("create", n_)
             print("subnet=10.250.0.0/24\nproxy=10.250.0.2")
+        elif "# fx-box-open" in s_:
+            n_ = re.search(r"d=/opt/fx-boxes/(\S+)", s_).group(1)
+            boxlog("open", n_)
+            print("proxy=10.250.0.3")
+        elif "# fx-box-pause" in s_:
+            n_ = re.search(r"docker stop -t 20 (\S+)", s_).group(1)
+            if os.path.exists(boxfile(n_)):
+                open(boxfile(n_), "w").write("false")
+            boxlog("pause", n_)
+        elif "# fx-box-resume" in s_:
+            n_ = re.search(r"docker start (\S+)", s_).group(1)
+            if not os.path.exists(boxfile(n_)):
+                sys.exit(1)
+            open(boxfile(n_), "w").write("true")
+            boxlog("resume", n_)
+        elif "# fx-box-rules" in s_:
+            boxlog("rules", re.search(r"--comment (\S+)", s_).group(1), online="--dport 8888" in s_)
+        elif "iptables -D DOCKER-USER" in s_ and "--dport 8888" in s_:
+            boxlog("cut", re.search(r"--comment (\S+)", s_).group(1))
+        elif "docker network rm" in s_:
+            n_ = re.search(r"docker rm -f (\S+)", s_).group(1)
+            if os.path.exists(boxfile(n_)):
+                os.remove(boxfile(n_))
+            boxlog("destroy", n_)
+        sys.exit(0)
+    if rest[:2] == ["docker", "inspect"]:
+        if os.path.exists(boxfile(rest[-1])):
+            print(open(boxfile(rest[-1])).read())
+        sys.exit(0)
+    if rest[:2] == ["docker", "ps"]:
+        for n_ in sorted(os.listdir(rundir)):
+            if n_.startswith("box-fxbox-"):
+                print(n_[4:])
         sys.exit(0)
     if rest[:2] != ["docker", "exec"]:
         sys.exit(0)
@@ -195,12 +237,30 @@ elif name == "limactl":
             i += 1
     cmd = rest[i + 1:]
     if cmd[:1] == ["tar"]:
-        if "-xf" in cmd:
+        if "-xf" in cmd or "-T" in cmd:
             sys.stdin.buffer.read()
         sys.exit(0)
     script = cmd[2] if cmd[:1] == ["bash"] and len(cmd) > 2 else " ".join(cmd)
-    if "systemctl restart docker" in script:
+    if "systemctl restart docker" in script or "# fx-box-" in script:
         sys.exit(0)
+    if "# fx-sync-in" in script:  # the box's files are this machine's here: only what would go in is logged
+        import io, tarfile
+        data = sys.stdin.buffer.read()
+        names = []
+        if data:
+            with tarfile.open(fileobj=io.BytesIO(data)) as t:
+                names = ["/" + m.name for m in t.getmembers()]
+        with open(os.environ["STUB_LOG"], "a") as f:
+            f.write(json.dumps({"tool": "boxsync", "dir": "in", "files": names}) + "\n")
+        sys.exit(0)
+    if "# fx-sync-out" in script:
+        sys.stdin.buffer.read()
+        with open(os.environ["STUB_LOG"], "a") as f:
+            f.write(json.dumps({"tool": "boxsync", "dir": "out"}) + "\n")
+        sys.exit(0)
+    m = re.match(r"timeout -k \d+ (\d+) bash -lc (.+)$", script, re.S)
+    if m:  # the box's own time limit: here, the command itself
+        script = shlex.split(m.group(2))[0]
     run_env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp")}
     if os.environ.get("NODE_PATH"):
         run_env["NODE_PATH"] = os.environ["NODE_PATH"]  # the box image's own
@@ -1891,7 +1951,7 @@ class ScriptTest(unittest.TestCase):
             self.assertEqual(json.load(f)["version"], v)
         with open(os.path.join(ROOT, "plugins", "auto-factory", "skills", "code", "shared", "VERSION")) as f:
             self.assertEqual(f.read().strip(), v)  # the two skills ship together
-        self.assertEqual(v, "3.7.0")
+        self.assertEqual(v, "3.8.0")
 
     def test_three_commands(self):
         """/auto-factory:code and /auto-factory:review (no auto test here): a plugin skill's command is

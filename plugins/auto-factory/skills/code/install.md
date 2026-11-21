@@ -40,11 +40,13 @@ project's host (GitHub or GitLab) and whether UI checks are on.
    (`fx install`) when they are done.
 6. If `path_hint` is set, mention it once: fx finds the tools it installed by
    itself; the user only needs it to use them in their own terminal.
-7. **The sandbox** for colleagues' merge requests (/auto-factory:review runs nothing of one
-   without it): `python3 ${CLAUDE_SKILL_DIR}/fx sandbox status`. Not `ok` → tell the user in plain
-   words: a Linux VM of its own (`fx-sandbox`, Lima; about 6 GB of memory while it runs, 60 GB of
-   disk, the first set-up takes 10 to 20 minutes) where each review runs in a box that sees none
-   of this machine's files or keys and has no way out once its dependencies are installed. Ask
+7. **The sandbox** for colleagues' merge requests and for jobs (/auto-factory:review runs nothing
+   of a merge request without it, and a job stops before its setup): `python3 ${CLAUDE_SKILL_DIR}/fx
+   sandbox status`. Not `ok` → tell the user in plain words: a Linux VM of its own (`fx-sandbox`,
+   Lima; about 6 GB of memory while it runs, more with several jobs at once, 60 GB of disk, the
+   first set-up takes 10 to 20 minutes) where each review and each job runs in a box that sees none
+   of this machine's files or keys and reaches only the package registries, and only while it
+   installs. Ask
    with AskUserQuestion whether to set it up now. Lima itself is the user's to install (`install`
    in the output: `brew install lima` on macOS); then `fx sandbox install`. Never install either
    without their yes.

@@ -41,6 +41,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import time
 import sys
@@ -827,6 +828,8 @@ class Ctx:
             raise FxError("illegal move %s -> %s for %s" % (frm, to, job["id"]))
         job["stage"] = to
         self.save(job, note or ("%s -> %s" % (frm, to)))
+        if to in JOB_BOX_REST_STAGES or to == "rejected":  # waiting for a person, or over: its boxes stop or go
+            job_boxes_rest(self, job["id"], end=to == "rejected")
 
 
 def is_review_job(job):
@@ -1182,6 +1185,7 @@ def drop_clone(ctx, job, force=False):
     if not names:
         # nothing reads its copies of the lanes' folders any more either
         shutil.rmtree(os.path.join(ctx.job_dir(job["id"]), LANE_COPIES), ignore_errors=True)
+        job_boxes_rest(ctx, job["id"], end=True)
         return "no clone"
     if not force:
         for n in names:  # a run-only clone too: work done there by mistake is work all the same
@@ -1211,6 +1215,7 @@ def drop_clone(ctx, job, force=False):
     home = os.path.join(ctx.work, job["id"])
     if os.path.isdir(home) and not os.listdir(home):
         os.rmdir(home)
+    job_boxes_rest(ctx, job["id"], end=True)  # the job is over: its boxes go, with what they held
     return "removed"
 
 
@@ -2233,7 +2238,16 @@ LOCAL_ALLOW = ["Bash(git status *)", "Bash(git diff *)", "Bash(git log *)", "Bas
 # stopped (a colleague's merge request runs in the sandbox for that).
 HOME_KEY_DENY = ["Read(~/.aws/**)", "Read(~/.ssh/**)", "Read(~/.config/gh/**)", "Read(~/.docker/config.json)",
                  "Read(~/.netrc)", "Bash(*.aws/*)", "Bash(*.ssh/*)"]
-LOCAL_DENY = ["Bash(git push --force *)", "Bash(git push -f *)", "Bash(git reset --hard *)"] + HOME_KEY_DENY
+# A job's project commands run in its box (fx run --job <job> [--install] -- <command>): the agents' own Bash does not
+# run them on this machine. Best effort, like HOME_KEY_DENY. A mobile app's build tools and Windows' are left: those
+# builds run here (decision J5).
+PROJECT_CMD_DENY = ["Bash(%s)" % c for c in (
+    "npm *", "npx *", "pnpm *", "yarn *", "bun *", "node *", "deno *", "composer *", "php *", "pip *", "pip3 *",
+    "poetry *", "uv *", "pytest *", "python -m pytest*", "python3 -m pytest*", "python manage.py *",
+    "python3 manage.py *", "bundle *", "rake *", "rails *", "ruby *", "go *", "mvn *", "make *", "docker *",
+    "docker-compose *", "./vendor/bin/*", "vendor/bin/*", "./node_modules/.bin/*", "node_modules/.bin/*")]
+LOCAL_DENY = ["Bash(git push --force *)", "Bash(git push -f *)", "Bash(git reset --hard *)"] + HOME_KEY_DENY + \
+    PROJECT_CMD_DENY
 
 
 def ensure_gitignore(ctx, lines):
@@ -3366,13 +3380,18 @@ def cmd_ctx(ctx, a):
     if agent in ("builder", "code", "security", "verifier", "ux", "ui"):
         which = (" --wp %s" % a.wp) if wp else (" --candidate %d" % cand["k"]) if cand else ""
         turn = ("It runs in the clone with that clone's port, database name and id, and takes its turn on a machine other "
-                "jobs use at the same time; exit code 75 with `next: wait` means run the same command again")
+                "jobs use at the same time; exit code 75 with `next: wait` means run the same command again. Every "
+                "other command of the project goes through it too, even one test file or a linter: it runs in the "
+                "job's box, and what it changes in the clone comes back")
         if wp:
             # A package tests what it owns. The whole suite runs once, on the whole: at integration, through fx checks.
             lines.append("Heavy commands (the tests of the files you own, a build, a browser run): `%s run --job %s%s -- "
                          "<command>`, never the bare command. %s. Run the tests that cover your own files, not the whole "
                          "suite: the checks script runs once for the whole job, when every package is merged, and fx does "
                          "not run it for a package" % (FX_CMD, job["id"], which, turn))
+            lines.append("Install: `%s run --job %s%s --install -- <the install command>` adds or upgrades a dependency; "
+                         "only this command reaches the package registries, every other one has no internet" % (
+                             FX_CMD, job["id"], which))
         else:
             lines.append("Checks: `%s checks %s%s` runs the whole checks script in the clone and keeps the result for the "
                          "commit it ran on: the gate does not run the script again on a commit that passed here. %s. Exit "
@@ -3385,6 +3404,10 @@ def cmd_ctx(ctx, a):
                              "repository's clone" % ", ".join(job_names(job, "change")))
             lines.append("Heavy commands (a whole test suite, a build, a browser run): `%s run --job %s%s -- <command>`, "
                          "never the bare command. %s" % (FX_CMD, job["id"], which, turn))
+        if agent == "builder":
+            lines.append("Install: `%s run --job %s%s --install -- <the install command>` adds or upgrades a dependency; "
+                         "only this command reaches the package registries, every other one has no internet" % (
+                             FX_CMD, job["id"], which))
     if agent == "planner":
         cap = int(ctx.c("split.max_builders", 0) or 0)
         lines.append("Plan file: %s" % os.path.join(jd, "plan.md"))
@@ -3840,7 +3863,10 @@ def cmd_setup(ctx, a):
         names = [a.repo_name]
     if not names:
         raise FxError("%s has no clones yet: intake names its repositories, then fx repos clones them" % job["id"], code=3)
-    todo = [n for n in names if a.force or not job["repos"][n].get("setup_done")]
+    # The job's box first (decision J4): without a sandbox, nothing of the job runs until the person says how.
+    box = job_box_of(ctx, job, setup=False)
+    todo = [n for n in names if a.force or not job["repos"][n].get("setup_done")
+            or (box and n not in (box.get("setup") or []))]
     if not todo:
         out({"ok": True, "job": job["id"], "skipped": "already done"})
         return
@@ -3862,8 +3888,8 @@ def cmd_setup(ctx, a):
                     # The repository's own port, id and database name, as its checks script gets them: a setup that
                     # starts the project's stack must not start it on the ports of another job.
                     env = checks_env(*one_app(ctx, job, n))
-                    p = run(login_shell(ctx, cmd, env), cwd=e["worktree"], check=False, env=env, timeout=timeout,
-                            group=True)
+                    # in the box, the install's only time with the registries (decision J2)
+                    p = proj_run(ctx, job, cmd, e["worktree"], env, timeout, online=True)
                 except subprocess.TimeoutExpired as ex:
                     write_atomic(log, (ex.output or "") if isinstance(ex.output, str) else "")
                     raise FxError("setup%s timed out after %ss; see %s" % (" of %s" % n if several else "", timeout, log),
@@ -3876,6 +3902,13 @@ def cmd_setup(ctx, a):
             job = ctx.load(job["id"])  # as it is now: the step may have waited, and its start and end went on the board
         job["repos"][n]["setup_done"] = True
         ctx.save(job, "worktree setup done" if not several else "setup done in %s" % n)
+        if box:
+            box = job_box_rec(ctx, job["id"]) or box
+            if n not in (box.get("setup") or []):
+                box.setdefault("setup", []).append(n)
+            job_box_keep(ctx, job["id"], box)
+    if box:
+        job_box_warm(ctx, job, box)
     res = {"ok": True, "job": job["id"], "log": logs.get(todo[0]) if not several else None}
     if several:
         res["logs"] = logs
@@ -4218,8 +4251,7 @@ def gate_round_repos(ctx, job, a, place):
         log = "e2e-%s.log" % n
         timeout = int(rc_.c("e2e_timeout_sec", 1800) or 1800)
         try:
-            p = run(login_shell(rc_, app_fill(rc_.c("e2e"), views[n], db), env), cwd=views[n]["worktree"], check=False,
-                    env=env, timeout=timeout, group=True)
+            p = proj_run(rc_, views[n], app_fill(rc_.c("e2e"), views[n], db), views[n]["worktree"], env, timeout)
             per[n]["e2e_out"] = p.stdout or ""
             if p.returncode != 0:
                 problems.append("%se2e tests exited with %d (see round-%d/%s)" % (label(n), p.returncode, rn, log))
@@ -4645,8 +4677,7 @@ def gate_round_one(ctx, job, a, place):
         env, db = app_env(ctx, job)
         env["BASE_URL"] = app_url_.rstrip("/")
         try:
-            p = run(login_shell(ctx, app_fill(ctx.c("e2e"), job, db), env), cwd=wt, check=False, env=env,
-                    timeout=int(ctx.c("e2e_timeout_sec", 1800)), group=True)
+            p = proj_run(ctx, job, app_fill(ctx.c("e2e"), job, db), wt, env, int(ctx.c("e2e_timeout_sec", 1800)))
             e2e_out = p.stdout or ""
             if p.returncode != 0:
                 problems.append("e2e tests exited with %d (see round-%d/e2e.log)" % (p.returncode, rn))
@@ -5283,6 +5314,7 @@ def pr_body(ctx, job, repo=None, links=None):
     for fl in job.get("flaky") or []:
         checks.append("- flaky: %s failed once and passed on a second run of the same commit, round %s (%s)"
                       % (fl.get("script"), fl.get("round"), ", ".join(fl.get("signs") or [])))
+    checks += ["- not isolated: %s" % x for x in job_isolation_notes(ctx, job)]
     if checks:
         parts += ["## Automated checks", ""] + checks + [""]
     bl = (job.get("baselines") or {}) if not several or repo == pr_baselines_repo(ctx, job) else {}
@@ -5673,8 +5705,13 @@ def checks_execute(ctx, job, look, log_path, by, who=None, cand=None, rn=None, p
     t0, started, rc, timed_out = time.time(), now(), None, False
     watch.start(limit)
     try:
-        p = run(["bash", checks_script(ctx, job)], cwd=wt, check=False, env=checks_env(ctx, who), timeout=limit, group=True,
-                on_start=watch.attach)
+        box = job_box_of(ctx, who)
+        if box:  # in the job's box: what it changes in the clone comes back, and the checks below see it
+            p = box_job_exec(ctx, who, box, "bash %s" % shlex.quote(checks_script(ctx, job)), wt, checks_env(ctx, who),
+                             limit)
+        else:
+            p = run(["bash", checks_script(ctx, job)], cwd=wt, check=False, env=checks_env(ctx, who), timeout=limit,
+                    group=True, on_start=watch.attach)
         output, rc = p.stdout or "", p.returncode
     except subprocess.TimeoutExpired as e:
         timed_out = True
@@ -7073,8 +7110,8 @@ def cmd_candidates(ctx, a):
                     where = "candidate %d%s" % (c["k"], " (%s)" % name if len(names) > 1 else "")
                     try:
                         env = checks_env(*one_app(ctx, candidate_job(ctx, job, c["k"]), name))
-                        p = run(login_shell(ctx, cmd, env), cwd=c["worktree"], check=False, env=env,
-                                timeout=int(ctx.rc(name, "setup_timeout_sec", 1800) or 1800), group=True)
+                        p = proj_run(ctx, candidate_job(ctx, job, c["k"]), cmd, c["worktree"], env,
+                                     int(ctx.rc(name, "setup_timeout_sec", 1800) or 1800), online=True)
                     except subprocess.TimeoutExpired:
                         ctx.save(job, "setup timed out in %s" % where)
                         raise FxError("setup timed out in %s; see %s" % (where, log), code=3)
@@ -8824,7 +8861,7 @@ def perm_cmd(rctx, job, cmd, what, timeout=300):
     """A command of the technical part, in the app's folder and environment (like a saved login). Its output."""
     env, db = app_env(rctx, job)
     try:
-        r = run_sep(login_shell(rctx, app_fill(cmd, job, db), env), cwd=job["worktree"], env=env, timeout=timeout)
+        r = proj_run(rctx, job, app_fill(cmd, job, db), job["worktree"], env, timeout, sep=True)
     except subprocess.TimeoutExpired:
         raise PermsSetup("its %s command ran over %d seconds" % (what, timeout))
     if r.returncode != 0:
@@ -11971,6 +12008,10 @@ def cmd_run(ctx, a):
             raise checks_script_refusal(job, a.wp, a.candidate)
         env = checks_env(ctx, who)
         folders = [cwd, ctx.job_dir(job["id"])]
+    elif getattr(a, "install", False):
+        raise FxError("--install is for a job's box: fx run --job <job> --install -- <the install command>", code=3)
+    # A job's command runs in its box (decision J1); an install there is the only one with the registries (J2).
+    box = job_box_of(ctx, who, setup=not getattr(a, "install", False)) if job else None
     name = None if job else (a.name or os.path.basename(cmd[0]))
     with ledger_lock():
         st = ledger_load()
@@ -11988,12 +12029,17 @@ def cmd_run(ctx, a):
             env["FACTORY_PLACE"] = place.lease["id"]
             env["FACTORY_CPUS"] = str(place_cpus_now())
             t1 = time.time()
-            proc = subprocess.Popen(cmd, cwd=cwd, env=env, start_new_session=hasattr(os, "killpg"))
-            try:
-                code = proc.wait()
-            except BaseException:
-                kill_group(proc) if hasattr(os, "killpg") else proc.kill()
-                raise
+            if box:
+                p = box_job_exec(ctx, who, box, shlex.join(cmd), cwd, env, None, online=bool(a.install))
+                sys.stdout.write(p.stdout or "")
+                code = p.returncode
+            else:
+                proc = subprocess.Popen(cmd, cwd=cwd, env=env, start_new_session=hasattr(os, "killpg"))
+                try:
+                    code = proc.wait()
+                except BaseException:
+                    kill_group(proc) if hasattr(os, "killpg") else proc.kill()
+                    raise
             if place.samples == 0 and sample_sec() > 0 and code == 0:
                 try:
                     place.sample()  # too short to have been measured: once, now, so that the next one is not a guess
@@ -14462,7 +14508,8 @@ def ui_run(ctx, job, script, out_dir, real_app=True):
     dconf = desktop_conf(rctx)
     if not dconf:
         desktop_missing(rctx, v.get("worktree"))
-    ok, why = (True, "") if v.get("box") else playwright_ok()  # a box has its own Playwright and Chromium
+    vbox = job_box_of(ctx, v)
+    ok, why = (True, "") if vbox else playwright_ok()  # a box has its own Playwright and Chromium
     if not ok:
         return {"skipped": "Playwright is not available (%s): run /auto-factory:code install" % why}
     info = app_start(ctx, job)
@@ -14494,9 +14541,11 @@ def ui_run(ctx, job, script, out_dir, real_app=True):
                       FACTORY_UI_BLOCK_STATUS=str(rctx.c("ui_checks.block_on_status", 500)),
                       FACTORY_UI_DESIGN=denv["FACTORY_UI_DESIGN"], **desk_env)
     try:
-        if v.get("box"):
-            # a colleague's merge request: the browser runs in its box too, and only the results come back
-            b = v["box"]
+        if vbox:
+            # a colleague's merge request or a job: the browser runs in its box too, and only the results come back
+            b = vbox
+            if "box" not in v:
+                job_box_push(ctx, v, b)
             box_put(b, [SKILL_DIR, out_dir, dtmp, script])
             p = box_exec(b, "node %s" % shlex.quote(script), v["worktree"], env,
                          timeout=int(rctx.c("e2e_timeout_sec", 1800)))
@@ -15355,7 +15404,11 @@ def run_seed(ctx, job, seed, out_dir):
     env, db = app_env(ctx, job)
     os.makedirs(out_dir, exist_ok=True)
     try:
-        p = run(["bash", seed], cwd=job["worktree"], check=False, env=env, timeout=600, group=True)
+        box = job_box_of(ctx, job)
+        if box and "box" not in job:  # the job's box: seed.sh is in the job's folder, which it gets
+            p = box_job_exec(ctx, job, box, "bash %s" % shlex.quote(seed), job["worktree"], env, 600)
+        else:
+            p = run(["bash", seed], cwd=job["worktree"], check=False, env=env, timeout=600, group=True)
         write_atomic(os.path.join(out_dir, "seed.log"), p.stdout or "")
         return p.returncode == 0
     except subprocess.TimeoutExpired:
@@ -16356,8 +16409,7 @@ def login_run(ctx, job, conf):
         return None, None
     env, db = app_env(ctx, job)
     try:
-        r = run_sep(login_shell(ctx, app_fill(conf["command"], job, db), env), cwd=job["worktree"], env=env,
-                    timeout=120)
+        r = proj_run(ctx, job, app_fill(conf["command"], job, db), job["worktree"], env, 120, sep=True)
     except subprocess.TimeoutExpired:
         raise ScannerLogin(conf.get("_kind", "web"), "its command ran over 120 seconds")
     lines = (r.stdout or "").strip().splitlines()
@@ -17867,11 +17919,14 @@ def doctor_checks(ctx, issue=None, session=True, live=False):
         left = [r for r in HOME_KEY_DENY if r not in denied]
         add("agents kept from reading this machine's key files (advice)", True,
             "run /auto-factory:code init to add %s" % ", ".join(left) if left else "")
+        left = [r for r in PROJECT_CMD_DENY if r not in denied]
+        add("agents run the project's commands in the job's box (advice)", True,
+            "run /auto-factory:code init to add %d deny rule(s), such as %s" % (len(left), left[0]) if left else "")
     if live:
         ok_, why_ = sandbox_state()
-        add("sandbox for colleagues' merge requests (advice)", True,
-            "ready (%s)" % SANDBOX_VM if ok_ else "%s; until then /auto-factory:review stops before running a merge "
-                                                  "request" % why_)
+        add("sandbox for merge requests and jobs (advice)", True,
+            "ready (%s)" % SANDBOX_VM if ok_ else "%s; until then a review stops before running a merge request, and "
+                                                  "a job before its setup" % why_)
     for line in aws_key_advice(ctx):
         add("keys on this machine (advice)", True, line)
     if live:
@@ -21399,8 +21454,15 @@ def sandbox_filter(hosts):
     return "".join("^%s$\n" % (r"(.*\.)?" + re.escape(h[2:]) if h.startswith("*.") else re.escape(h)) for h in hosts)
 
 
-def box_name(job_id):
-    return "fxbox-%s-%s" % (re.sub(r"[^a-z0-9]+", "-", str(job_id).lower()).strip("-")[-36:] or "x", secrets.token_hex(3))
+def box_factory_id(ctx):
+    """Which factory a box belongs to, in its name: fx sandbox clean of one factory never touches another's boxes."""
+    home = getattr(ctx, "factory", None) if ctx is not None else None
+    return hashlib.sha1(os.path.realpath(home).encode()).hexdigest()[:6] if home else "nofact"
+
+
+def box_name(job_id, ctx=None):
+    return "fxbox-%s-%s-%s" % (box_factory_id(ctx), re.sub(r"[^a-z0-9]+", "-", str(job_id).lower()).strip("-")[-30:]
+                               or "x", secrets.token_hex(3))
 
 
 def box_image(ctx):
@@ -21424,7 +21486,7 @@ def box_image(ctx):
 def box_create(ctx, job_id, port, nports, image=None):
     """A box for one review: its own network, its own proxy (for installing only), its ports forwarded to this
     machine's 127.0.0.1:<port>..<port+nports-1>. The box only sees what box_put copies into it."""
-    name = box_name(job_id)
+    name = box_name(job_id, ctx)
     net, proxy = name + "-net", name + "-proxy"
     image = image or box_image(ctx)
     pub = " ".join("-p 127.0.0.1:%d:%d" % (port + i, SANDBOX_PORT0 + i) for i in range(nports))
@@ -21461,23 +21523,37 @@ echo "proxy=$pip"
         box_destroy(box)
         raise NoSandbox("the box could not be made in the sandbox VM:\n%s" % vm_text(p)[-1500:], code=3)
     # Its Docker comes up with systemd; then the forwarders of its ports, and its Docker's own proxy for image pulls.
-    proxy_url = "http://%s:8888" % box["proxy_ip"]
+    # Its Docker finds the proxy by name (fx-proxy in its /etc/hosts): a job's box gets a new one for each install.
+    proxy_url = "http://fx-proxy:8888"
     init = r"""set -e
 for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
 docker info >/dev/null
+{hosts}
 mkdir -p /etc/systemd/system/docker.service.d
 printf '[Service]\nEnvironment="HTTP_PROXY={p}" "HTTPS_PROXY={p}" "NO_PROXY=localhost,127.0.0.1"\n' > /etc/systemd/system/docker.service.d/fx-proxy.conf
 systemctl daemon-reload && systemctl restart docker
-for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
-for i in $(seq 0 {last}); do
-  setsid socat TCP-LISTEN:$(({p0}+i)),fork,reuseaddr TCP:127.0.0.1:$(({port}+i)) >/dev/null 2>&1 < /dev/null &
-done
-""".format(p=proxy_url, last=nports - 1, p0=SANDBOX_PORT0, port=port)
+""".format(p=proxy_url, hosts=box_hosts_line(box["proxy_ip"])) + box_forwarders_script(box)
     p = vm_run(["sudo", "docker", "exec", name, "bash", "-c", init], timeout=300)
     if p.returncode != 0:
         box_destroy(box)
         raise NoSandbox("the box did not start its own Docker:\n%s" % vm_text(p)[-1500:], code=3)
     return box
+
+
+def box_hosts_line(ip):
+    """The box's /etc/hosts names its proxy fx-proxy (Docker owns that file, so it is rewritten in place)."""
+    return ("grep -v ' fx-proxy$' /etc/hosts > /tmp/fx-hosts || true; echo %s >> /tmp/fx-hosts; "
+            "cat /tmp/fx-hosts > /etc/hosts" % shlex.quote("%s fx-proxy" % ip))
+
+
+def box_forwarders_script(box):
+    """Inside the box: its Docker up, and each published port 20000+i forwarded to the app's 127.0.0.1:<port+i>."""
+    return r"""for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
+pkill -f '^socat TCP-LISTEN:' 2>/dev/null || true
+for i in $(seq 0 {last}); do
+  setsid socat TCP-LISTEN:$(({p0}+i)),fork,reuseaddr TCP:127.0.0.1:$(({port}+i)) >/dev/null 2>&1 < /dev/null &
+done
+""".format(last=int(box["nports"]) - 1, p0=SANDBOX_PORT0, port=int(box["port"]))
 
 
 def box_cut(box):
@@ -21569,14 +21645,19 @@ def box_argv(box, cmd, cwd, env, detach=False):
 
 
 class BoxRun:
-    def __init__(self, returncode, stdout):
-        self.returncode, self.stdout = returncode, stdout
+    def __init__(self, returncode, stdout, stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
 
 
-def box_exec(box, cmd, cwd, env, timeout=1800):
-    """A project command in the box, like run(login_shell(...)): its exit code and output (stdout and stderr)."""
-    p = vm_run(box_argv(box, cmd, cwd, env), timeout=timeout)
-    return BoxRun(p.returncode, vm_text(p))
+def box_exec(box, cmd, cwd, env, timeout=1800, merge=True):
+    """A project command in the box, like run(login_shell(...)): its exit code and output (stdout and stderr, apart
+    without merge). The time limit is kept inside the box too: ending the docker exec here would not end the command
+    there. A command over it raises subprocess.TimeoutExpired, as run does."""
+    inner = "timeout -k 15 %d bash -lc %s" % (int(timeout), shlex.quote(cmd)) if timeout else cmd
+    p = vm_run(box_argv(box, inner, cwd, env), timeout=int(timeout) + 90 if timeout else None, merge=merge)
+    if timeout and p.returncode == 124:
+        raise subprocess.TimeoutExpired(cmd, timeout, output=vm_text(p))
+    return BoxRun(p.returncode, vm_text(p), (p.stderr or b"").decode("utf-8", "replace") if not merge else "")
 
 
 def box_spawn(box, cmd, cwd, env, log, key):
@@ -21604,6 +21685,551 @@ def box_factory_paths(ctx):
 
 
 BOX_FACTORY_EXCLUDE = ("jobs", "local", ".git", ".claude", "baseline.json")
+
+
+# --- A job's box. Since 3.8 a job's project commands run in a box of its own in the sandbox VM too, for the job's whole
+# life: its setup, the builder's commands (fx run --job), the gate's checks script, e2e, seed.sh, the login and
+# permission-table commands and the app. A dependency's install script there finds no key of this machine, and the
+# box reaches the package registries only during an install (fx setup, fx run --install). A job, a best-of-N
+# candidate and a package each have a block of ports and a stack of their own, so each has its own box. Its record is
+# kept on this machine (<work>/.boxes), not in job.json: a box belongs to the machine it runs on.
+
+JOB_BOX_NEVER_BACK = {".git", ".claude", ".vscode", ".idea", ".devcontainer"}  # what a box may never write here
+JOB_BOX_NEVER_BACK_FILES = {".envrc"}
+JOB_BOX_REST_STAGES = {"needs-info", "approve", "pr", "handed-off"}  # a job waiting for a person: its box stops
+
+
+def jobs_on_host_for_tests():
+    """fx's own tests (FACTORY_FAKE_MACHINE, FACTORY_TEST_JOBS_ON_HOST) run a job's commands on this machine, as before
+    the job box, unless a test of the job box asks for one (FACTORY_TEST_JOB_BOX)."""
+    return bool(os.environ.get("FACTORY_FAKE_MACHINE") or os.environ.get("FACTORY_TEST_JOBS_ON_HOST")) and \
+        not os.environ.get("FACTORY_TEST_JOB_BOX")
+
+
+def box_state_path(ctx, key, ext):
+    return os.path.join(ctx.work, ".boxes", re.sub(r"[^A-Za-z0-9_.-]+", "-", str(key)) + ext)
+
+
+@contextlib.contextmanager
+def box_lock(ctx, key):
+    path = box_state_path(ctx, key, ".lock")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        if fcntl is not None:
+            fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
+def job_box_rec(ctx, vid):
+    try:
+        got = json.loads(read(box_state_path(ctx, vid, ".box.json"), "") or "null")
+    except ValueError:
+        return None
+    return got if isinstance(got, dict) and got.get("name") else None
+
+
+def job_box_keep(ctx, vid, box):
+    if box is None:
+        for ext in (".box.json",):
+            try:
+                os.remove(box_state_path(ctx, vid, ext))
+            except OSError:
+                pass
+        return
+    write_atomic(box_state_path(ctx, vid, ".box.json"), json.dumps(box, indent=1) + "\n")
+
+
+def job_box_records(ctx, job_id=None):
+    """(view id, record) of every job box this factory keeps on this machine, of one job when given."""
+    d = os.path.join(ctx.work, ".boxes")
+    rows = []
+    for path in sorted(glob.glob(os.path.join(d, "*.box.json"))):
+        try:
+            rec = json.loads(read(path, "") or "null")
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("name") and (job_id is None or rec.get("job") == job_id):
+            rows.append((rec.get("view") or os.path.basename(path)[:-len(".box.json")], rec))
+    return rows
+
+
+def job_host_waiver(ctx, job_id):
+    try:
+        got = json.loads(read(box_state_path(ctx, job_id, ".host.json"), "") or "null")
+    except ValueError:
+        return None
+    return got if isinstance(got, dict) and got.get("reason") else None
+
+
+def job_waive_code(job_id, why):
+    return hashlib.sha256(("job-host|%s|%s" % (job_id, why)).encode()).hexdigest()[:12]
+
+
+def job_no_sandbox(ctx, job_id, why):
+    """No sandbox: nothing of the job has run here yet, and nothing does until the person says how (decision J4)."""
+    write_atomic(box_state_path(ctx, job_id, ".failed.json"), json.dumps({"why": why, "at": now()}) + "\n")
+    code = job_waive_code(job_id, why)
+    return FxError(
+        "the job's commands run in a sandbox and there is none on this machine: %s. Nothing of the job ran" % why,
+        code=3, extra={"next": "ask-no-sandbox", "job": job_id, "waive": code,
+                       "install": "%s sandbox install" % FX_CMD,
+                       "or_on_host": "%s sandbox host --job %s --reason \"<the person's reason>\" --confirm %s (runs this "
+                                     "job's commands on this machine, without isolation, until it ends)"
+                                     % (FX_CMD, shlex.quote(job_id), code)})
+
+
+def view_worktrees(view):
+    """{repository: clone} of what a job, a candidate or a package runs in: a package has its own clone of its
+    repository, with the job's run-only ones."""
+    repos = view.get("repos") or {}
+    got = {n: e["worktree"] for n, e in repos.items() if isinstance(e, dict) and e.get("worktree")}
+    wt = view.get("worktree")
+    if wt and wt not in got.values():
+        got = {n: w for n, w in got.items() if (repos.get(n) or {}).get("role") == "run"}
+        got[view.get("repo") or "_"] = wt
+    return {n: w for n, w in got.items() if w and os.path.isdir(w)}
+
+
+def box_running(box):
+    """True or False for a box that exists, None for one that does not (or a VM that does not answer)."""
+    try:
+        p = vm_run(["sudo", "docker", "inspect", "-f", "{{.State.Running}}", box["name"]], timeout=60, merge=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = vm_text(p).strip()
+    return True if text == "true" else False if text == "false" else None
+
+
+def box_rules(box, online):
+    """The box's firewall rules in the VM, written again from nothing: no way out but replies, and the proxy while it
+    installs. A restarted VM has none, so a box started again gets them before anything runs in it."""
+    accept = ("iptables -I DOCKER-USER -s {sub} -d {pip} -p tcp --dport 8888 -j ACCEPT -m comment --comment {name}"
+              if online and box.get("proxy_ip") else "")
+    script = (r"""# fx-box-rules
+for chain in DOCKER-USER INPUT; do
+  iptables -S $chain 2>/dev/null | grep -- "--comment {name}" | sed 's/^-A/-D/' | while read -r rule; do iptables $rule || true; done
+done
+for chain in DOCKER-USER INPUT; do
+  iptables -I $chain -s {sub} -j DROP -m comment --comment {name}
+done
+""" + accept + r"""
+for chain in DOCKER-USER INPUT; do
+  iptables -I $chain -s {sub} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT -m comment --comment {name}
+done
+""").format(sub=box.get("subnet"), pip=box.get("proxy_ip"), name=box["name"])
+    p = vm_run(["sudo", "bash", "-c", script], timeout=120)
+    if p.returncode != 0:
+        raise NoSandbox("the box's firewall rules could not be set: %s" % vm_text(p)[-500:], code=3)
+
+
+def box_open(box):
+    """An install: the box gets a proxy again, which lets through only the registries, until box_cut."""
+    script = r"""# fx-box-open
+set -e
+d=/opt/fx-boxes/{name}
+docker rm -f {proxy} >/dev/null 2>&1 || true
+docker run -d --name {proxy} -v $d/fx.conf:/etc/tinyproxy/fx.conf:ro -v $d/filter:/etc/tinyproxy/filter:ro fx-proxy >/dev/null
+docker network connect {net} {proxy}
+pip=$(docker inspect -f '{{{{(index .NetworkSettings.Networks "{net}").IPAddress}}}}' {proxy})
+echo "proxy=$pip"
+""".format(name=box["name"], proxy=box["proxy"], net=box["net"])
+    p = vm_run(["sudo", "bash", "-c", script], timeout=300)
+    ip = next((l.partition("=")[2].strip() for l in vm_text(p).splitlines() if l.startswith("proxy=")), "")
+    if p.returncode != 0 or not ip:
+        raise NoSandbox("the box's proxy for installing did not start: %s" % vm_text(p)[-500:], code=3)
+    box["proxy_ip"] = ip
+    box_rules(box, True)
+    vm_run(["sudo", "docker", "exec", box["name"], "bash", "-c", "# fx-box-hosts\n" + box_hosts_line(ip)], timeout=60)
+    box["online"] = True
+
+
+def box_pause(box):
+    """A job waiting for a person: its box stops (its files, installed dependencies and database stay on the VM's disk,
+    its memory comes back)."""
+    box_cut(box)
+    vm_run(["sudo", "bash", "-c", "# fx-box-pause\ndocker stop -t 20 %s >/dev/null 2>&1 || true" % box["name"]],
+           timeout=180)
+
+
+def box_resume(box):
+    """The job goes on: its box starts again, with its rules (a restarted VM lost them) and its ports' forwarders."""
+    p = vm_run(["sudo", "bash", "-c", "# fx-box-resume\ndocker start %s >/dev/null" % box["name"]], timeout=180)
+    if p.returncode != 0:
+        raise NoSandbox("the job's box did not start again: %s" % vm_text(p)[-500:], code=3)
+    box["online"] = False
+    box_rules(box, False)
+    p = vm_run(["sudo", "docker", "exec", box["name"], "bash", "-c", "# fx-box-resume\n" + box_forwarders_script(box)],
+               timeout=300)
+    if p.returncode != 0:
+        raise NoSandbox("the job's box started without its Docker: %s" % vm_text(p)[-500:], code=3)
+
+
+def job_box_of(ctx, view, start=True, setup=True):
+    """The box a job's command runs in, or None when it runs on this machine: a review's own view says itself (its
+    sandbox, or none on the reviewer's word), fx's own runs (an id starting with _) and a job the person let run here
+    (fx sandbox host) have none. start: make the box, or start it again; without it, only a running one is returned.
+    setup: a box new to the job first gets each repository's setup (decision J1)."""
+    if "box" in view:
+        return view["box"]
+    vid = str(view.get("id") or "")
+    if not vid or vid.startswith("_") or is_review_job(view) or jobs_on_host_for_tests() or not getattr(ctx, "cfg", None):
+        return None
+    real = job_real_id(view)
+    if job_host_waiver(ctx, real):
+        return None
+    made = False
+    with box_lock(ctx, vid):
+        box = job_box_rec(ctx, vid)
+        if box:
+            state = box_running(box)
+            if state is True:
+                if box.get("online"):  # an install that did not end (fx stopped): cut it now
+                    box_cut(box)
+                    job_box_keep(ctx, vid, box)
+                return box if not setup else job_box_setup(ctx, view, box)
+            if not start:
+                return None
+            if state is None:
+                ok, why = sandbox_state()
+                if not ok:
+                    raise job_no_sandbox(ctx, real, why)
+                job_box_keep(ctx, vid, None)  # the VM was made again or cleaned: a new box, set up again
+                box = None
+            else:
+                box_resume(box)
+                job_box_keep(ctx, vid, box)
+        if not start:
+            return None
+        if not box:
+            ok, why = sandbox_state()
+            if not ok:
+                raise job_no_sandbox(ctx, real, why)
+            rctx = one_app(ctx, view)[0] if view.get("repos") else ctx
+            box = box_create(rctx, vid, job_block(ctx, view), ports_step(ctx))
+            box.update(job=real, view=vid, setup=[], created=now())
+            job_box_keep(ctx, vid, box)
+            box_cut(box)  # no way out until an install opens it
+            box_put(box, [ctx.factory], exclude=[os.path.join(ctx.factory, x).lstrip("/") for x in BOX_FACTORY_EXCLUDE])
+            job_box_keep(ctx, vid, box)
+            made = True
+    if made:
+        try:
+            os.remove(box_state_path(ctx, box["name"], ".files.json"))
+        except OSError:
+            pass
+    return job_box_setup(ctx, view, box) if setup else box
+
+
+def job_box_setup(ctx, view, box):
+    """A box new to the job (the job began before 3.8, or the VM was made again): each repository's setup runs in it
+    first, with the registries, then the apps start once while their images may still be pulled."""
+    todo = [n for n in view_worktrees(view) if n in ctx.repo_names() and ctx.rc(n, "setup", "")
+            and n not in (box.get("setup") or [])]
+    if not todo:
+        return box
+    vid = str(view.get("id"))
+    with box_lock(ctx, vid + ".setup"):
+        box = job_box_rec(ctx, vid) or box
+        for n in [x for x in todo if x not in (box.get("setup") or [])]:
+            rctx, rv = one_app(ctx, view, n)
+            env = checks_env(rctx, rv)
+            wt = view_worktrees(view)[n]
+            timeout = int(ctx.rc(n, "setup_timeout_sec", 1800) or 1800)
+            try:
+                p = box_job_exec(ctx, view, box, ctx.rc(n, "setup", ""), wt, env, timeout, online=True)
+            except subprocess.TimeoutExpired:
+                raise FxError("setup of %s in the job's box timed out after %ss" % (n, timeout), code=3)
+            log = os.path.join(ctx.job_dir(job_real_id(view)), "setup-box-%s.log" % n)
+            write_atomic(log, p.stdout or "")
+            if p.returncode != 0:
+                raise FxError("setup of %s in the job's box failed (exit %d); see %s" % (n, p.returncode, log), code=3)
+            box.setdefault("setup", []).append(n)
+            job_box_keep(ctx, vid, box)
+        job_box_warm(ctx, view, box)
+    return box
+
+
+def job_box_warm(ctx, view, box):
+    """The apps start once while the box may still reach the registries: the images their app.up pulls come down now,
+    not in a gate with no way out. Their failing to start is the gate's to say, not the install's."""
+    if not ctx.c("app.up") and not any(ctx.rc(n, "app.up") for n in view_worktrees(view) if n in ctx.repo_names()):
+        return
+    box_open(box)
+    try:
+        app_start(ctx, dict(view, box=box, box_job=True))
+    except (FxError, subprocess.TimeoutExpired) as e:
+        box["warm_failed"] = str(e).splitlines()[0][:300]
+    finally:
+        box_cut(box)
+        job_box_keep(ctx, str(view.get("id")), box)
+
+
+def box_listing(ctx, view):
+    """{path: [size, mtime_ns]} of what the job's box gets from here: each clone's files that git sees (tracked, and
+    new ones it does not ignore) with the local files fx copies in (copy_into_worktree, like .env), the job's folder,
+    and the factory's own files but jobs/, local/, .git and .claude."""
+    files = {}
+
+    def add(path):
+        try:
+            st = os.lstat(path)
+        except OSError:
+            return
+        if stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
+            files[path] = [st.st_size, st.st_mtime_ns]
+
+    for n, wt in view_worktrees(view).items():
+        got = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], wt, check=False).stdout or ""
+        for rel in got.split("\0"):
+            if rel:
+                add(os.path.join(wt, rel))
+        for rel in local_only_paths(ctx, n if n in ctx.repo_names() else None):
+            add(os.path.join(wt, rel))
+
+    def walk(root, skip_top=()):
+        for d, dirs, names in os.walk(root):
+            if d == root:
+                dirs[:] = [x for x in dirs if x not in skip_top]
+            dirs[:] = [x for x in dirs if x not in (".git", ".claude")]
+            for name in names:
+                if d == root and name in skip_top:
+                    continue
+                add(os.path.join(d, name))
+
+    walk(ctx.factory, BOX_FACTORY_EXCLUDE)
+    jd = ctx.job_dir(job_real_id(view))
+    if os.path.isdir(jd):
+        walk(jd)
+    return files
+
+
+def box_sync_in(ctx, view, box):
+    """Before a command: what changed here since the last one goes into the box (decision J6), and what was deleted
+    here goes there too. Returns the stamp the command's own changes are found by."""
+    mf = box_state_path(ctx, box["name"], ".files.json")
+    try:
+        old = json.loads(read(mf, "") or "{}")
+    except ValueError:
+        old = {}
+    new = box_listing(ctx, view)
+    changed = [p for p, v in new.items() if old.get(p) != v]
+    gone = [p for p in old if p not in new]
+    tok = secrets.token_hex(6)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as t:
+        for p in sorted(changed):
+            try:
+                t.add(p, arcname=p.lstrip("/"), recursive=False)
+            except OSError:
+                pass
+        if gone:
+            data = "\0".join(gone).encode("utf-8", "surrogateescape")
+            info = tarfile.TarInfo("run/fx-gone-%s" % tok)
+            info.size = len(data)
+            t.addfile(info, io.BytesIO(data))
+    stamp = "/run/fx-stamp-%s" % tok
+    script = ("# fx-sync-in\ntar -C / -xf - && {{ if [ -f /run/fx-gone-{t} ]; then xargs -0 rm -f -- < /run/fx-gone-{t}; "
+              "rm -f /run/fx-gone-{t}; fi; touch {s}; }}").format(t=tok, s=stamp)
+    p = vm_run(["sudo", "docker", "exec", "-i", box["name"], "bash", "-c", script], data=buf.getvalue(), timeout=900)
+    if p.returncode != 0:
+        raise NoSandbox("copying the job's files into its box failed: %s" % vm_text(p)[-500:], code=3)
+    write_atomic(mf, json.dumps(new) + "\n")
+    return stamp
+
+
+def box_write_back(target, wt, src, mode):
+    """One file the box changed, written into the clone here: never through a link, never outside the clone."""
+    parent = os.path.dirname(target)
+    real_wt = os.path.realpath(wt)
+    if not path_under(os.path.realpath(parent) if os.path.exists(parent) else os.path.realpath(parent), real_wt):
+        return False
+    os.makedirs(parent, exist_ok=True)
+    if not path_under(os.path.realpath(parent), real_wt):
+        return False
+    if os.path.islink(target):
+        os.unlink(target)
+    elif os.path.isdir(target):
+        return False
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    with os.fdopen(fd, "wb") as f:
+        shutil.copyfileobj(src, f)
+    os.chmod(target, 0o755 if mode & 0o111 else 0o644)
+    return True
+
+
+def box_sync_out(ctx, view, box, stamp):
+    """After a command: what it changed in a clone comes back here, but only files git sees (a lockfile, a migration it
+    made, a snapshot), never what git ignores (node_modules, vendor, builds), never a link, and never anything this
+    machine or its agents would run on their own: .git, .claude, .vscode, .idea, .devcontainer, .envrc (decision J6).
+    A file it deleted is deleted here too. Returns the paths that came back."""
+    wts = view_worktrees(view)
+    mf = box_state_path(ctx, box["name"], ".files.json")
+    try:
+        manifest = json.loads(read(mf, "") or "{}")
+    except ValueError:
+        manifest = {}
+    known = [p for p in manifest if any(path_under(p, w) for w in wts.values())]
+    roots = " ".join(shlex.quote(w) for w in sorted(set(wts.values())))
+    script = ("# fx-sync-out\nS=%s\n[ -f \"$S\" ] || exit 0\nfind %s -newer \"$S\" -type f -printf 'M%%p\\0' 2>/dev/null\n"
+              "while IFS= read -r -d '' f; do [ -e \"$f\" ] || [ -L \"$f\" ] || printf 'D%%s\\0' \"$f\"; done\n"
+              "rm -f \"$S\"\n") % (shlex.quote(stamp), roots or "/nonexistent")
+    p = vm_run(["sudo", "docker", "exec", "-i", box["name"], "bash", "-c", script],
+               data="\0".join(known).encode("utf-8", "surrogateescape"), timeout=600, merge=False)
+    wanted, gone = {}, []
+    for item in (p.stdout or b"").decode("utf-8", "surrogateescape").split("\0"):
+        if len(item) < 2 or item[0] not in "MD":
+            continue
+        path = os.path.normpath(item[1:])
+        wt = next((w for w in wts.values() if path_under(path, w.rstrip("/")) and path != w.rstrip("/")), None)
+        if not wt:
+            continue
+        parts = os.path.relpath(path, wt).split(os.sep)
+        if ".." in parts or any(x in JOB_BOX_NEVER_BACK for x in parts) or parts[-1] in JOB_BOX_NEVER_BACK_FILES:
+            continue
+        if item[0] == "M":
+            wanted.setdefault(wt, []).append(path)
+        else:
+            gone.append((wt, path))
+    for wt in list(wanted):  # only what git sees: what it ignores stays in the box
+        rels = [os.path.relpath(x, wt) for x in wanted[wt]]
+        ign = run(["git", "check-ignore", "-z", "--stdin"], cwd=wt, check=False, input_text="\0".join(rels) + "\0")
+        skip = {os.path.join(wt, x) for x in (ign.stdout or "").split("\0") if x}
+        wanted[wt] = [x for x in wanted[wt] if x not in skip]
+    came = []
+    paths = [x for v in wanted.values() for x in v]
+    if paths:
+        q = vm_run(["sudo", "docker", "exec", "-i", box["name"], "tar", "-C", "/", "--null", "-T", "-", "-cf", "-"],
+                   data="\0".join(x.lstrip("/") for x in paths).encode("utf-8", "surrogateescape"), timeout=600,
+                   merge=False)
+        if q.stdout:
+            owner = {x: wt for wt, v in wanted.items() for x in v}
+            with tarfile.open(fileobj=io.BytesIO(q.stdout)) as t:
+                for m in t.getmembers():
+                    target = os.path.normpath("/" + m.name)
+                    if target not in owner or not m.isfile():
+                        continue
+                    with t.extractfile(m) as src:
+                        if box_write_back(target, owner[target], src, m.mode):
+                            came.append(target)
+    for wt, path in gone:
+        if path in manifest and os.path.lexists(path) and not os.path.isdir(path) and \
+                path_under(os.path.realpath(os.path.dirname(path)), os.path.realpath(wt)):
+            os.unlink(path)
+            came.append(path)
+    if came:
+        for path in came:
+            try:
+                st = os.lstat(path)
+                manifest[path] = [st.st_size, st.st_mtime_ns]
+            except OSError:
+                manifest.pop(path, None)
+        write_atomic(mf, json.dumps(manifest) + "\n")
+    return came
+
+
+def box_job_exec(ctx, view, box, cmd, cwd, env, timeout, online=False, sep=False):
+    """A command of a job in its box: the clones' changes in, the command (with the registries only when online), what
+    it changed in a clone back. Returns a BoxRun."""
+    with box_lock(ctx, box["name"] + ".sync"):
+        stamp = box_sync_in(ctx, view, box)
+    if online:
+        box_open(box)
+        job_box_keep(ctx, str(view.get("id")), box)
+    try:
+        return box_exec(box, cmd, cwd, env, timeout=timeout, merge=not sep)
+    finally:
+        if online:
+            box_cut(box)
+            job_box_keep(ctx, str(view.get("id")), box)
+        with box_lock(ctx, box["name"] + ".sync"):
+            box_sync_out(ctx, view, box, stamp)
+
+
+def job_box_push(ctx, view, box):
+    """Only the files in (the app about to start reads them): nothing comes back from a command that keeps running."""
+    with box_lock(ctx, box["name"] + ".sync"):
+        stamp = box_sync_in(ctx, view, box)
+    vm_run(["sudo", "docker", "exec", box["name"], "rm", "-f", stamp], timeout=60)
+
+
+def proj_run(ctx, view, cmd, cwd, env, timeout, online=False, sep=False, on_start=None):
+    """A project's own command of a job (setup, e2e, seed.sh, a login or permission-table command): in the job's box
+    when it has one, else on this machine as before. Returns what run (or run_sep, with sep) returns: returncode,
+    stdout (and stderr). Over its time limit it raises subprocess.TimeoutExpired either way."""
+    box = job_box_of(ctx, view, setup=not online)
+    if box and "box" in view:  # a review's sandbox: its clone was copied in once
+        return box_exec(box, cmd, cwd, env, timeout=timeout, merge=not sep)
+    if box:
+        return box_job_exec(ctx, view, box, cmd, cwd, env, timeout, online=online, sep=sep)
+    if sep:
+        return run_sep(login_shell(ctx, cmd, env), cwd=cwd, env=env, timeout=timeout)
+    return run(login_shell(ctx, cmd, env), cwd=cwd, check=False, env=env, timeout=timeout, group=True, on_start=on_start)
+
+
+def job_boxes_rest(ctx, job_id, end=False):
+    """A job waiting for a person: its boxes stop (decision J3). A job that ended (its clones deleted, or rejected): its
+    boxes go, with what they held. Never fails what moved the job."""
+    for vid, rec in job_box_records(ctx, job_id):
+        try:
+            if end:
+                box_destroy(rec)
+                job_box_keep(ctx, vid, None)
+                for ext in (".files.json",):
+                    try:
+                        os.remove(box_state_path(ctx, rec["name"], ext))
+                    except OSError:
+                        pass
+            elif box_running(rec):
+                box_pause(rec)
+                job_box_keep(ctx, vid, rec)
+        except (OSError, subprocess.TimeoutExpired, FxError):
+            pass
+
+
+def job_isolation_notes(ctx, job):
+    """What of a job did not run in its box, for its pull request: the person's waiver (with their reason), a mobile
+    app's build and a desktop app's real build (decision J5)."""
+    if jobs_on_host_for_tests() or is_review_job(job):
+        return []
+    notes = []
+    w = job_host_waiver(ctx, job_real_id(job))
+    if w:
+        notes.append("the project's commands ran on the factory's machine, not in a sandbox: %s" % w["reason"])
+    names = [n for n in job_names(job) if n in ctx.repo_names()] if job.get("repos") else []
+    for n in names or [None]:
+        rctx = repo_ctx(ctx, n) if n else ctx
+        if mobile_conf(rctx):
+            notes.append("the mobile app%s was built and run on the factory's machine, not in the sandbox (its API "
+                         "ran in the sandbox)" % (" of %s" % n if n and len(names) > 1 else ""))
+        dconf = desktop_conf(rctx)
+        if dconf and (dconf.get("build") or {}).get("windows"):
+            notes.append("the desktop app's real build%s ran on Windows, not in the sandbox (its web part and API "
+                         "ran in the sandbox)" % (" of %s" % n if n and len(names) > 1 else ""))
+    return notes
+
+
+def sandbox_host(ctx, a):
+    """fx sandbox host --job J --reason R --confirm C: the person lets this job run its commands on this machine,
+    after the sandbox was missing; once per job (decision J4). Its pull request says so, with the reason."""
+    if not ctx or not ctx.cfg or not a.job:
+        raise FxError("fx sandbox host --job <job> --reason \"<the person's reason>\" --confirm <code>", code=3)
+    job = ctx.load(a.job)
+    try:
+        failed = json.loads(read(box_state_path(ctx, job["id"], ".failed.json"), "") or "null")
+    except ValueError:
+        failed = None
+    if not failed:
+        raise FxError("nothing stopped this job's sandbox: it runs in a box. This is only for after fx said there is "
+                      "no sandbox, and only when the person says so", code=3)
+    if a.confirm != job_waive_code(job["id"], failed["why"]):
+        raise FxError("--confirm does not match the code fx printed when the sandbox was missing", code=3)
+    reason = (a.reason or "").strip()
+    if not reason:
+        raise FxError("--reason: the person's own words, which also go in the pull request", code=3)
+    write_atomic(box_state_path(ctx, job["id"], ".host.json"),
+                 json.dumps({"reason": reason, "why": failed["why"], "at": now()}) + "\n")
+    out({"ok": True, "job": job["id"], "on_host": True, "reason": reason,
+         "note": "this job's commands now run on this machine, without isolation; its pull request says so"})
 
 
 def cmd_sandbox(ctx, a):
@@ -21640,17 +22266,33 @@ def cmd_sandbox(ctx, a):
         if not ok:
             sys.exit(3)
         return
+    if a.action == "host":
+        sandbox_host(ctx, a)
+        return
     if a.action == "clean":
+        if not ctx or not getattr(ctx, "cfg", None):
+            raise FxError("fx sandbox clean runs in a factory repository: it removes only that factory's boxes that no "
+                          "job or review uses any more", code=3)
         ok, why = sandbox_state()
         if not ok:
             raise NoSandbox(why, code=3)
         p = vm_run(["sudo", "docker", "ps", "-a", "--filter", "name=^fxbox-", "--format", "{{.Names}}"], timeout=120)
-        names = [n for n in vm_text(p).split() if not n.endswith("-proxy")]
+        mine = "fxbox-%s-" % box_factory_id(ctx)
+        used = {rec["name"] for _vid, rec in job_box_records(ctx)}
+        for path in glob.glob(os.path.join(ctx.jobs, REVIEW_DIR, "*", "job.json")):
+            try:
+                used.add(((json.loads(read(path, "") or "{}").get("sandbox") or {}).get("box") or {}).get("name"))
+            except (ValueError, AttributeError):
+                pass
+        names = [n for n in vm_text(p).split() if not n.endswith("-proxy") and n.startswith(mine) and n not in used]
         for n in names:
             box_destroy({"name": n, "proxy": n + "-proxy", "net": n + "-net"})
+        for vid, rec in job_box_records(ctx):
+            if rec["name"] in names:
+                job_box_keep(ctx, vid, None)
         out({"ok": True, "removed": names})
         return
-    raise FxError("fx sandbox status | install | reset | clean", code=3)
+    raise FxError("fx sandbox status | install | reset | clean | host", code=3)
 
 
 def review_box_ctx(ctx, repo):
@@ -23638,9 +24280,12 @@ def app_start_one(ctx, job):
         st = {}
     if (st.get("detached") or (st.get("pid") and pid_alive(st["pid"]))) and http_up(url):
         return {"url": app_url(ctx, job, "/"), "health": url, "reused": True, "log": st.get("log")}
+    box = job_box_of(ctx, job)
+    # A box's ports are forwarded to this machine as soon as it exists, so they accept a connection with no app behind
+    # them: only an app on this machine is asked first.
     with socket.socket() as probe:  # else that is what answers below, and every check of the running app reads it
         probe.settimeout(2)
-        if probe.connect_ex(("127.0.0.1", int(job["port"]))) == 0:
+        if not box and probe.connect_ex(("127.0.0.1", int(job["port"]))) == 0:
             raise FxError("port %s already answers, and fx did not start that, so the checks would look at it instead of "
                           "this job's app. Stop it (lsof -nP -iTCP:%s -sTCP:LISTEN) and run this again"
                           % (job["port"], job["port"]), code=3, extra={"port_taken": True})
@@ -23650,10 +24295,12 @@ def app_start_one(ctx, job):
     fh = open(log, "ab")
     fh.write(("\n==== %s starting: %s\n" % (now(), app_fill(up, job, db))).encode())
     fh.flush()
-    if job.get("box"):
-        # a colleague's merge request: it starts in its review's box, never on this machine
+    if box:
+        # a colleague's merge request, or a job: it starts in its box, never on this machine
         fh.close()
-        return box_app_start(ctx, job, app_fill(up, job, db), env, log, url, db)
+        if "box" not in job or job.get("box_job"):
+            job_box_push(ctx, job, box)
+        return box_app_start(ctx, dict(job, box=box), app_fill(up, job, db), env, log, url, db)
     p = subprocess.Popen(login_shell(ctx, app_fill(up, job, db), env), cwd=job["worktree"], env=env,
                          stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     write_atomic(app_state_path(ctx, job), json.dumps({"pid": p.pid, "started": now(), "log": log, "db": db}))
@@ -23675,7 +24322,8 @@ def app_start_one(ctx, job):
 
 
 def box_app_start(ctx, job, cmd, env, log, url, db):
-    """app.up in the review's box: started there, its log copied back here, its port forwarded to 127.0.0.1."""
+    """app.up in the review's or the job's box: started there, its log copied back here, its port forwarded to
+    127.0.0.1."""
     box = job["box"]
     box_spawn(box, cmd, job["worktree"], env, log, "app-%s" % job["port"])
     write_atomic(app_state_path(ctx, job), json.dumps({"box": box["name"], "detached": True, "started": now(),
@@ -23718,10 +24366,15 @@ def app_stop_one(ctx, job):
         pass
     env, db = app_env(ctx, job, make=False)  # stopping needs no lane's copy: none is made only to be deleted
     down = ctx.c("app.down")
-    if job.get("box"):
-        if down:
-            box_exec(job["box"], app_fill(down, job, db), job["worktree"], env, timeout=180)
-        box_kill(job["box"], "app-%s" % job["port"])
+    box = job_box_of(ctx, job, start=False, setup=False)
+    if box or st.get("box"):
+        if box:  # a box that stopped took its app with it
+            if down:
+                try:
+                    box_exec(box, app_fill(down, job, db), job["worktree"], env, timeout=180)
+                except subprocess.TimeoutExpired:
+                    pass
+            box_kill(box, "app-%s" % job["port"])
         if os.path.exists(app_state_path(ctx, job)):
             os.remove(app_state_path(ctx, job))
         return {"stopped": True}
@@ -25410,9 +26063,12 @@ def build_parser():
     s.add_argument("job", nargs="?")
     s.add_argument("--code", action="store_true", help="check: also that the cited code reads each variable (base)")
     s.set_defaults(fn=cmd_limits)
-    s = sub.add_parser("sandbox", help="the sandbox VM where colleagues' merge requests run: status, install, reset, "
-                                       "clean")
-    s.add_argument("action", choices=["status", "install", "reset", "clean"])
+    s = sub.add_parser("sandbox", help="the sandbox VM where merge requests and jobs run: status, install, reset, "
+                                       "clean, host (a job on this machine, on the person's word)")
+    s.add_argument("action", choices=["status", "install", "reset", "clean", "host"])
+    s.add_argument("--job", help="host: the job that runs on this machine")
+    s.add_argument("--reason", help="host: the person's own words, which go in the pull request")
+    s.add_argument("--confirm", help="host: the code fx printed when the sandbox was missing")
     s.set_defaults(fn=cmd_sandbox)
     s = sub.add_parser("permissions", help="the permission table: check, try on a job's app, mark confirmed, fix tasks, "
                                            "apply a merged job's additions")
@@ -25570,6 +26226,9 @@ def build_parser():
     s.add_argument("--name", help="without --job: a name for it in fx capacity")
     s.add_argument("--only-one", metavar="NAME", help="only one command given this name runs at a time on this machine")
     s.add_argument("--report", metavar="FILE", help="write there what the step waited, was counted at and used (JSON)")
+    s.add_argument("--install", action="store_true",
+                   help="with --job: an install (npm install x, composer require y): only this command of the job's "
+                        "box reaches the package registries")
     s.add_argument("command", nargs=argparse.REMAINDER, help="after --: the command")
     s.set_defaults(fn=cmd_run)
     s = sub.add_parser("mobile", help="the virtual phones of a mobile project: devices, tools, builds, a session")

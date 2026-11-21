@@ -7,17 +7,20 @@ The first tests use the limactl stub (test_security.STUB): what the box runs run
 gave the box, and every command is logged. The last ones (RealSandboxTest) need the real VM: FX_SANDBOX_REAL=1 with
 `fx sandbox install` done; they run the review's proof of concept against it."""
 
+import contextlib
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
 
 from test_review_sandbox import SandboxCase
-from test_security import fx, load_json, slurp, write
+from test_security import FxTestCase, fx, load_json, slurp, write
 
 
 class InTheBoxTest(SandboxCase):
@@ -180,7 +183,221 @@ class NoWayAroundTest(unittest.TestCase):
         exec_ = src[src.index("def review_exec(ctx, a):"):src.index("def review_ui(ctx, a):")]
         self.assertIn('if box.get("box"):', exec_)
         app = src[src.index("def app_start_one(ctx, job):"):src.index("def box_app_start(")]
-        self.assertLess(app.index('if job.get("box"):'), app.index("subprocess.Popen(login_shell("))
+        self.assertLess(app.index("if box:"), app.index("subprocess.Popen(login_shell("))
+
+    def test_every_project_command_of_a_job_goes_through_its_box(self):
+        """A job's setup, checks, e2e, seed, login and permission-table commands reach this machine only through
+        proj_run (or the box test right before), which runs them in the job's box when it has one."""
+        src = slurp(fx.__file__)
+
+        def body(name):
+            i = src.index("def %s(" % name)
+            return src[i:src.index("\ndef ", i + 1)]
+        for name in ("cmd_setup", "perm_cmd", "login_run"):
+            self.assertNotIn("login_shell(", body(name), name)
+            self.assertIn("proj_run(", body(name), name)
+        for name in ("gate_round_one", "gate_round_repos"):
+            self.assertNotIn('login_shell(rc_, app_fill(rc_.c("e2e")', body(name))
+            self.assertNotIn('login_shell(ctx, app_fill(ctx.c("e2e")', body(name))
+        for name in ("checks_execute", "run_seed"):
+            b = body(name)
+            self.assertLess(b.index("job_box_of("), b.index('run(["bash"'), name)
+        run_ = body("cmd_run")
+        self.assertLess(run_.index("if box:"), run_.index("subprocess.Popen(cmd"))
+
+
+class JobBoxTest(FxTestCase):
+    """A job's own commands run in its own box (3.8): setup and installs with the registries only, everything else
+    without; a job waiting for a person has its box stopped; the box goes with the job's clones; no sandbox stops the
+    job before its setup."""
+    cfg = {"setup": "echo setup-ran"}
+
+    def setUp(self):
+        super().setUp()
+        self.rundir = os.path.join(self.tmp, "stubrun")
+        os.makedirs(self.rundir)
+        p = mock.patch.dict(os.environ, {"FACTORY_TEST_JOB_BOX": "1", "STUB_RUN_DIR": self.rundir})
+        p.start()
+        self.addCleanup(p.stop)
+        write(os.path.join(self.f.factory, "checks.sh"), "echo checks-ran\nexit 0\n")
+
+    def box_cmds(self):
+        return self.f.calls("box")
+
+    def vm(self, what=None):
+        return [c for c in self.f.calls("boxvm") if what is None or c["what"] == what]
+
+    def raw(self, *argv):
+        """An fx command whose output is the command's own (fx run): (exit code, stdout)."""
+        buf, code = io.StringIO(), 0
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                fx.main(["--repo", self.f.factory] + list(argv))
+            except SystemExit as e:
+                code = e.code or 0
+        os.chdir(self.cwd)
+        return code, buf.getvalue()
+
+    def records(self):
+        return fx.job_box_records(self.f.ctx(), "T-1")
+
+    def setup_job(self):
+        code, res = self.fx("setup", "T-1", "--force")
+        self.assertEqual(code, 0, res)
+        return res
+
+    def test_setup_runs_in_the_job_s_box_with_the_registries(self):
+        self.setup_job()
+        setup = [c for c in self.box_cmds() if c["cmd"] == "echo setup-ran"]
+        self.assertEqual(len(setup), 1, self.box_cmds())
+        self.assertIn("HTTPS_PROXY", setup[0]["env"])  # an install: through the box's proxy
+        self.assertFalse({"PATH", "HOME"} & set(setup[0]["env"]))
+        self.assertEqual(len(self.records()), 1)
+        name = self.records()[0][1]["name"]
+        self.assertTrue(name.startswith("fxbox-%s-t-1-" % fx.box_factory_id(self.f.ctx())), name)
+        self.assertFalse(self.records()[0][1]["online"])  # cut after the install
+        self.assertTrue(self.vm("cut"))
+
+    def test_a_command_of_the_agents_runs_in_the_box_without_the_registries(self):
+        self.setup_job()
+        code, text = self.raw("run", "--job", "T-1", "--", "echo", "hello box")
+        self.assertEqual(code, 0, text)
+        self.assertIn("hello box", text)
+        run_ = [c for c in self.box_cmds() if c["cmd"] == "echo 'hello box'"]
+        self.assertEqual(len(run_), 1, self.box_cmds())
+        self.assertNotIn("HTTPS_PROXY", run_[0]["env"])
+        self.assertIn("FACTORY_PORT", run_[0]["env"])
+
+    def test_an_install_alone_reaches_the_registries(self):
+        self.setup_job()
+        opens = len(self.vm("open"))
+        code, text = self.raw("run", "--job", "T-1", "--install", "--", "echo", "npm-install-x")
+        self.assertEqual(code, 0, text)
+        inst = [c for c in self.box_cmds() if c["cmd"] == "echo npm-install-x"]
+        self.assertIn("HTTPS_PROXY", inst[0]["env"])
+        self.assertEqual(len(self.vm("open")), opens + 1)
+        self.assertFalse(self.records()[0][1]["online"])
+        code, text = self.raw("run", "--install", "--", "echo", "x")
+        self.assertNotEqual(code, 0)  # --install is for a job's box
+
+    def test_the_gate_s_checks_run_in_the_box(self):
+        self.setup_job()
+        self.f.commit({"app.py": "x = 1\n"})
+        self.gate()
+        checks = [c for c in self.box_cmds() if c["cmd"].startswith("bash ") and c["cmd"].endswith("checks.sh")]
+        self.assertTrue(checks, [c["cmd"] for c in self.box_cmds()])
+        self.assertNotIn("HTTPS_PROXY", checks[0]["env"])
+        ins = [c for c in self.f.calls("boxsync") if c["dir"] == "in"]
+        self.assertTrue(any(os.path.join(self.f.wt, "app.py") in c["files"] for c in ins))
+
+    def test_what_goes_in_is_the_clone_the_job_and_the_factory_s_own_files(self):
+        self.setup_job()
+        write(os.path.join(self.f.factory, "jobs", "T-2", "job.json"), "{}")
+        write(os.path.join(self.f.factory, "local", "secret.json"), "{}")
+        write(os.path.join(self.f.jd, "ui", "seed.sh"), "true\n")
+        got = fx.box_listing(self.f.ctx(), fx.job_flat_copy(json.loads(slurp(os.path.join(self.f.jd, "job.json")))))
+        self.assertIn(os.path.join(self.f.jd, "ui", "seed.sh"), got)
+        self.assertIn(os.path.join(self.f.factory, "factory.json"), got)
+        self.assertFalse([p for p in got if "/jobs/T-2/" in p or "/local/" in p or "/.git/" in p])
+
+    def test_a_waiting_job_s_box_stops_and_starts_again(self):
+        self.setup_job()
+        code, res = self.fx("stage", "T-1", "needs-info")
+        self.assertEqual(code, 0, res)
+        self.assertEqual(len(self.vm("pause")), 1)
+        code, res = self.fx("stage", "T-1", "build")
+        code, text = self.raw("run", "--job", "T-1", "--", "echo", "back")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(len(self.vm("resume")), 1)
+        self.assertEqual(len(self.vm("create")), 1)  # the same box: what it installed is still there
+
+    def test_the_box_goes_with_the_job_s_clones(self):
+        self.setup_job()
+        name = self.records()[0][1]["name"]
+        code, res = self.fx("cleanup", "T-1", "--force")
+        self.assertEqual(code, 0, res)
+        self.assertIn(name, [c["name"] for c in self.vm("destroy")])
+        self.assertFalse(self.records())
+
+    def test_sandbox_clean_keeps_what_jobs_use_and_other_factories_boxes(self):
+        self.setup_job()
+        live = self.records()[0][1]["name"]
+        mine = "fxbox-%s-old-abc123" % fx.box_factory_id(self.f.ctx())
+        other = "fxbox-zzzzzz-t-1-abc123"
+        for n in (mine, other):
+            write(os.path.join(self.rundir, "box-" + n), "true")
+        code, res = self.fx("sandbox", "clean")
+        self.assertEqual(code, 0, res)
+        self.assertEqual(res["removed"], [mine])
+        self.assertNotIn(live, res["removed"])
+
+    def test_no_sandbox_stops_the_job_before_its_setup(self):
+        with mock.patch.dict(os.environ, {"STUB_LIMACTL": "none"}):
+            code, res = self.fx("setup", "T-1", "--force")
+            self.assertEqual((code, res.get("next")), (3, "ask-no-sandbox"), res)
+            self.assertFalse(self.box_cmds())
+            self.assertFalse(os.path.exists(os.path.join(self.f.out, "setup-ran")))
+            code, r = self.fx("sandbox", "host", "--job", "T-1", "--reason", "no VM on this laptop", "--confirm", "x")
+            self.assertEqual(code, 3, r)
+            code, r = self.fx("sandbox", "host", "--job", "T-1", "--confirm", res["waive"])
+            self.assertEqual(code, 3, r)
+            code, r = self.fx("sandbox", "host", "--job", "T-1", "--reason", "no VM on this laptop", "--confirm",
+                              res["waive"])
+            self.assertEqual(code, 0, r)
+            code, r = self.fx("setup", "T-1", "--force")
+            self.assertEqual(code, 0, r)
+        self.assertFalse(self.box_cmds())  # on this machine, on the person's word
+        notes = fx.job_isolation_notes(self.f.ctx(), self.f.job())
+        self.assertTrue(any("no VM on this laptop" in n for n in notes), notes)
+
+
+class SyncBackTest(FxTestCase):
+    """What a command changed in the box comes back to the clone: only files git sees, never a link, never what this
+    machine or its agents would run by themselves (decision J6)."""
+
+    def test_only_safe_changes_come_back(self):
+        self.f.commit({".gitignore": "node_modules/\n", "old.txt": "old\n", "package.json": "{}\n"})
+        wt = self.f.wt
+        outside = os.path.join(self.tmp, "outside")
+        os.makedirs(outside)
+        os.symlink(outside, os.path.join(wt, "linkdir"))
+        os.symlink(os.path.join(outside, "bashrc"), os.path.join(wt, "linkfile"))
+        ctx = self.f.ctx()
+        box = {"name": "fxbox-test-t-1-aaaaaa"}
+        view = {"id": "T-1", "worktree": wt}
+        mf = fx.box_state_path(ctx, box["name"], ".files.json")
+        write(mf, json.dumps({os.path.join(wt, "old.txt"): [4, 1]}))
+        changed = {"package-lock.json": b"lock\n", ".claude/settings.json": b"{}", "node_modules/x/index.js": b"x",
+                   "linkdir/evil": b"evil", "linkfile": b"not through the link", ".envrc": b"bad", "sub/new.txt": b"n"}
+        listing = b"".join(b"M" + os.path.join(wt, k).encode() + b"\0" for k in changed)
+        listing += b"D" + os.path.join(wt, "old.txt").encode() + b"\0"
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as t:
+            for k, v in changed.items():
+                ti = tarfile.TarInfo(os.path.join(wt, k).lstrip("/"))
+                ti.size = len(v)
+                t.addfile(ti, io.BytesIO(v))
+        answers = iter([mock.Mock(returncode=0, stdout=listing), mock.Mock(returncode=0, stdout=buf.getvalue())])
+        asked = []
+
+        def vm_run(argv, data=None, **kw):
+            asked.append((argv, data))
+            return next(answers)
+        with mock.patch.object(fx, "vm_run", vm_run):
+            came = fx.box_sync_out(ctx, view, box, "/run/fx-stamp-x")
+        self.assertEqual(slurp(os.path.join(wt, "package-lock.json")), "lock\n")
+        self.assertEqual(slurp(os.path.join(wt, "sub", "new.txt")), "n")
+        self.assertFalse(os.path.exists(os.path.join(wt, ".claude", "settings.json")))
+        self.assertFalse(os.path.exists(os.path.join(wt, "node_modules")))
+        self.assertFalse(os.path.exists(os.path.join(wt, ".envrc")))
+        self.assertFalse(os.listdir(outside))  # nothing written through a link
+        self.assertFalse(os.path.islink(os.path.join(wt, "linkfile")))
+        self.assertEqual(slurp(os.path.join(wt, "linkfile")), "not through the link")
+        self.assertFalse(os.path.exists(os.path.join(wt, "old.txt")))
+        fetched = asked[1][1].decode().split("\0")
+        self.assertNotIn(os.path.join(wt, "node_modules/x/index.js").lstrip("/"), fetched)
+        self.assertNotIn(os.path.join(wt, ".claude/settings.json").lstrip("/"), fetched)
+        self.assertIn(os.path.join(wt, "package-lock.json"), came)
 
 
 class KeyAdviceTest(unittest.TestCase):

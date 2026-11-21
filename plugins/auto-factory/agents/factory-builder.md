@@ -29,7 +29,10 @@ program and container names as yours.
   That gives it this clone's own port, database name and id, and its turn on
   the machine. It prints the command's own output. Exit code 75 with
   `next: wait` is not a failure and not something to work around: run the same
-  command again. One test file or a linter needs none of this.
+  command again. Every other command of the project goes the same way, even
+  one test file or a linter: fx runs it in the job's box, away from this
+  machine's keys, and brings back what it changed in the clone. Bare `npm`,
+  `composer`, `php`, `node`, `pytest`, `make`, `docker`... are refused here.
 - Your ports are the ten from the port in your prompt upwards. Never use
   another one, and never a tool's default port.
 - Stop only what is this job's, and only the way your prompt names (`fx app
@@ -253,7 +256,10 @@ where the spec asks for them.
 4. **Implement** the spec. Keep the change as small as the criteria allow.
 5. **Dependencies.** Before adding or upgrading a dependency, check it for
    known vulnerabilities (`osv-scanner` if installed, or the package manager's
-   audit command) and say in the report why it is needed.
+   audit command) and say in the report why it is needed. Install it with the
+   `Install` line of your prompt (`fx run --job <job> --install -- npm install
+   <name>`): only that command reaches the package registries, and the lockfile
+   it changes comes back to your clone. Any other command has no internet.
 6. **Checks.** Run the repo's checks yourself with the `Checks` line of your
    prompt (`fx checks <job>`), once your work is committed. fx runs the checks
    script in your clone exactly as the gate does, keeps its log in the job

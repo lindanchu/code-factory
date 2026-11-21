@@ -58,7 +58,8 @@ class ProjectCase(unittest.TestCase):
         env.update(GIT_CONFIG_GLOBAL=gitcfg, GIT_CONFIG_NOSYSTEM="1", FACTORY_STATE_DIR=os.path.join(self.tmp, "state"),
                    FACTORY_TOOLS_DIR=os.path.join(self.tmp, "tools"),
                    FACTORY_WORKSPACE=os.path.join(self.tmp, "machine", "workspace.json"),
-                   PATH=self.bin + os.pathsep + "/usr/bin:/bin", STUB_LOG=os.path.join(self.tmp, "stub.log"), HOME=self.tmp)
+                   PATH=self.bin + os.pathsep + "/usr/bin:/bin", STUB_LOG=os.path.join(self.tmp, "stub.log"), HOME=self.tmp,
+                   FACTORY_TEST_JOBS_ON_HOST="1")  # these test the steps themselves: a job's box is test_isolation's
         p = mock.patch.dict(os.environ, env, clear=True)
         p.start()
         self.addCleanup(p.stop)

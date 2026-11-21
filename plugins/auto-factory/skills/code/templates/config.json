@@ -190,7 +190,7 @@
     "strip_env": [],
     "pass_env": []
   },
-  "_doc_sandbox": "Where colleagues' merge requests run (/auto-factory:review): a box of its own in the sandbox VM (fx sandbox install), with no file, key or network of this machine. allow: hosts a box may reach while it installs, beyond the package registries fx knows (a company's own registry); each one the user confirmed, names only. prepare: shell commands that add to the box image what this repository's setup needs (apt-get install -y php-cli composer...); run once in the VM, not per review. Per repository in its entry in repos.",
+  "_doc_sandbox": "Where colleagues' merge requests (/auto-factory:review) and jobs run: each a box of its own in the sandbox VM (fx sandbox install), with no file, key or network of this machine. allow: hosts a box may reach while it installs, beyond the package registries fx knows (a company's own registry); each one the user confirmed, names only. prepare: shell commands that add to the box image what this repository's setup needs (apt-get install -y php-cli composer...); run once in the VM, not per review or job. Per repository in its entry in repos.",
   "sandbox": {"allow": [], "prepare": []},
   "_doc_permissions": "The permission table (see /auto-factory:code permissions): who may call each route is in the Permissions section of each module's logic; how each kind of user logs in, what a refusal looks like, the ids and bodies of the routes and the database snapshot commands are in stack/permissions.json (stack/permissions-<repo>.json with several apps). file: another path for that file. The gate calls every cell; no job starts until the user confirmed it.",
   "permissions": {"file": ""},

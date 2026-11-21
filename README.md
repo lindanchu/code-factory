@@ -641,6 +641,35 @@ enforces itself, not one a setting has to remember:
 
 The log stays in `round-<N>/run/` and is never pushed to the jobs store.
 
+**A job runs in a box of its own too (3.8).** Not only a colleague's code: a dependency the builder
+adds, or one already in the project's lockfile, runs its install script the moment it is installed.
+So each job gets its own box in the same VM, for the job's whole life, and everything of the job that
+runs the project's code runs there: `fx setup`, the agents' commands (`fx run --job <job> -- <command>`,
+every test, linter or script, not only the heavy ones), the gate's checks script, e2e, `ui/seed.sh`,
+the login and permission-table commands, the app and the browser of the UI check.
+
+- **Network:** the box reaches the package registries only during an install: `fx setup`, and
+  `fx run --job <job> --install -- npm install <name>` when the builder adds a dependency. Every other
+  command has no internet.
+- **Files:** the job's clones here stay the original; the agents edit them as before. Before each
+  command fx copies what changed into the box; after it, what the command changed in a clone comes
+  back, but only files git sees (a lockfile, a migration it generated), never what git ignores
+  (`node_modules`, `vendor`, builds), never a link, and never `.git/`, `.claude/`, `.vscode/`,
+  `.idea/`, `.devcontainer/` or `.envrc`, which this machine or its agents would run by themselves.
+- **A job waiting for you** (questions, approval, its pull request) has its box stopped: files,
+  installed dependencies and database stay, the memory comes back. It starts again when the job goes
+  on, and is deleted with the job's clones.
+- **Each job, best-of-N candidate and parallel package** has its own box, as it has its own block of
+  ports and its own stack. Three jobs at once may need more memory than the VM's 6 GB.
+- **No sandbox on this machine:** the job stops before its setup and asks you: set it up, or let this
+  job run here (`fx sandbox host --job <job> --reason ... --confirm <code>`), once per job; its pull
+  request says so, with your reason.
+- A mobile app's build and a desktop app's real Windows build still run on this machine, with their API
+  in the box; the pull request says so.
+- `init` adds rules that refuse the agents' bare `npm`, `composer`, `php`, `node`, `pytest`, `make`,
+  `docker`... here, so they go through `fx run --job`. Best effort, like the rules on key files.
+- `fx sandbox clean` removes only this factory's boxes that no job or review uses any more.
+
 **What the sandbox does not cover.** The agents themselves run on this machine. `init` writes rules that
 keep them from reading `~/.aws`, `~/.ssh` and the factory's keys (their Read tool, and shell commands
 such as `cat` that name those paths), but a script an agent writes and runs could still open a file. So
@@ -1163,6 +1192,15 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
   `sandbox.prepare`; a private registry goes in `sandbox.allow`.
 - Run `/auto-factory:code init` once more: it adds the rules that keep agents from this machine's key
   files.
+
+### Upgrading to 3.8: every job in a box
+
+- Jobs need the sandbox VM too (above). A job already in progress gets its box at its next command,
+  and its setup runs again in there once.
+- Run `/auto-factory:code init` once more: it adds the rules that send the agents' project commands
+  through `fx run --job`.
+- The VM's memory: one box per job at once (and per candidate or package). With several jobs at once,
+  raise `memory` in `fx-sandbox.yaml` before `fx sandbox install`, or with `limactl edit fx-sandbox`.
 
 ## Set up a project: `init`
 
