@@ -53,10 +53,11 @@ Các chỗ chính:
   - Phần "Sandbox": `sandbox_state`, `vm_run`, `box_create`, `box_cut`, `box_destroy`, `box_put`, `box_get`,
     `box_exec`, `box_spawn`, `cmd_sandbox`.
   - `review_sandbox`, `review_host_waiver`, `review_host_builds`.
-- `plugins/auto-factory/skills/code/sandbox/fx-sandbox.yaml`: template Lima. Gồm Ubuntu 24.04, Docker, Sysbox 0.6.7,
+- `plugins/auto-factory/skills/code/sandbox/fx-sandbox.yaml`: template Lima. Gồm Ubuntu 24.04, Docker, Sysbox 0.7.1,
   image `fx-proxy` (tinyproxy) và image `fx-box` (Node 20, Playwright, Chromium, socat).
 - Lệnh: `fx sandbox status | install | reset | clean`, `fx review sandbox <id> --host`.
-- Test: `tests/test_isolation.py`. Class `RealSandboxTest` chỉ chạy khi có `FX_SANDBOX_REAL=1` và máy ảo thật.
+- Test: `tests/test_isolation.py`. Các class `Real*` (`RealSandboxTest`, `RealJobBoxTest`, `RealJobFlowTest`,
+  `RealReviewFlowTest`) chỉ chạy khi có `FX_SANDBOX_REAL=1` và máy ảo thật.
 
 Tình trạng test trên Mac (giả lập `limactl`, chưa có máy ảo thật):
 
@@ -110,8 +111,10 @@ Các link đã kiểm tra là tải được (ngày 2026-11-21):
 - Ubuntu cho WSL:
   - `https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz`
   - Bản arm64 cùng chỗ. Có file `SHA256SUMS` để kiểm tra.
-- Sysbox: `https://downloads.nestybox.com/sysbox/releases/v0.6.7/sysbox-ce_0.6.7-0.linux_amd64.deb`. Link này template
-  Lima cũng dùng.
+- Sysbox **0.7.1** (không dùng 0.6.7: với Docker 29 và containerd 2 nó báo `namespace {"time" ""} does not exist`,
+  đã gặp trên Mac): `https://github.com/nestybox/sysbox/releases/download/v0.7.1/sysbox-ce_0.7.1.linux_amd64.deb`,
+  sha256 `9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261c5`. Template Lima cũng dùng link và checksum
+  này.
 
 Dùng `--import` cho bản rootfs, không dùng `wsl --install --name`: bản cài kiểu `--install` hỏi tạo user ở lần mở đầu,
 fx không chạy tự động được.
@@ -187,9 +190,11 @@ báo "port already answers" sai. Giờ app chạy trong box thì fx bỏ bước
 
 ## Những chỗ chưa kiểm chứng
 
-- Chưa từng chạy trên máy ảo thật, kể cả trên Mac.
-- Sysbox `0.6.7`: đường tải `downloads.nestybox.com/sysbox/releases/v0.6.7/...` và image
-  `nestybox/ubuntu-jammy-systemd-docker` chưa thử.
+- **Đã chạy thật trên Mac** (Apple Silicon, Lima 2.3.0, máy ảo dựng lại từ đầu bằng template):
+  - Các test `Real*` đều qua, gồm cả luồng review và luồng job đầy đủ qua fx: setup cài thư viện thật qua proxy, lệnh
+    builder không có mạng và không thấy home, `--install`, app trả lời trên máy thật, gate chạy checks trong box, dừng
+    và bật lại box, xoá box khi dọn job.
+  - Chưa chạy trên Windows/WSL, và chưa chạy trên máy amd64.
 - Box kéo image Docker qua proxy lúc `app.up`, nên danh sách cho phép đang có Docker Hub và kho apt.
 - Deny rule của agent chỉ là "làm hết sức".
 - Mobile, iOS và bản desktop thật chạy trên máy thật, không cách ly. Đây là quyết định của người dùng.
@@ -197,6 +202,9 @@ báo "port already answers" sai. Giờ app chạy trong box thì fx bỏ bước
 ## Chạy test
 
 Trong WSL, ở thư mục `tests/`:
+
+- Trên máy ảo thật (sau `fx sandbox install`): `FX_SANDBOX_REAL=1 python3 -m unittest test_isolation` chạy cả các
+  class `Real*`.
 
 - Từng file: `python3 -m unittest test_isolation`.
 - Cả bộ: chạy từng file, rồi lọc dòng `FAIL:`/`ERROR:` trong log. Nếu chạy song song mà một file lỗi vì trùng cổng thì

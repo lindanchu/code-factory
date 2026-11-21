@@ -26,8 +26,15 @@ provision:
     apt-get install -y ca-certificates curl jq iptables
     curl -fsSL https://get.docker.com | sh
     arch=$(dpkg --print-architecture)
-    ver=0.6.7
-    curl -fsSLo /tmp/sysbox.deb "https://downloads.nestybox.com/sysbox/releases/v${ver}/sysbox-ce_${ver}-0.linux_${arch}.deb"
+    # 0.7.1: the first Sysbox that runs on Ubuntu 24.04's kernel 6.8 under containerd 2 (Docker 29); 0.6.7 fails there
+    # with 'namespace {"time" ""} does not exist'. Its checksums are those of the release notes.
+    ver=0.7.1
+    case "$arch" in
+      amd64) sum=9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261c5 ;;
+      arm64) sum=04ca894ae0b53f0fa54eaacc173ce40363c9a95ea5450f773716a84ef650a69b ;;
+    esac
+    curl -fsSLo /tmp/sysbox.deb "https://github.com/nestybox/sysbox/releases/download/v${ver}/sysbox-ce_${ver}.linux_${arch}.deb"
+    echo "$sum  /tmp/sysbox.deb" | sha256sum -c -
     apt-get install -y /tmp/sysbox.deb
     # each box's proxy: tinyproxy, which lets through only the names in its filter
     mkdir -p /opt/fx-proxy /opt/fx-box /opt/fx-boxes

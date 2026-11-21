@@ -4,8 +4,8 @@ checks, commands and browser get only what fx passes them, the box loses its way
 end, and a machine without the sandbox stops the review before anything of the merge request runs.
 
 The first tests use the limactl stub (test_security.STUB): what the box runs runs here, with only the variables fx
-gave the box, and every command is logged. The last ones (RealSandboxTest) need the real VM: FX_SANDBOX_REAL=1 with
-`fx sandbox install` done; they run the review's proof of concept against it."""
+gave the box, and every command is logged. The Real* ones need the real VM: FX_SANDBOX_REAL=1 with `fx sandbox install`
+done; they run the review's proof of concept against it, a job's box, and a whole review and job through fx."""
 
 import contextlib
 import io
@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -452,6 +453,233 @@ class RealSandboxTest(unittest.TestCase):
                         "{\"postinstall\":\"cat $HOME/.aws/credentials > leak.txt 2>&1; true\"}}' > package.json && "
                         "npm install --no-audit --no-fund >/dev/null 2>&1; cat leak.txt")
         self.assertNotIn("aws_secret_access_key", p.stdout)
+
+
+
+class FakeCtx:
+    """What the job box's copying reads of a factory: its folders, no repositories of its own."""
+
+    def __init__(self, root):
+        self.factory, self.work = os.path.join(root, "factory"), os.path.join(root, "work")
+        self.jobs = os.path.join(self.factory, "jobs")
+        os.makedirs(self.jobs)
+        os.makedirs(self.work)
+
+    def job_dir(self, jid):
+        return os.path.join(self.jobs, jid)
+
+    def repo_names(self):
+        return []
+
+    def c(self, key, default=None):
+        return default
+
+    def rc(self, name, key, default=None):
+        return default
+
+
+@unittest.skipUnless(os.environ.get("FX_SANDBOX_REAL") == "1" and shutil.which("limactl"),
+                     "the real sandbox VM: FX_SANDBOX_REAL=1 after fx sandbox install")
+class RealJobBoxTest(unittest.TestCase):
+    """A job's box in the real VM (3.8): an install opens the way to the registries and closes it, a stopped box keeps
+    what it had and starts with no way out, files go in and only the safe ones come back, a time limit holds inside,
+    and an app in the box answers on this machine's 127.0.0.1."""
+
+    def setUp(self):
+        ok, why = fx.sandbox_state()
+        self.assertTrue(ok, why)
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="fx-jobbox-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.box = fx.box_create(None, "jobbox-test", 25950, 2)
+        self.addCleanup(fx.box_destroy, self.box)
+        fx.box_cut(self.box)
+
+    def run_in(self, cmd, cwd="/", timeout=300):
+        return fx.box_exec(self.box, cmd, cwd, {}, timeout=timeout)
+
+    def reach(self, url):
+        return self.run_in("curl -sS -m 15 -o /dev/null -w '%%{http_code}' %s 2>&1; echo \" exit=$?\"" % url).stdout
+
+    def test_an_install_alone_reaches_the_registries(self):
+        self.assertNotIn("exit=0", self.reach("https://registry.npmjs.org/"))
+        fx.box_open(self.box)
+        self.assertIn("200 exit=0", self.reach("https://registry.npmjs.org/"))
+        self.assertNotIn("exit=0", self.reach("https://example.com/"))
+        fx.box_cut(self.box)
+        self.assertNotIn("exit=0", self.reach("https://registry.npmjs.org/"))
+        fx.box_open(self.box)  # a second install: a new proxy, found again
+        self.assertIn("200 exit=0", self.reach("https://registry.npmjs.org/"))
+        fx.box_cut(self.box)
+
+    def test_a_stopped_box_keeps_its_files_and_starts_with_no_way_out(self):
+        self.run_in("mkdir -p /work && echo kept > /work/keep.txt")
+        fx.box_pause(self.box)
+        self.assertIs(fx.box_running(self.box), False)
+        fx.box_resume(self.box)
+        self.assertIs(fx.box_running(self.box), True)
+        self.assertIn("kept", self.run_in("cat /work/keep.txt").stdout)
+        self.assertNotIn("exit=0", self.reach("https://registry.npmjs.org/"))
+
+    def test_files_go_in_and_only_safe_ones_come_back(self):
+        ctx = FakeCtx(self.tmp)
+        wt = os.path.join(ctx.work, "T-9")
+        os.makedirs(wt)
+        for cmd in (["git", "init", "-q"], ["git", "config", "user.email", "t@example.com"],
+                    ["git", "config", "user.name", "t"]):
+            subprocess.run(cmd, cwd=wt, check=True)
+        write(os.path.join(wt, ".gitignore"), "node_modules/\n")
+        write(os.path.join(wt, "a.txt"), "a\n")
+        write(os.path.join(wt, "src", "app.js"), "1\n")
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+        subprocess.run(["git", "commit", "-qm", "x"], cwd=wt, check=True)
+        view = {"id": "T-9", "worktree": wt}
+        stamp = fx.box_sync_in(ctx, view, self.box)
+        p = self.run_in("cat src/app.js && echo lock > package-lock.json && mkdir -p node_modules/x .claude && "
+                        "echo x > node_modules/x/i.js && echo bad > .claude/settings.json && rm a.txt && "
+                        "ln -s /etc/passwd link && echo new > src/new.js", cwd=wt)
+        self.assertEqual(p.returncode, 0, p.stdout)
+        self.assertIn("1", p.stdout)  # the clone's file went in
+        came = fx.box_sync_out(ctx, view, self.box, stamp)
+        self.assertEqual(slurp(os.path.join(wt, "package-lock.json")), "lock\n")
+        self.assertEqual(slurp(os.path.join(wt, "src", "new.js")), "new\n")
+        self.assertFalse(os.path.exists(os.path.join(wt, "a.txt")))
+        self.assertFalse(os.path.exists(os.path.join(wt, "node_modules")))
+        self.assertFalse(os.path.exists(os.path.join(wt, ".claude")))
+        self.assertFalse(os.path.lexists(os.path.join(wt, "link")))
+        self.assertIn(os.path.join(wt, "package-lock.json"), came)
+        write(os.path.join(wt, "src", "app.js"), "2\n")  # a change here goes in at the next command
+        stamp = fx.box_sync_in(ctx, view, self.box)
+        self.assertIn("2", self.run_in("cat src/app.js", cwd=wt).stdout)
+        fx.box_sync_out(ctx, view, self.box, stamp)
+
+    def test_the_time_limit_holds_inside_the_box(self):
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.run_in("sleep 120", timeout=3)
+        time.sleep(20)  # timeout -k 15: TERM, then KILL
+        self.assertIn("none", self.run_in("pgrep -x sleep || echo none").stdout)
+
+    def test_an_app_in_the_box_answers_here(self):
+        port = self.box["port"]
+        fx.box_spawn(self.box, "node -e \"require('http').createServer((q, r) => r.end('ok')).listen(%d, "
+                               "'127.0.0.1')\"" % port, "/", {}, "/tmp/fx-app.log", "app-test")
+        for _ in range(60):
+            if fx.http_up("http://127.0.0.1:%d/" % port):
+                break
+            time.sleep(1)
+        self.assertTrue(fx.http_up("http://127.0.0.1:%d/" % port))
+        fx.box_kill(self.box, "app-test")
+
+
+
+LIMACTL = shutil.which("limactl")  # before a test's own PATH
+SERVER_JS = """const http = require('http');
+http.createServer((q, r) => { r.end(q.url === '/health' ? 'ok' : 'app'); }).listen(Number(process.argv[2]), '127.0.0.1');
+"""
+
+
+@unittest.skipUnless(os.environ.get("FX_SANDBOX_REAL") == "1" and shutil.which("limactl"),
+                     "the real sandbox VM: FX_SANDBOX_REAL=1 after fx sandbox install")
+class RealJobFlowTest(FxTestCase):
+    """A job through fx in the real VM: its setup installs a real package through the box's proxy, an agent's command
+    runs with no internet, an install alone gets the registries and its lockfile comes back, the app answers here, a
+    waiting job's box stops and starts again with what it had, and the box goes with the job's clones."""
+    tools = ("gitleaks", "semgrep", "osv-scanner", "docker")
+    cfg = {"setup": "npm init -y >/dev/null && npm install --no-audit --no-fund is-number@7.0.0",
+           "app": {"up": "node server.js {port}", "health": "/health", "start_timeout_sec": 60},
+           "ports": {"base": 25300, "step": 10}}
+
+    def setUp(self):
+        super().setUp()
+        os.symlink(LIMACTL, os.path.join(self.f.bin, "limactl"))
+        p = mock.patch.dict(os.environ, {"FACTORY_TEST_JOB_BOX": "1"})
+        p.start()
+        self.addCleanup(p.stop)
+        write(os.path.join(self.f.factory, "checks.sh"), "echo checks-ran-in-$(hostname)\nexit 0\n")
+        self.f.commit({".gitignore": "node_modules/\n", "server.js": SERVER_JS})
+        self.f.save_job(port=25300)
+        self.addCleanup(self.fx, "cleanup", "T-1", "--force")
+
+    def raw(self, *argv):
+        buf, code = io.StringIO(), 0
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                fx.main(["--repo", self.f.factory] + list(argv))
+            except SystemExit as e:
+                code = e.code or 0
+        os.chdir(self.cwd)
+        return code, buf.getvalue()
+
+    def box(self):
+        return fx.job_box_records(self.f.ctx(), "T-1")[0][1]
+
+    def test_a_job_from_setup_to_cleanup(self):
+        code, res = self.fx("setup", "T-1", "--force")
+        self.assertEqual(code, 0, res)
+        wt = self.f.wt
+        self.assertTrue(os.path.exists(os.path.join(wt, "package-lock.json")))  # came back
+        self.assertFalse(os.path.exists(os.path.join(wt, "node_modules")))  # stayed in the box
+        code, text = self.raw("run", "--job", "T-1", "--", "node", "-e", "console.log(require('is-number')(5))")
+        self.assertEqual((code, text.strip()), (0, "true"))
+        code, text = self.raw("run", "--job", "T-1", "--", "curl", "-sS", "-m", "10", "https://registry.npmjs.org/")
+        self.assertNotEqual(code, 0, text)  # no internet outside an install
+        code, text = self.raw("run", "--job", "T-1", "--", "cat", os.path.expanduser("~/.ssh/known_hosts"))
+        self.assertNotEqual(code, 0, text)  # nothing of this machine's home
+        code, text = self.raw("run", "--job", "T-1", "--install", "--", "npm", "install", "--no-audit", "--no-fund",
+                              "is-odd@3.0.1")
+        self.assertEqual(code, 0, text)
+        self.assertIn("is-odd", slurp(os.path.join(wt, "package.json")))
+        code, res = self.fx("app", "up", "T-1")
+        self.assertEqual(code, 0, res)
+        self.assertTrue(fx.http_up("http://127.0.0.1:25300/health"))
+        code, res = self.fx("app", "down", "T-1")
+        self.assertEqual(code, 0, res)
+        # the builder commits what the installs changed, as on this machine before
+        self.f.commit({"app.py": "x = 1\n", "package.json": slurp(os.path.join(wt, "package.json")),
+                       "package-lock.json": slurp(os.path.join(wt, "package-lock.json"))})
+        code, res = self.gate()
+        self.assertNotIn("Untracked", slurp(res["report"]))
+        logs = [slurp(os.path.join(d, f)) for d, _, fs in os.walk(self.f.jd) for f in fs if f.endswith(".log")]
+        self.assertTrue(any("checks-ran-in-box" in t for t in logs), "the checks did not run in the box")
+        code, res = self.fx("stage", "T-1", "needs-info", "--force")
+        self.assertEqual(code, 0, res)
+        self.assertIs(fx.box_running(self.box()), False)
+        self.fx("stage", "T-1", "build", "--force")
+        code, text = self.raw("run", "--job", "T-1", "--", "node", "-e", "console.log(require('is-odd')(3))")
+        self.assertEqual((code, text.strip()), (0, "true"))  # what it installed is still there
+        box = self.box()
+        code, res = self.fx("cleanup", "T-1", "--force")
+        self.assertEqual(code, 0, res)
+        self.assertIsNone(fx.box_running(box))
+
+
+
+@unittest.skipUnless(os.environ.get("FX_SANDBOX_REAL") == "1" and shutil.which("limactl"),
+                     "the real sandbox VM: FX_SANDBOX_REAL=1 after fx sandbox install")
+class RealReviewFlowTest(SandboxCase):
+    """A review through fx in the real VM: the merge request's app starts in its box and answers here, the runner's
+    command runs there with nothing of this machine, and the box is gone at the end."""
+    tools = ("gitleaks", "semgrep", "osv-scanner", "docker")
+
+    def setUp(self):
+        super().setUp()
+        os.symlink(LIMACTL, os.path.join(self.f.bin, "limactl"))
+        server = os.path.join(self.f.factory, "server.js")  # the box gets the factory's own files
+        write(server, SERVER_JS)
+        self.set_app(up="node %s {port}" % server, health="/health")
+
+    def test_a_review_from_its_sandbox_to_its_end(self):
+        rid, res = self.up()
+        self.assertTrue(fx.http_up(res["url"] + "/health"), res)
+        code, r = self.review("exec", rid, "--req", "R1", "--note", "look", "--command",
+                              "hostname; ls %s 2>&1; curl -sS -m 10 https://registry.npmjs.org/ 2>&1; echo exit=$?"
+                              % os.path.expanduser("~/.ssh"))
+        self.assertEqual(code, 0, r)
+        self.assertIn("box", r["output"])
+        self.assertIn("No such file", r["output"])
+        self.assertNotIn("exit=0", r["output"])
+        box = self.job()["sandbox"]["box"]
+        self.stop(rid)
+        self.assertIsNone(fx.box_running(box))
 
 
 if __name__ == "__main__":
