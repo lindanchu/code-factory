@@ -660,7 +660,10 @@ the login and permission-table commands, the app and the browser of the UI check
   installed dependencies and database stay, the memory comes back. It starts again when the job goes
   on, and is deleted with the job's clones.
 - **Each job, best-of-N candidate and parallel package** has its own box, as it has its own block of
-  ports and its own stack. Three jobs at once may need more memory than the VM's 6 GB.
+  ports and its own stack. Measured on a 6 GB VM with a small web job in each box (Postgres in its own
+  Docker, a Node app, then the UI check's Chromium): a box costs about 130 MB at rest and 220 MB while
+  Chromium runs; three at once peaked at 1.4 GB of the VM's 6 GB. A project's own build or test suite
+  (webpack, a JVM, a large database) adds its own weight on top.
 - **No sandbox on this machine:** the job stops before its setup and asks you: set it up, or let this
   job run here (`fx sandbox host --job <job> --reason ... --confirm <code>`), once per job; its pull
   request says so, with your reason.
@@ -1199,8 +1202,9 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
   and its setup runs again in there once.
 - Run `/auto-factory:code init` once more: it adds the rules that send the agents' project commands
   through `fx run --job`.
-- The VM's memory: one box per job at once (and per candidate or package). With several jobs at once,
-  raise `memory` in `fx-sandbox.yaml` before `fx sandbox install`, or with `limactl edit fx-sandbox`.
+- The VM's memory: one box per job at once (and per candidate or package). Its 6 GB held three small web
+  jobs at once with room to spare (above); for heavy builds several at a time, raise `memory` in
+  `fx-sandbox.yaml` before `fx sandbox install`, or with `limactl edit fx-sandbox`.
 
 ## Set up a project: `init`
 

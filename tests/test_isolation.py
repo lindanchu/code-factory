@@ -511,6 +511,15 @@ class RealJobBoxTest(unittest.TestCase):
         self.assertIn("200 exit=0", self.reach("https://registry.npmjs.org/"))
         fx.box_cut(self.box)
 
+    def test_its_own_docker_pulls_images_only_while_installing(self):
+        """A compose stack's images (Docker Hub's layers come from its CDN) come down during an install, not after."""
+        fx.box_open(self.box)
+        p = self.run_in("docker pull -q hello-world:latest 2>&1; echo exit=$?", timeout=600)
+        self.assertIn("exit=0", p.stdout)
+        fx.box_cut(self.box)
+        p = self.run_in("docker pull -q busybox:latest 2>&1; echo exit=$?", timeout=600)
+        self.assertNotIn("exit=0", p.stdout)
+
     def test_a_stopped_box_keeps_its_files_and_starts_with_no_way_out(self):
         self.run_in("mkdir -p /work && echo kept > /work/keep.txt")
         fx.box_pause(self.box)

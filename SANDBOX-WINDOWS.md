@@ -181,7 +181,9 @@ Thử trên máy thật:
    - Builder chạy test qua `fx run --job`; lockfile mới về clone sau `--install`.
    - Gate pass. App trong box trả lời trên `127.0.0.1:<port>` của máy thật.
    - Đặt job vào needs-info thì box dừng (`limactl shell fx-sandbox sudo docker ps -a`).
-3. Đo RAM của máy ảo khi chạy 2–3 job cùng lúc. Nếu thiếu thì báo người dùng, rồi hỏi họ có muốn nâng `memory` không.
+3. Đo RAM của máy ảo khi chạy 2–3 job cùng lúc. Trên Mac đã đo với job web nhỏ (Postgres, app Node, Chromium): mỗi
+   box khoảng 130 MB lúc nghỉ, 220 MB lúc chạy Chromium, 3 box cùng lúc đỉnh 1,4 GB trên 6 GB. Trên Windows nên đo
+   với một dự án thật (build nặng hơn). Nếu thiếu thì báo người dùng, rồi hỏi họ có muốn nâng `memory` không.
 4. Thời gian mỗi lệnh `fx run`: mỗi lệnh gọi `limactl shell` 4 lần (kiểm tra box, đưa file vào, chạy, mang file về).
    Nếu chậm quá thì báo lại.
 

@@ -21377,7 +21377,8 @@ SANDBOX_PORT0 = 20000  # a box's own ports, forwarded to the app's 127.0.0.1:<po
 SANDBOX_ALLOW = ["registry.npmjs.org", "registry.yarnpkg.com", "repo.packagist.org", "packagist.org",
                  "codeload.github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org",
                  "repo.maven.apache.org", "repo1.maven.org", "registry-1.docker.io", "auth.docker.io",
-                 "production.cloudflare.docker.com", "mcr.microsoft.com", "*.data.mcr.microsoft.com"]
+                 "production.cloudflare.docker.com", "production.cloudfront.docker.com",  # Docker Hub's image layers
+                 "mcr.microsoft.com", "*.data.mcr.microsoft.com"]
 SANDBOX_ENV_DROP = {"PATH", "HOME", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME", "TMPDIR", "SHLVL", "_", "NODE_PATH"}
 
 
