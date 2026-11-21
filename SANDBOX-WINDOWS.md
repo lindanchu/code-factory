@@ -99,9 +99,24 @@ Cần xem kỹ:
 
 ### Bước 2 (nếu bước 1 không được): một bản WSL2 riêng làm máy ảo
 
-Đây là phương án đã đề xuất với người dùng nhưng **chưa làm**. Phải chốt chi tiết với người dùng trước khi code.
+Việc này **làm trên máy Windows**, không làm từ Mac: người dùng muốn phần của Windows do máy Windows tự làm và tự thử.
+Người dùng đã đồng ý hướng này. Các chi tiết bên dưới là đề xuất: chỗ nào phải chọn thì hỏi người dùng từng câu một.
 
-- Cách tạo: `wsl.exe --import fx-sandbox <thư mục> <rootfs Ubuntu>`, gọi từ WSL qua `wsl.exe`.
+**Trước khi sửa `fx`:** chạy `git pull`. Từ Mac vẫn đang làm tiếp các phần khác trên cùng nhánh này, và `fx` là một file
+lớn. Nên giữ phần WSL thành một khối riêng, đặt cạnh phần "Sandbox" của Lima, để ít đụng nhau.
+
+Các link đã kiểm tra là tải được (ngày 2026-11-21):
+
+- Ubuntu cho WSL:
+  - `https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz`
+  - Bản arm64 cùng chỗ. Có file `SHA256SUMS` để kiểm tra.
+- Sysbox: `https://downloads.nestybox.com/sysbox/releases/v0.6.7/sysbox-ce_0.6.7-0.linux_amd64.deb`. Link này template
+  Lima cũng dùng.
+
+Dùng `--import` cho bản rootfs, không dùng `wsl --install --name`: bản cài kiểu `--install` hỏi tạo user ở lần mở đầu,
+fx không chạy tự động được.
+
+- Cách tạo: `wsl.exe --import fx-sandbox <thư mục> <rootfs Ubuntu> --version 2`, gọi từ WSL qua `wsl.exe`.
 - `/etc/wsl.conf` của bản này:
   - `[automount] enabled=false`: không gắn ổ C:.
   - `[interop] enabled=false, appendWindowsPath=false`: không gọi được sang Windows.
@@ -116,7 +131,17 @@ Cần xem kỹ:
   - Các bản WSL2 dùng chung một nhân Linux và (theo mặc định) chung namespace mạng. Vậy iptables của box và
     `docker0` trong `fx-sandbox` có đụng vào WSL chính hoặc Docker Desktop không?
   - `/mnt/wsl` là vùng dùng chung giữa các bản WSL: box có thấy gì ở đó không?
+  - **Tắt interop:** sau khi đặt `[interop] enabled=false` trong `fx-sandbox`, WSL chính có còn gọi được
+    `cmd.exe /c ver` không? Interop dựa trên `binfmt_misc` của nhân dùng chung, và nếu WSL chính mất interop thì cả
+    luồng desktop (build và chạy .exe) hỏng. `fx sandbox install` nên tự kiểm tra điểm này rồi báo.
+  - **Sysbox trên nhân WSL2:** Sysbox không ghi là hỗ trợ WSL2. Thử một box `docker run --runtime=sysbox-runc` có
+    Docker bên trong. Không chạy được thì báo người dùng và để người dùng chọn hướng khác.
+  - **Cổng:** chung namespace mạng thì cổng box mở trên 127.0.0.1 của `fx-sandbox` hiện thẳng trên 127.0.0.1 của WSL
+    chính, không cần chuyển tiếp. Kiểm tra lại cho chắc.
   - Nếu những chỗ này không cách ly được, báo người dùng mức rủi ro rồi để người dùng chọn. Đừng tự quyết.
+
+Làm xong thì sửa `install.md` (bước 7) và README (phần sandbox), để máy Windows được hướng dẫn cài bản WSL thay cho
+Lima. Bump version nếu người dùng muốn.
 
 ### Bước 3: thử thật một review app desktop
 
