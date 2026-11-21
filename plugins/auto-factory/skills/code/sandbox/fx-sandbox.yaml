@@ -1,0 +1,55 @@
+# fx-sandbox: the Linux VM where colleagues' merge requests run (fx sandbox install). It mounts nothing of this machine
+# and has its own Docker, never this machine's. Each review runs in its own box inside it (a Sysbox system container
+# with its own Docker), deleted when the review ends. See "Sandbox" in fx.
+minimumLimaVersion: "1.0.0"
+images:
+- location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+  arch: "x86_64"
+- location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+  arch: "aarch64"
+cpus: 4
+memory: "6GiB"
+disk: "60GiB"
+# Nothing of this machine is mounted: a box that got out of its container still finds no key and no file of yours.
+mounts: []
+containerd:
+  system: false
+  user: false
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    test -f /etc/fx-sandbox-ready && exit 0
+    apt-get update
+    apt-get install -y ca-certificates curl jq iptables
+    curl -fsSL https://get.docker.com | sh
+    arch=$(dpkg --print-architecture)
+    ver=0.6.7
+    curl -fsSLo /tmp/sysbox.deb "https://downloads.nestybox.com/sysbox/releases/v${ver}/sysbox-ce_${ver}-0.linux_${arch}.deb"
+    apt-get install -y /tmp/sysbox.deb
+    # each box's proxy: tinyproxy, which lets through only the names in its filter
+    mkdir -p /opt/fx-proxy /opt/fx-box /opt/fx-boxes
+    printf 'FROM alpine:3.20\nRUN apk add --no-cache tinyproxy\nCMD ["tinyproxy", "-d", "-c", "/etc/tinyproxy/fx.conf"]\n' > /opt/fx-proxy/Dockerfile
+    docker build -t fx-proxy /opt/fx-proxy
+    # the box image: Ubuntu with systemd and its own Docker, socat for the ports, Node and Playwright with Chromium
+    cat > /opt/fx-box/Dockerfile <<'EOF'
+    FROM nestybox/ubuntu-jammy-systemd-docker:latest
+    RUN apt-get update && apt-get install -y --no-install-recommends socat curl ca-certificates gnupg git unzip \
+     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs \
+     && npm i -g playwright@{PLAYWRIGHT} axe-core@{AXE} && npx -y playwright@{PLAYWRIGHT} install --with-deps chromium \
+     && rm -rf /var/lib/apt/lists/*
+    ENV NODE_PATH=/usr/lib/node_modules
+    EOF
+    docker build -t fx-box /opt/fx-box
+    touch /etc/fx-sandbox-ready
+probes:
+- script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    if ! timeout 1800s bash -c "until test -f /etc/fx-sandbox-ready; do sleep 5; done"; then
+      echo >&2 "fx-sandbox is not ready yet"
+      exit 1
+    fi
+  hint: The set-up installs Docker, Sysbox and the box image; see /var/log/cloud-init-output.log in the VM.

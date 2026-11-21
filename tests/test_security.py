@@ -153,9 +153,82 @@ elif name == "docker":
         print(os.environ.get("STUB_ZAP_IMAGE_ID", "sha256:stubimage"))
     elif args[:2] == ["network", "inspect"]:
         print("172.17.0.1")
+elif name == "limactl":
+    # The sandbox VM: what fx runs in a review's box runs here, with only the variables fx passed to the box.
+    import shlex, signal, subprocess, tempfile
+    rundir = os.environ.get("STUB_RUN_DIR") or tempfile.gettempdir()
+    pidfile = lambda p: os.path.join(rundir, os.path.basename(p))
+    if args[:1] == ["list"]:
+        if mode != "none":
+            print(json.dumps({"name": "fx-sandbox", "status": "Stopped" if mode == "stopped" else "Running"})
+                  if "--json" in args else "fx-sandbox")
+        sys.exit(0)
+    if args[:1] != ["shell"]:
+        sys.exit(0)
+    rest = args[args.index("--") + 1:]
+    if rest[:2] == ["test", "-e"]:
+        sys.exit(0 if mode == "mounted" else 1)
+    if rest[:2] == ["test", "-f"]:
+        sys.exit(1 if mode == "unprovisioned" else 0)
+    if rest[:1] == ["sudo"]:
+        rest = rest[1:]
+    if rest[:2] == ["bash", "-c"]:
+        if "docker network create" in rest[2]:
+            if mode == "nobox":
+                print("docker: Error response from daemon: unknown runtime sysbox-runc")
+                sys.exit(1)
+            print("subnet=10.250.0.0/24\nproxy=10.250.0.2")
+        sys.exit(0)
+    if rest[:2] != ["docker", "exec"]:
+        sys.exit(0)
+    i, detach, cwd, env = 2, False, "/", {}
+    while i < len(rest) and rest[i].startswith("-"):
+        if rest[i] in ("-w", "-e"):
+            if rest[i] == "-w":
+                cwd = rest[i + 1]
+            else:
+                k, _, v = rest[i + 1].partition("=")
+                env[k] = v
+            i += 2
+        else:
+            detach = detach or rest[i] == "-d"
+            i += 1
+    cmd = rest[i + 1:]
+    if cmd[:1] == ["tar"]:
+        if "-xf" in cmd:
+            sys.stdin.buffer.read()
+        sys.exit(0)
+    script = cmd[2] if cmd[:1] == ["bash"] and len(cmd) > 2 else " ".join(cmd)
+    if "systemctl restart docker" in script:
+        sys.exit(0)
+    run_env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp")}
+    if os.environ.get("NODE_PATH"):
+        run_env["NODE_PATH"] = os.environ["NODE_PATH"]  # the box image's own
+    run_env.update(env)
+    with open(os.environ["STUB_LOG"], "a") as f:
+        f.write(json.dumps({"tool": "box", "cmd": script, "cwd": cwd, "env": sorted(env)}) + "\n")
+    m = re.search(r"setsid bash -lc (.+?) >> (.+?) 2>&1 < /dev/null & echo \$! > (\S+)$", script)
+    if m:
+        log = shlex.split(m.group(2))[0]
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        p = subprocess.Popen(["bash", "-c", shlex.split(m.group(1))[0]], cwd=cwd, env=run_env,
+                             stdout=open(log, "ab"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                             start_new_session=True)
+        with open(pidfile(m.group(3)), "w") as f:
+            f.write(str(p.pid))
+        sys.exit(0)
+    m = re.search(r"test -f (\S+) && kill", script)
+    if m:
+        try:
+            os.killpg(int(open(pidfile(m.group(1))).read()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+        sys.exit(0)
+    p = subprocess.run(["bash", "-c", script], cwd=cwd if os.path.isdir(cwd) else "/", env=run_env)
+    sys.exit(p.returncode)
 '''
 
-TOOLS = ("gitleaks", "semgrep", "osv-scanner", "docker")
+TOOLS = ("gitleaks", "semgrep", "osv-scanner", "docker", "limactl")
 
 
 @contextlib.contextmanager
@@ -1818,7 +1891,7 @@ class ScriptTest(unittest.TestCase):
             self.assertEqual(json.load(f)["version"], v)
         with open(os.path.join(ROOT, "plugins", "auto-factory", "skills", "code", "shared", "VERSION")) as f:
             self.assertEqual(f.read().strip(), v)  # the two skills ship together
-        self.assertEqual(v, "3.6.0")
+        self.assertEqual(v, "3.7.0")
 
     def test_three_commands(self):
         """/auto-factory:code and /auto-factory:review (no auto test here): a plugin skill's command is

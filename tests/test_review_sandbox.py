@@ -789,6 +789,8 @@ class BrowserAndChecksTest(UiCase):
         self.assertFalse(is_listening(port))
 
     def test_a_script_without_a_browser_is_no_evidence(self):
+        """The browser is the box's own, whatever this machine has: a script that ran there and wrote no report looked
+        at nothing."""
         rid, _ = self.up()
         script = os.path.join(self.tmp, "s.js")
         write(script, "console.log(1)\n")
@@ -796,7 +798,8 @@ class BrowserAndChecksTest(UiCase):
             code, res = self.review("ui", rid, "--req", "R1", "--case", "look", "--script", script)
         self.assertEqual(code, 0, res)
         self.assertEqual(res["status"], 0)
-        self.assertIn("not here", res["skipped"])
+        self.assertIsNone(res["skipped"])
+        self.assertTrue(any(c["cmd"].startswith("node ") and c["cmd"].endswith("check.js") for c in self.f.calls("box")))
         write(self.rfile("run.md"), RUN_OK.replace("Calls: 1, 2", "Calls: 1"))
         self.assertEqual(self.review("result", rid)[0], 6)
 

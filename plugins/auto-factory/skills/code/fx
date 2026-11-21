@@ -114,7 +114,7 @@ REPO_KEY_GLOBS = ("setup", "copy_into_worktree", "copy_from", "clone", "clone.*"
                   "*_paths", "security.semgrep_exclude", "security.accepted_rules", "security.zap_*", "security.scanners",
                   "security.scanners.*", "ui_checks", "ui_checks.*", "pr.provider", "baselines", "baselines.*",
                   "learning.knowledge_map", "ports", "ports.*", "*_timeout_sec", "mobile", "mobile.*",
-                  "desktop", "desktop.*", "review.checks") + REPO_ONLY_KEYS
+                  "desktop", "desktop.*", "review.checks", "sandbox", "sandbox.*") + REPO_ONLY_KEYS
 # What a job keeps for each of its repositories (job.json's repos{}); everything else of a job is project-wide.
 JOB_REPO_FIELDS = ("branch", "worktree", "base_branch", "base_ref", "target_branch", "setup_done", "checks_passed_at",
                    "pushed_head", "pr_url", "pr_hint", "secret_reset_to", "secret_bounces", "clone_removed_at",
@@ -2228,7 +2228,12 @@ LOCAL_ENV = {
 }
 LOCAL_ALLOW = ["Bash(git status *)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)",
                "Bash(git merge-tree *)", "Bash(git add *)", "Bash(git commit *)"]
-LOCAL_DENY = ["Bash(git push --force *)", "Bash(git push -f *)", "Bash(git reset --hard *)"]
+# This machine's own key files, out of the agents' reach: a Read rule also stops cat, head, sed and the like naming the
+# path, and the Bash rules the commands that name it otherwise. Best effort: a script that opens a file itself is not
+# stopped (a colleague's merge request runs in the sandbox for that).
+HOME_KEY_DENY = ["Read(~/.aws/**)", "Read(~/.ssh/**)", "Read(~/.config/gh/**)", "Read(~/.docker/config.json)",
+                 "Read(~/.netrc)", "Bash(*.aws/*)", "Bash(*.ssh/*)"]
+LOCAL_DENY = ["Bash(git push --force *)", "Bash(git push -f *)", "Bash(git reset --hard *)"] + HOME_KEY_DENY
 
 
 def ensure_gitignore(ctx, lines):
@@ -14457,7 +14462,7 @@ def ui_run(ctx, job, script, out_dir, real_app=True):
     dconf = desktop_conf(rctx)
     if not dconf:
         desktop_missing(rctx, v.get("worktree"))
-    ok, why = playwright_ok()
+    ok, why = (True, "") if v.get("box") else playwright_ok()  # a box has its own Playwright and Chromium
     if not ok:
         return {"skipped": "Playwright is not available (%s): run /auto-factory:code install" % why}
     info = app_start(ctx, job)
@@ -14489,8 +14494,16 @@ def ui_run(ctx, job, script, out_dir, real_app=True):
                       FACTORY_UI_BLOCK_STATUS=str(rctx.c("ui_checks.block_on_status", 500)),
                       FACTORY_UI_DESIGN=denv["FACTORY_UI_DESIGN"], **desk_env)
     try:
-        p = run(["node", script], cwd=v["worktree"], check=False, env=env,
-                timeout=int(rctx.c("e2e_timeout_sec", 1800)), group=True)
+        if v.get("box"):
+            # a colleague's merge request: the browser runs in its box too, and only the results come back
+            b = v["box"]
+            box_put(b, [SKILL_DIR, out_dir, dtmp, script])
+            p = box_exec(b, "node %s" % shlex.quote(script), v["worktree"], env,
+                         timeout=int(rctx.c("e2e_timeout_sec", 1800)))
+            box_get(b, [out_dir])
+        else:
+            p = run(["node", script], cwd=v["worktree"], check=False, env=env,
+                    timeout=int(rctx.c("e2e_timeout_sec", 1800)), group=True)
         log = p.stdout or ""
     except subprocess.TimeoutExpired:
         log, p = "ui check timed out", None
@@ -17847,6 +17860,20 @@ def doctor_checks(ctx, issue=None, session=True, live=False):
     if session:
         add("job clones and fx allowed without prompts", local_settings_ok(ctx),
             "" if local_settings_ok(ctx) else "run /auto-factory:code init")
+        try:
+            denied = (json.loads(read(local_settings_path(ctx), "{}") or "{}").get("permissions") or {}).get("deny") or []
+        except ValueError:
+            denied = []
+        left = [r for r in HOME_KEY_DENY if r not in denied]
+        add("agents kept from reading this machine's key files (advice)", True,
+            "run /auto-factory:code init to add %s" % ", ".join(left) if left else "")
+    if live:
+        ok_, why_ = sandbox_state()
+        add("sandbox for colleagues' merge requests (advice)", True,
+            "ready (%s)" % SANDBOX_VM if ok_ else "%s; until then /auto-factory:review stops before running a merge "
+                                                  "request" % why_)
+    for line in aws_key_advice(ctx):
+        add("keys on this machine (advice)", True, line)
     if live:
         for name, ok, detail in scanner_probes(ctx, ctx.code() if heads.get(base) else None):
             add(name, ok, detail)
@@ -18447,6 +18474,24 @@ def baselines_key_file(ctx, mode):
     path = os.path.join(baselines_key_dir(ctx), "s3-%s.env" % mode)
     old = baselines_old_key_file(ctx, mode)
     return old if os.path.exists(old) and not os.path.exists(path) else path
+
+
+def aws_key_advice(ctx):
+    """Lines of advice about keys that would hurt most if code on this machine read them: a long-lived key (AKIA...) in
+    the default AWS profile, and long-lived storage keys of the factory. Reads key ids only, never prints a secret."""
+    said = []
+    creds = read(os.path.expanduser("~/.aws/credentials"), "") or ""
+    m = re.search(r"(?ms)^\[default\](.*?)(?=^\[|\Z)", creds)
+    if m and re.search(r"(?mi)^\s*aws_access_key_id\s*=\s*AKIA", m.group(1)):
+        said.append("the default AWS profile holds a long-lived key: prefer SSO or a role, and keep administrator keys "
+                    "off the machine that runs the factory")
+    if getattr(ctx, "cfg", None):
+        for mode in ("read", "write", "jobs-write"):
+            vals = baselines_parse_keys(read(baselines_key_file(ctx, mode), "") or "")
+            if (vals.get("AWS_ACCESS_KEY_ID") or "").startswith("AKIA"):
+                said.append("the factory's %s storage key is long-lived: give it only this project's prefix (read-only "
+                            "where it only reads) and rotate it" % mode)
+    return said
 
 
 def key_deny_rules(ctx):
@@ -21261,6 +21306,353 @@ class ReviewBoxCtx:
         return self._ctx.c(dotted, default)
 
 
+# --------------------------------------------------------------------------
+# Sandbox: where a colleague's merge request runs. One Linux VM per machine (Lima, `fx-sandbox`) that mounts nothing of
+# this machine and has its own Docker, never this machine's. Inside it each review is its own box (a Sysbox system
+# container): its own files, its own Docker (a compose stack works), database, volumes and network, all deleted when the
+# review ends; no writable cache is shared between boxes. A box reaches the internet only while its dependencies
+# install, through a proxy of its own that lets through only the allowed registries (sandbox.allow adds more, each
+# confirmed by the user); after that it has no way out. Its ports are forwarded to this machine's 127.0.0.1 only. Paths
+# in the box are the paths of this machine, so the factory's commands (setup, app.up, review.checks) run unchanged.
+
+SANDBOX_VM = "fx-sandbox"
+SANDBOX_READY = "/etc/fx-sandbox-ready"
+SANDBOX_BASE = "fx-box"  # the box image the VM builds: Ubuntu with systemd and Docker, Node, Playwright and Chromium
+SANDBOX_PORT0 = 20000  # a box's own ports, forwarded to the app's 127.0.0.1:<port> inside it
+SANDBOX_ALLOW = ["registry.npmjs.org", "registry.yarnpkg.com", "repo.packagist.org", "packagist.org",
+                 "codeload.github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org",
+                 "repo.maven.apache.org", "repo1.maven.org", "registry-1.docker.io", "auth.docker.io",
+                 "production.cloudflare.docker.com", "mcr.microsoft.com", "*.data.mcr.microsoft.com"]
+SANDBOX_ENV_DROP = {"PATH", "HOME", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME", "TMPDIR", "SHLVL", "_", "NODE_PATH"}
+
+
+class NoSandbox(FxError):
+    """The sandbox is not there or not as it must be (not installed, stopped, mounting this machine's folders)."""
+
+
+def sandbox_template():
+    """The VM's Lima template with the Playwright and axe-core versions fx pins, in a temporary file."""
+    text = read(os.path.join(SKILL_DIR, "sandbox", "fx-sandbox.yaml"), "") or ""
+    text = text.replace("{PLAYWRIGHT}", PLAYWRIGHT_VERSION).replace("{AXE}", AXE_CORE_VERSION)
+    path = os.path.join(tempfile.mkdtemp(prefix="fx-sandbox-"), "fx-sandbox.yaml")
+    write_atomic(path, text)
+    return path
+
+
+def vm_run(argv, data=None, timeout=900, merge=True):
+    """A command in the sandbox VM, as its user (sudo where it says). stdout (and stderr with merge) as bytes."""
+    cmd = ["limactl", "shell", "--workdir", "/", SANDBOX_VM, "--"] + list(argv)
+    return subprocess.run(cmd, input=data, stdout=subprocess.PIPE, stderr=subprocess.STDOUT if merge else subprocess.PIPE,
+                          timeout=timeout)
+
+
+def vm_text(p):
+    return (p.stdout or b"").decode("utf-8", "replace")
+
+
+def sandbox_state():
+    """(ok, why): Lima is there, the VM runs, its provisioning finished, and it sees nothing of this machine."""
+    if not shutil.which("limactl"):
+        return False, "Lima (limactl) is not installed on this machine: fx sandbox install says how"
+    try:
+        p = subprocess.run(["limactl", "list", "--json"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, "limactl list failed: %s" % e
+    rows = []
+    for line in (p.stdout or b"").decode("utf-8", "replace").splitlines():
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            pass
+    vm = next((r for r in rows if isinstance(r, dict) and r.get("name") == SANDBOX_VM), None)
+    if not vm:
+        return False, "the sandbox VM %s does not exist: fx sandbox install" % SANDBOX_VM
+    if vm.get("status") != "Running":
+        return False, "the sandbox VM %s is %s: limactl start %s" % (SANDBOX_VM, vm.get("status") or "not running",
+                                                                     SANDBOX_VM)
+    try:
+        if vm_run(["test", "-f", SANDBOX_READY], timeout=60).returncode != 0:
+            return False, "the sandbox VM is still being set up, or its set-up failed: fx sandbox install"
+        # Lima mounts the home folder at its own path unless told not to: the VM must see nothing of this machine.
+        if vm_run(["test", "-e", os.path.expanduser("~")], timeout=60).returncode == 0:
+            return False, "the sandbox VM sees this machine's home folder (a mount): fx sandbox reset"
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, "the sandbox VM does not answer: %s" % e
+    return True, ""
+
+
+def sandbox_allow(ctx):
+    """The hosts a box may reach while it installs: the registries above and sandbox.allow (each one the user
+    confirmed). Never an address: a filter of names only."""
+    extra = ctx.c("sandbox.allow", []) if ctx else []
+    extra = [extra] if isinstance(extra, str) else extra if isinstance(extra, list) else []
+    hosts = []
+    for h in SANDBOX_ALLOW + [str(x).strip().lower() for x in extra]:
+        # a name whose last part is letters: an address (1.2.3.4) is never let through
+        if re.match(r"^(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$", h) and h not in hosts:
+            hosts.append(h)
+    return hosts
+
+
+def sandbox_filter(hosts):
+    """tinyproxy's filter: one anchored pattern per host (*.x: any name under x)."""
+    return "".join("^%s$\n" % (r"(.*\.)?" + re.escape(h[2:]) if h.startswith("*.") else re.escape(h)) for h in hosts)
+
+
+def box_name(job_id):
+    return "fxbox-%s-%s" % (re.sub(r"[^a-z0-9]+", "-", str(job_id).lower()).strip("-")[-36:] or "x", secrets.token_hex(3))
+
+
+def box_image(ctx):
+    """The image a box starts from: the VM's base, or the base with this repository's sandbox.prepare commands (tools a
+    project's setup needs, such as php and composer), built once in the VM from the factory's own settings and only
+    read by the boxes."""
+    prep = ctx.c("sandbox.prepare", []) if ctx else []
+    prep = [prep] if isinstance(prep, str) else [str(x) for x in prep or []]
+    if not prep:
+        return SANDBOX_BASE
+    tag = "%s-%s" % (SANDBOX_BASE, hashlib.sha256("\n".join(prep).encode()).hexdigest()[:12])
+    if vm_run(["sudo", "docker", "image", "inspect", tag], timeout=60).returncode == 0:
+        return tag
+    df = "FROM %s\n" % SANDBOX_BASE + "".join("RUN %s\n" % c for c in prep)
+    p = vm_run(["sudo", "docker", "build", "-t", tag, "-"], data=df.encode(), timeout=3600)
+    if p.returncode != 0:
+        raise NoSandbox("building the box image from sandbox.prepare failed:\n%s" % vm_text(p)[-1500:], code=3)
+    return tag
+
+
+def box_create(ctx, job_id, port, nports, image=None):
+    """A box for one review: its own network, its own proxy (for installing only), its ports forwarded to this
+    machine's 127.0.0.1:<port>..<port+nports-1>. The box only sees what box_put copies into it."""
+    name = box_name(job_id)
+    net, proxy = name + "-net", name + "-proxy"
+    image = image or box_image(ctx)
+    pub = " ".join("-p 127.0.0.1:%d:%d" % (port + i, SANDBOX_PORT0 + i) for i in range(nports))
+    conf = ("Port 8888\nListen 0.0.0.0\nTimeout 600\nFilterDefaultDeny Yes\nFilterExtended Yes\n"
+            "Filter \"/etc/tinyproxy/filter\"\nConnectPort 443\nConnectPort 80\nLogLevel Connect\n")
+    script = r"""set -e
+d=/opt/fx-boxes/{name}; mkdir -p $d
+printf %s {conf} > $d/fx.conf
+printf %s {filt} > $d/filter
+docker network create --driver bridge {net} >/dev/null
+sub=$(docker network inspect -f '{{{{(index .IPAM.Config 0).Subnet}}}}' {net})
+docker run -d --name {proxy} -v $d/fx.conf:/etc/tinyproxy/fx.conf:ro -v $d/filter:/etc/tinyproxy/filter:ro fx-proxy >/dev/null
+docker network connect {net} {proxy}
+pip=$(docker inspect -f '{{{{(index .NetworkSettings.Networks "{net}").IPAddress}}}}' {proxy})
+for chain in DOCKER-USER INPUT; do
+  iptables -I $chain -s $sub -j DROP -m comment --comment {name}
+done
+iptables -I DOCKER-USER -s $sub -d $pip -p tcp --dport 8888 -j ACCEPT -m comment --comment {name}
+for chain in DOCKER-USER INPUT; do
+  iptables -I $chain -s $sub -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT -m comment --comment {name}
+done
+docker run -d --runtime=sysbox-runc --name {name} --hostname box --network {net} --dns 127.0.0.1 {pub} {image} >/dev/null
+echo "subnet=$sub"
+echo "proxy=$pip"
+""".format(name=name, net=net, proxy=proxy, pub=pub, image=shlex.quote(image), conf=shlex.quote(conf),
+           filt=shlex.quote(sandbox_filter(sandbox_allow(ctx))))
+    p = vm_run(["sudo", "bash", "-c", script], timeout=600)
+    box = {"name": name, "net": net, "proxy": proxy, "port": port, "nports": nports, "online": True, "image": image}
+    for line in vm_text(p).splitlines():
+        k, _, v = line.partition("=")
+        if k in ("subnet", "proxy") and v:
+            box["subnet" if k == "subnet" else "proxy_ip"] = v.strip()
+    if p.returncode != 0 or not box.get("proxy_ip"):
+        box_destroy(box)
+        raise NoSandbox("the box could not be made in the sandbox VM:\n%s" % vm_text(p)[-1500:], code=3)
+    # Its Docker comes up with systemd; then the forwarders of its ports, and its Docker's own proxy for image pulls.
+    proxy_url = "http://%s:8888" % box["proxy_ip"]
+    init = r"""set -e
+for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
+docker info >/dev/null
+mkdir -p /etc/systemd/system/docker.service.d
+printf '[Service]\nEnvironment="HTTP_PROXY={p}" "HTTPS_PROXY={p}" "NO_PROXY=localhost,127.0.0.1"\n' > /etc/systemd/system/docker.service.d/fx-proxy.conf
+systemctl daemon-reload && systemctl restart docker
+for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
+for i in $(seq 0 {last}); do
+  setsid socat TCP-LISTEN:$(({p0}+i)),fork,reuseaddr TCP:127.0.0.1:$(({port}+i)) >/dev/null 2>&1 < /dev/null &
+done
+""".format(p=proxy_url, last=nports - 1, p0=SANDBOX_PORT0, port=port)
+    p = vm_run(["sudo", "docker", "exec", name, "bash", "-c", init], timeout=300)
+    if p.returncode != 0:
+        box_destroy(box)
+        raise NoSandbox("the box did not start its own Docker:\n%s" % vm_text(p)[-1500:], code=3)
+    return box
+
+
+def box_cut(box):
+    """The installing is over: the box's proxy goes, and with it the box's only way out."""
+    if not box or not box.get("online"):
+        return
+    script = r"""iptables -D DOCKER-USER -s {sub} -d {pip} -p tcp --dport 8888 -j ACCEPT -m comment --comment {name} || true
+docker rm -f {proxy} >/dev/null 2>&1 || true
+""".format(sub=box.get("subnet"), pip=box.get("proxy_ip"), name=box["name"], proxy=box["proxy"])
+    vm_run(["sudo", "bash", "-c", script], timeout=120)
+    box["online"] = False
+
+
+def box_destroy(box):
+    """The box, its proxy, network and firewall rules go: nothing of this review is left for another."""
+    if not box:
+        return
+    script = r"""docker rm -f {name} {proxy} >/dev/null 2>&1 || true
+docker network rm {net} >/dev/null 2>&1 || true
+for chain in DOCKER-USER INPUT; do
+  iptables -S $chain 2>/dev/null | grep -- "--comment {name}" | sed 's/^-A/-D/' | while read -r rule; do iptables $rule || true; done
+done
+rm -rf /opt/fx-boxes/{name}
+""".format(name=box["name"], proxy=box["proxy"], net=box["net"])
+    try:
+        vm_run(["sudo", "bash", "-c", script], timeout=300)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    box["online"] = False
+
+
+def box_put(box, paths, exclude=()):
+    """Copies folders or files of this machine into the box, at the same paths."""
+    rels = [p.lstrip("/") for p in paths if p and os.path.exists(p)]
+    if not rels:
+        return
+    tar = ["tar", "-C", "/", "-cf", "-"] + ["--exclude=%s" % e for e in exclude] + rels
+    # COPYFILE_DISABLE: macOS' tar would add a ._ file of Finder data next to each file, which the project would see.
+    data = subprocess.run(tar, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                          env=dict(os.environ, COPYFILE_DISABLE="1")).stdout
+    p = vm_run(["sudo", "docker", "exec", "-i", box["name"], "tar", "-C", "/", "-xf", "-"], data=data, timeout=900)
+    if p.returncode != 0:
+        raise NoSandbox("copying into the box failed: %s" % vm_text(p)[-500:], code=3)
+
+
+def box_get(box, paths):
+    """Copies what the box wrote at these paths back to the same paths here: logs, reports, screenshots. Data only."""
+    rels = [p.lstrip("/") for p in paths if p]
+    if not rels:
+        return
+    p = vm_run(["sudo", "docker", "exec", box["name"], "tar", "-C", "/", "--ignore-failed-read", "-cf", "-"] + rels,
+               timeout=600, merge=False)
+    if p.returncode != 0 or not p.stdout:
+        return
+    # Only regular files and folders, and only under the paths asked for: a box writes no link onto this machine.
+    import io as _io
+    with tarfile.open(fileobj=_io.BytesIO(p.stdout)) as t:
+        for m in t.getmembers():
+            target = os.path.normpath(os.path.join("/", m.name))
+            if not any(target == os.path.normpath(x) or target.startswith(os.path.normpath(x) + os.sep) for x in paths):
+                continue
+            if m.isdir():
+                os.makedirs(target, exist_ok=True)
+            elif m.isfile():
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with t.extractfile(m) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+
+
+def box_env(box, env):
+    """What a command in the box gets of env: only what fx set for it (its port, database, URLs, app.env...), never
+    this machine's PATH, HOME or user; and the proxy while the box installs."""
+    base = os.environ
+    got = {k: v for k, v in (env or {}).items() if k not in SANDBOX_ENV_DROP and (k not in base or base[k] != v)}
+    got.update({k: v for k, v in (env or {}).items() if k in ("LANG", "TZ") or k.startswith("LC_")})
+    if box.get("online") and box.get("proxy_ip"):
+        url = "http://%s:8888" % box["proxy_ip"]
+        for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            got[k] = url
+        got["NO_PROXY"] = got["no_proxy"] = "localhost,127.0.0.1,::1"
+    return got
+
+
+def box_argv(box, cmd, cwd, env, detach=False):
+    argv = ["sudo", "docker", "exec"] + (["-d"] if detach else ["-i"]) + ["-w", cwd or "/"]
+    for k, v in sorted(box_env(box, env).items()):
+        argv += ["-e", "%s=%s" % (k, v)]
+    return argv + [box["name"], "bash", "-lc", cmd]
+
+
+class BoxRun:
+    def __init__(self, returncode, stdout):
+        self.returncode, self.stdout = returncode, stdout
+
+
+def box_exec(box, cmd, cwd, env, timeout=1800):
+    """A project command in the box, like run(login_shell(...)): its exit code and output (stdout and stderr)."""
+    p = vm_run(box_argv(box, cmd, cwd, env), timeout=timeout)
+    return BoxRun(p.returncode, vm_text(p))
+
+
+def box_spawn(box, cmd, cwd, env, log, key):
+    """A long-running command (app.up) in the box, in its own process group, its output appended to log (a path the box
+    has, copied back by box_get). key names it for box_kill."""
+    pidf = "/run/fx-%s.pid" % re.sub(r"[^A-Za-z0-9_.-]", "-", key)
+    wrapped = "mkdir -p %s; setsid bash -lc %s >> %s 2>&1 < /dev/null & echo $! > %s" % (
+        shlex.quote(os.path.dirname(log)), shlex.quote(cmd), shlex.quote(log), pidf)
+    p = vm_run(box_argv(box, wrapped, cwd, env), timeout=120)
+    if p.returncode != 0:
+        raise FxError("the app could not be started in the box: %s" % vm_text(p)[-500:], code=3)
+
+
+def box_kill(box, key):
+    pidf = "/run/fx-%s.pid" % re.sub(r"[^A-Za-z0-9_.-]", "-", key)
+    vm_run(["sudo", "docker", "exec", box["name"], "bash", "-c",
+            "test -f %s && kill -TERM -- -$(cat %s) 2>/dev/null; sleep 2; test -f %s && kill -KILL -- -$(cat %s) "
+            "2>/dev/null; rm -f %s; true" % ((pidf,) * 5)], timeout=60)
+
+
+def box_factory_paths(ctx):
+    """What of the factory repository a box gets: its scripts and settings (stack/, checks/, factory.json...), never
+    jobs/ (other reviews), local/, .git or .claude."""
+    return [ctx.factory]
+
+
+BOX_FACTORY_EXCLUDE = ("jobs", "local", ".git", ".claude", "baseline.json")
+
+
+def cmd_sandbox(ctx, a):
+    """The machine's sandbox VM: status, install (create and start it), reset (delete and make it again), clean (boxes
+    a crashed review left)."""
+    if a.action == "status":
+        ok, why = sandbox_state()
+        out({"ok": ok, "vm": SANDBOX_VM, "why": why or None, "allow": sandbox_allow(ctx),
+             "next": "go on" if ok else "fx sandbox install"})
+        return
+    if a.action in ("install", "reset"):
+        if not shutil.which("limactl"):
+            out({"ok": False, "why": "Lima is not installed", "install": {
+                "macOS": "brew install lima", "Linux and WSL": "https://lima-vm.io/docs/installation/ (QEMU and KVM)"},
+                 "next": "install Lima, then fx sandbox install again"})
+            sys.exit(3)
+        if a.action == "reset":
+            subprocess.run(["limactl", "delete", "--force", SANDBOX_VM], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        ok, why = sandbox_state()
+        if not ok:
+            names = (subprocess.run(["limactl", "list", "--format", "{{.Name}}"], stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL).stdout or b"").decode().split()
+            if SANDBOX_VM not in names:
+                p = subprocess.run(["limactl", "create", "--name", SANDBOX_VM, "--tty=false", sandbox_template()])
+                if p.returncode != 0:
+                    raise NoSandbox("limactl create failed (exit %d)" % p.returncode, code=3)
+            p = subprocess.run(["limactl", "start", "--tty=false", SANDBOX_VM])
+            if p.returncode != 0:
+                raise NoSandbox("limactl start failed (exit %d): limactl shell %s, then sudo tail "
+                                "/var/log/cloud-init-output.log" % (p.returncode, SANDBOX_VM), code=3)
+            ok, why = sandbox_state()
+        out({"ok": ok, "vm": SANDBOX_VM, "why": why or None, "next": "go on" if ok else "fix what fx said"})
+        if not ok:
+            sys.exit(3)
+        return
+    if a.action == "clean":
+        ok, why = sandbox_state()
+        if not ok:
+            raise NoSandbox(why, code=3)
+        p = vm_run(["sudo", "docker", "ps", "-a", "--filter", "name=^fxbox-", "--format", "{{.Names}}"], timeout=120)
+        names = [n for n in vm_text(p).split() if not n.endswith("-proxy")]
+        for n in names:
+            box_destroy({"name": n, "proxy": n + "-proxy", "net": n + "-net"})
+        out({"ok": True, "removed": names})
+        return
+    raise FxError("fx sandbox status | install | reset | clean", code=3)
+
+
 def review_box_ctx(ctx, repo):
     return ReviewBoxCtx(ctx, repo)
 
@@ -21268,7 +21660,8 @@ def review_box_ctx(ctx, repo):
 def review_box(ctx, job):
     """What the app helpers take for a job: its own id, clone and port, and its logs kept in the round's folder."""
     box = job["sandbox"]
-    return {"id": box["id"], "worktree": box["dir"], "port": box["port"], "app_dir": review_run_dir(ctx, job)}
+    return {"id": box["id"], "worktree": box["dir"], "port": box["port"], "app_dir": review_run_dir(ctx, job),
+            "box": box.get("box")}
 
 
 def review_run_dir(ctx, job):
@@ -21290,8 +21683,9 @@ def review_sandbox_stop(ctx, job):
         return
     try:
         app_stop(review_box_ctx(ctx, review_repo(ctx, job)), review_box(ctx, job))
-    except FxError:
+    except (FxError, OSError, subprocess.SubprocessError):
         pass
+    box_destroy(box.get("box"))  # its files, Docker, database and network: nothing is left for another review
     shutil.rmtree(box.get("dir") or "", ignore_errors=True)
     job["sandbox"] = None
 
@@ -21314,7 +21708,45 @@ def review_cannot_run(ctx, job, why, log=None):
     raise FxError("the code cannot run in a sandbox, so this review stops here: %s" % why, code=3, extra={
         "next": "ask-no-sandbox", "waive": review_waive_code(job, why), "log": log,
         "then": "%s review sandbox %s --skip --reason \"<the person's reason>\" --confirm <waive>" % (
-            FX_CMD, shlex.quote(job["id"]))})
+            FX_CMD, shlex.quote(job["id"])),
+        "or_on_host": "%s review sandbox %s --host --reason \"<the person's reason>\" --confirm <waive> (runs the merge "
+                      "request's code on this machine, without isolation)" % (FX_CMD, shlex.quote(job["id"]))})
+
+
+def review_host_builds(ctx, job, bctx):
+    """A mobile app and a desktop app's real build are made and run on this machine (Xcode, Gradle and the emulators,
+    Windows), not in the box: the report and the Jira comment say so. Their API is the box's, on 127.0.0.1."""
+    lines = []
+    if mobile_conf(bctx):
+        lines.append("Isolation: the mobile app was built and run on the reviewer's machine, not in the sandbox "
+                     "(its API ran in the sandbox)")
+    dconf = desktop_conf(bctx)
+    if dconf and (dconf.get("build") or {}).get("windows"):
+        lines.append("Isolation: the desktop app's real build ran on the reviewer's Windows, not in the sandbox (its "
+                     "web part and API ran in the sandbox)")
+    new = [x for x in lines if x not in (job.get("not_checked") or [])]
+    if new:
+        job["not_checked"] = (job.get("not_checked") or []) + new
+        ctx.save(job, "built on this machine: %s" % "; ".join(new))
+
+
+def review_host_waiver(ctx, job, a):
+    """The person reviewing chose to run the merge request on this machine, without the sandbox: only after the sandbox
+    failed, with their reason and the code fx printed. It shows in the report and the Jira comment."""
+    why = job.get("sandbox_failed")
+    if not why:
+        raise FxError("nothing stopped the sandbox: run fx review sandbox %s. It runs on this machine only after the "
+                      "sandbox failed, and only when the person reviewing says so" % job["id"], code=3)
+    if a.confirm != review_waive_code(job, why):
+        raise FxError("--confirm does not match the code fx printed when the sandbox failed", code=3)
+    reason = (a.reason or "").strip()
+    if not reason:
+        raise FxError("--host needs --reason: the person's own words, which also go in the Jira comment", code=3)
+    line = "Sandbox: the code ran on the reviewer's machine without isolation (%s)" % reason
+    if line not in (job.get("not_checked") or []):
+        job["not_checked"] = (job.get("not_checked") or []) + [line]
+    job["on_host"] = reason
+    ctx.save(job, "the person reviewing ran it on this machine: %s" % reason)
 
 
 def review_sandbox_skip(ctx, job, a):
@@ -21674,6 +22106,9 @@ def review_sandbox(ctx, a):
     if a.skip:
         review_sandbox_skip(ctx, job, a)
         return
+    on_host = bool(getattr(a, "host", False))
+    if on_host:
+        review_host_waiver(ctx, job, a)
     if review_box_up(ctx, job):
         box = job["sandbox"]
         out({"ok": True, "review": job["id"], "url": box["url"], "commit": box["commit"], "reused": True, "next": "runner"})
@@ -21684,6 +22119,10 @@ def review_sandbox(ctx, a):
         where = ("`app` of %s in review.repos in factory.json" % repo["name"] if repo.get("legacy") else
                  "app.up in factory.json" if len(ctx.repos) <= 1 else "`app` of %s in repos in factory.json" % repo["name"])
         review_cannot_run(ctx, job, "%s says nothing about how to start this repository" % where)
+    if not on_host:
+        ok, why = sandbox_state()
+        if not ok:  # nothing of the merge request has run yet, and nothing does on this machine unless the person says so
+            review_cannot_run(ctx, job, "no sandbox on this machine: %s" % why)
     rdir = review_run_dir(ctx, job)
     os.makedirs(rdir, exist_ok=True)
     # Merged: what the ticket got is the target as it is now, later fixes included. Open: the merge request's own head.
@@ -21702,18 +22141,30 @@ def review_sandbox(ctx, a):
             git(["checkout", "-q", "--detach", commit], wt)
             if not repo.get("legacy"):
                 copy_local_files(ctx, wt, repo.get("repo"))
+            if not on_host:
+                b = box_create(bctx, job["id"], box["port"], ports_step(ctx))
+                box["box"] = b
+                ctx.save(job, "sandbox box %s" % b["name"])  # so a crash leaves a name to clean up
+                box_put(b, [wt])
+                box_put(b, [ctx.factory], exclude=[os.path.join(ctx.factory, x).lstrip("/") for x in BOX_FACTORY_EXCLUDE])
+                box_exec(b, "mkdir -p %s" % shlex.quote(rdir), "/", {}, timeout=60)
             cmd = bctx.c("setup", "")
             if cmd:
                 try:
                     env = checks_env(bctx, review_box(ctx, job))
-                    p = run(login_shell(bctx, cmd, env), cwd=wt, check=False, env=env,
-                            timeout=int(ctx.c("setup_timeout_sec", 1800)), group=True)
+                    if on_host:
+                        p = run(login_shell(bctx, cmd, env), cwd=wt, check=False, env=env,
+                                timeout=int(ctx.c("setup_timeout_sec", 1800)), group=True)
+                    else:  # installing: the box's only time with a way out, through its proxy
+                        p = box_exec(box["box"], cmd, wt, env, timeout=int(ctx.c("setup_timeout_sec", 1800)))
                 except subprocess.TimeoutExpired:
                     raise FxError("setup timed out", code=3)
                 write_atomic(log, p.stdout or "")
                 if p.returncode != 0:
                     raise FxError("setup failed (exit %d), see %s" % (p.returncode, log), code=3)
             started = app_start(bctx, review_box(ctx, job))
+            if not on_host:
+                box_cut(box["box"])  # its images are pulled and it is up: from here on, no way out
         except FxError as e:
             review_sandbox_stop(ctx, job)
             review_cannot_run(ctx, job, str(e)[-600:], log=os.path.join(rdir, "app.log"))
@@ -21729,10 +22180,14 @@ def review_repo_checks(ctx, job, bctx):
     """The repository's own checks (a linter, a design-system check), whatever they say: the reviewers read the result."""
     rows, md = [], ["# The repository's own checks", ""]
     env, _ = app_env(bctx, review_box(ctx, job))
+    b = job["sandbox"].get("box")
     for cmd in bctx.c("review.checks", []) or []:
         try:
-            p = run(login_shell(bctx, cmd, env), cwd=job["sandbox"]["dir"], check=False, env=env,
-                    timeout=int(ctx.c("setup_timeout_sec", 1800)), group=True)
+            if b:
+                p = box_exec(b, cmd, job["sandbox"]["dir"], env, timeout=int(ctx.c("setup_timeout_sec", 1800)))
+            else:
+                p = run(login_shell(bctx, cmd, env), cwd=job["sandbox"]["dir"], check=False, env=env,
+                        timeout=int(ctx.c("setup_timeout_sec", 1800)), group=True)
             code, text = p.returncode, p.stdout or ""
         except subprocess.TimeoutExpired:
             code, text = -1, "timed out"
@@ -21855,8 +22310,11 @@ def review_exec(ctx, a):
     box = review_box(ctx, job)
     env, _ = app_env(review_box_ctx(ctx, review_repo(ctx, job)), box)
     try:
-        p = run(login_shell(ctx, a.command, env), cwd=box["worktree"], check=False, env=env,
-                timeout=REVIEW_EXEC_TIMEOUT)
+        if box.get("box"):
+            p = box_exec(box["box"], a.command, box["worktree"], env, timeout=REVIEW_EXEC_TIMEOUT)
+        else:
+            p = run(login_shell(ctx, a.command, env), cwd=box["worktree"], check=False, env=env,
+                    timeout=REVIEW_EXEC_TIMEOUT)
         code, text = p.returncode, p.stdout or ""
     except subprocess.TimeoutExpired:
         code, text = -1, "timed out after %ds" % REVIEW_EXEC_TIMEOUT
@@ -21883,6 +22341,7 @@ def review_ui(ctx, a):
     # the design package the user chose for this review is what t.design measures against
     rep_ = ui_run(bctx, dict(review_box(ctx, job), design=job.get("design"), phones=job.get("phones")), kept, where)
     write_atomic(os.path.join(where, "ui.md"), ui_markdown(rep_))
+    review_host_builds(ctx, job, bctx)
     shots = [sh["file"] for sh in rep_.get("shots", [])]
     # A script that never got a browser, or crashed, looked at nothing: status 0, as for a call that reached nothing.
     status = 0 if rep_.get("skipped") or rep_.get("error") else 200
@@ -23191,6 +23650,10 @@ def app_start_one(ctx, job):
     fh = open(log, "ab")
     fh.write(("\n==== %s starting: %s\n" % (now(), app_fill(up, job, db))).encode())
     fh.flush()
+    if job.get("box"):
+        # a colleague's merge request: it starts in its review's box, never on this machine
+        fh.close()
+        return box_app_start(ctx, job, app_fill(up, job, db), env, log, url, db)
     p = subprocess.Popen(login_shell(ctx, app_fill(up, job, db), env), cwd=job["worktree"], env=env,
                          stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     write_atomic(app_state_path(ctx, job), json.dumps({"pid": p.pid, "started": now(), "log": log, "db": db}))
@@ -23208,6 +23671,26 @@ def app_start_one(ctx, job):
     tail = "\n".join((read(log, "") or "").splitlines()[-30:])
     app_stop_one(ctx, job)
     raise FxError("%s did not come up at %s within %ss; last lines of %s:\n%s" % (app_of(job), url, limit, log, tail),
+                  code=3, extra={"log": log})
+
+
+def box_app_start(ctx, job, cmd, env, log, url, db):
+    """app.up in the review's box: started there, its log copied back here, its port forwarded to 127.0.0.1."""
+    box = job["box"]
+    box_spawn(box, cmd, job["worktree"], env, log, "app-%s" % job["port"])
+    write_atomic(app_state_path(ctx, job), json.dumps({"box": box["name"], "detached": True, "started": now(),
+                                                       "log": log, "db": db}))
+    limit = int(ctx.c("app.start_timeout_sec", 180))
+    t0 = time.time()
+    while time.time() - t0 < limit:
+        if http_up(url):
+            box_get(box, [log])
+            return {"url": app_url(ctx, job, "/"), "health": url, "reused": False, "log": log, "db": db}
+        time.sleep(1)
+    box_get(box, [log])
+    tail = "\n".join((read(log, "") or "").splitlines()[-30:])
+    raise FxError("%s did not come up at %s within %ss in its box; last lines of %s:\n%s" % (app_of(job), url, limit,
+                                                                                         log, tail),
                   code=3, extra={"log": log})
 
 
@@ -23235,6 +23718,13 @@ def app_stop_one(ctx, job):
         pass
     env, db = app_env(ctx, job, make=False)  # stopping needs no lane's copy: none is made only to be deleted
     down = ctx.c("app.down")
+    if job.get("box"):
+        if down:
+            box_exec(job["box"], app_fill(down, job, db), job["worktree"], env, timeout=180)
+        box_kill(job["box"], "app-%s" % job["port"])
+        if os.path.exists(app_state_path(ctx, job)):
+            os.remove(app_state_path(ctx, job))
+        return {"stopped": True}
     if down and os.path.isdir(job.get("worktree") or ""):
         try:
             run(login_shell(ctx, app_fill(down, job, db), env), cwd=job["worktree"], check=False, env=env,
@@ -24920,6 +25410,10 @@ def build_parser():
     s.add_argument("job", nargs="?")
     s.add_argument("--code", action="store_true", help="check: also that the cited code reads each variable (base)")
     s.set_defaults(fn=cmd_limits)
+    s = sub.add_parser("sandbox", help="the sandbox VM where colleagues' merge requests run: status, install, reset, "
+                                       "clean")
+    s.add_argument("action", choices=["status", "install", "reset", "clean"])
+    s.set_defaults(fn=cmd_sandbox)
     s = sub.add_parser("permissions", help="the permission table: check, try on a job's app, mark confirmed, fix tasks, "
                                            "apply a merged job's additions")
     s.add_argument("action", choices=["check", "try", "mark", "tasks", "apply"])
@@ -25250,7 +25744,9 @@ def build_parser():
                                      "code printed when the sandbox failed")
     s.add_argument("--skip", action="store_true", help="sandbox: go on without running the code, only after it failed to "
                                                        "start and the reviewer said so")
-    s.add_argument("--reason", help="sandbox --skip: why, in the person's words; it goes in the Jira comment")
+    s.add_argument("--host", action="store_true", help="sandbox: run it on this machine, without the sandbox, only after "
+                                                       "it failed to start and the reviewer said so (--reason, --confirm)")
+    s.add_argument("--reason", help="sandbox --skip or --host: why, in the person's words; it goes in the Jira comment")
     s.add_argument("--req", help="call, exec: which requirement of the checklist this is for, like R1")
     s.add_argument("--case", help="call: which case this tries, like \"wrong password\"")
     s.add_argument("--method", help="call: GET unless said")
@@ -25370,7 +25866,7 @@ def main(argv=None):
             except FxError:
                 ctx = None
         else:
-            ctx = Ctx(require_config=a.fn not in (cmd_init, cmd_doctor, cmd_reference, cmd_tools))
+            ctx = Ctx(require_config=a.fn not in (cmd_init, cmd_doctor, cmd_reference, cmd_tools, cmd_sandbox))
         # setup, gate and candidates go on the board themselves, once they have their place on the machine
         step = {cmd_pr: "push"}.get(a.fn)
         ref = getattr(a, "job", None) if step and ctx and ctx.cfg else None

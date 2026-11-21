@@ -611,16 +611,42 @@ A merged merge request can be reviewed too, when a ticket has no open one: it re
 request's own diff and runs the target branch as it is now, and the report says so.
 
 **The sandbox is not optional, and there is no setting to turn it off.** If it cannot start, because
-`app.up` is missing or the app fails to come up, the review stops and asks you. You can fix it, stop,
-or go on without running the code, and that takes your reason in your own words, which is then printed
-on the Jira comment. It cannot be skipped before it has failed. Every comment says what really ran: the
-commit, the number of calls, each requirement's result, and what was simulated.
+the sandbox VM is not there, `app.up` is missing or the app fails to come up, the review stops before
+anything of the merge request runs, and asks you. You can fix it, stop, go on without running the code,
+or run it on this machine without isolation; the last two take your reason in your own words, which is
+then printed on the Jira comment. Neither can be chosen before the sandbox has failed. Every comment says
+what really ran: the commit, the number of calls, each requirement's result, and what was simulated.
 
-The merge request is a colleague's code running on your machine, so `app.up` has to keep it in a
-container, with fake values only, and fx passes it no credentials of its own. Also reach only what
-`environment.md` says: the factory cannot tell what else your compose file exposes. The log stays in
-`round-<N>/run/` and is never pushed to the jobs store. The sandbox and its clone are removed as soon as
-the run ends.
+**Where the code runs.** A merge request is a colleague's code nobody has reviewed yet, and its install
+scripts (`postinstall`, composer's scripts) run the moment it is set up. So fx runs it in a sandbox it
+enforces itself, not one a setting has to remember:
+
+- One Linux VM per machine, `fx-sandbox` (Lima; `fx sandbox install`, part of `/auto-factory:code
+  install`). It mounts nothing of this machine and has its own Docker, never this machine's.
+- Inside it, each review is its own box (a Sysbox container) with its own files, Docker (so a compose
+  stack works as it does here), database, volumes and network, deleted when the review ends. Boxes do
+  not see each other and share no writable cache. The clone and the factory's scripts are copied in at
+  the same paths, so `setup`, `app.up` and `review.checks` run unchanged; `jobs/`, `local/` and `.git` of
+  the factory repository are not copied.
+- The network: while dependencies install (`setup`, and the images its compose stack pulls) the box
+  reaches only package and image registries, through a proxy of its own (`sandbox.allow` adds a host,
+  such as a company registry, which you confirm). Then the proxy goes and the box has no way out at all:
+  the app, the checks, the runner's commands and the browser of the UI check run with no internet. The
+  app's ports reach this machine's `127.0.0.1` only.
+- A web and the mocked run of a desktop app are checked by a browser inside the box. A mobile app, and a
+  desktop app's real build on Windows, are built and run on this machine against the box's API; the
+  comment says so.
+- `sandbox.prepare` adds to the box image what a repository's setup needs (php and composer, a JDK),
+  built once in the VM from the factory's settings.
+
+The log stays in `round-<N>/run/` and is never pushed to the jobs store.
+
+**What the sandbox does not cover.** The agents themselves run on this machine. `init` writes rules that
+keep them from reading `~/.aws`, `~/.ssh` and the factory's keys (their Read tool, and shell commands
+such as `cat` that name those paths), but a script an agent writes and runs could still open a file. So
+keep the damage small: give the factory's storage keys only the project's prefix (read-only where they
+only read) and rotate them, keep an administrator AWS key and an SSH key that can push to production off
+the machine that runs the factory, and read what `fx doctor` advises about the keys it finds.
 
 What this does not force: an orchestrator that ignores `SKILL.md` and never calls `fx` is outside
 everything above, since fx can only refuse what goes through it. The hash chain shows a log edited by
@@ -1129,6 +1155,15 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
   without it.
 - What the base branch already gets wrong is listed for you, and each route becomes a fix task to start first.
 
+### Upgrading to 3.7: the review sandbox
+
+- `/auto-factory:review` runs nothing of a merge request until this machine has the sandbox VM:
+  `/auto-factory:code install` (step 7) or `fx sandbox install`, after `brew install lima` on macOS.
+- A repository whose setup needs tools (php, composer, a JDK) lists their install commands in
+  `sandbox.prepare`; a private registry goes in `sandbox.allow`.
+- Run `/auto-factory:code init` once more: it adds the rules that keep agents from this machine's key
+  files.
+
 ## Set up a project: `init`
 
 1. Create an empty private repository for the project's factory (for example
@@ -1329,6 +1364,7 @@ plugins/auto-factory/skills/code/     SKILL.md (/auto-factory:code), fx, mobile.
                                       commands, read only when one runs, so a job does not carry them;
                                       jira-push.md, jira-fetch.md: what the small agents that update
                                       Jira and read an issue without a token follow
+                                      sandbox/fx-sandbox.yaml: the VM where merge requests run
 plugins/auto-factory/skills/review/   SKILL.md (/auto-factory:review): follows the rules of code/SKILL.md
                                       and code/review.md
 plugins/auto-factory/skills/code/shared/  what the UI checks measure with: the screen comparer, the app

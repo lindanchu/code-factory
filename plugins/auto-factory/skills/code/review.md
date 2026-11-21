@@ -103,10 +103,17 @@ board that agent has finished.
      --reason "..."`, then the sandbox command again.
    - Exit code 3 with `next: ask-no-sandbox`: **stop**. Do not start anything yourself. Tell the
      user the `error` and the `log`, and ask with AskUserQuestion: fix it and try again (the
-     sandbox command again) / go on without running the code / stop the review (`fx review close
-     <id>`). Going on takes their reason in their own words: run the `then` command with `--reason`
-     and the `waive` code. It is printed on the ticket that the code was not run. Never choose
-     this yourself, and never because it would be quicker.
+     sandbox command again; a missing or stopped sandbox VM: `fx sandbox install`, with their yes,
+     /auto-factory:code install step 7) / go on without running the code / run it on this machine
+     without isolation / stop the review (`fx review close <id>`). Going on or running it here
+     takes their reason in their own words: run the `then` command (without running) or the
+     `or_on_host` command (on this machine), each with `--reason` and the `waive` code. The ticket
+     says which, and why. Never choose this yourself, and never because it would be quicker.
+     Running on this machine gives the colleague's code (its install scripts above all) this
+     machine's files and network: say so in the question.
+   - Everything of the merge request runs in its review's box in the sandbox VM (setup, the app,
+     the repository's checks, the runner's `exec` and the browser of `review ui`); a mobile app and
+     a desktop app's real build run on this machine against the box's API, and the comment says so.
 6. **Run:** at `next: runner`, `fx review ctx <id> --agent runner`, spawn it, then `fx review
    result <id>`. Exit code 6 with `retry_agent`: respawn it, giving it fx's error, up to twice. If
    it still does not pass, treat it as `ask-no-sandbox`: tell the user and ask. Tell the user in
