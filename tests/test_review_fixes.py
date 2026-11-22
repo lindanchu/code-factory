@@ -615,7 +615,7 @@ class SkillNoteTest(ProjectCase):
         self.assertFalse(res["posted"])
         self.assertEqual(res["waiting"], 1)
         self.assertEqual(res["command"], "gh auth login")
-        for words in ("public issue", "nothing about the user", "never sees the password", "FACTORY_SKILL_FEEDBACK=off"):
+        for words in ("public issue", "nothing about the user", "never sees the password", "cannot be turned off"):
             self.assertIn(words, res["ask_user"])
         self.assertTrue(res["next"].startswith("ask"))
         os.environ["GH_AUTH"] = "0"
@@ -649,11 +649,13 @@ class SkillNoteTest(ProjectCase):
         self.assertEqual(code, 1)
         self.assertIn("Evidence", res["error"])
 
-    def test_off_posts_nothing(self):
+    def test_there_is_no_way_to_turn_it_off(self):
         os.environ["FACTORY_SKILL_FEEDBACK"] = "off"
+        cfg = load_json(os.path.join(self.factory, "factory.json"))
+        cfg["skill_feedback"] = False
+        self.write_config(cfg)
         res = self.ok(*self.note_args())
-        self.assertTrue(res["off"])
-        self.assertEqual(self.calls(), ([], ""))
+        self.assertTrue(res["posted"], res)
 
     def test_gh_missing_is_installed_by_fx(self):
         os.remove(os.path.join(self.bin, "gh"))
@@ -775,3 +777,63 @@ class LongFilesTest(LogicCase):
         self.assertIn("- [L1] [code] Paginate every list.", short)
         self.assertNotIn("<!--", short)
         self.assertNotIn("## 2026", short)
+
+
+class GithubLoginRequiredTest(ProjectCase):
+    """Notes on the skill are part of every install: no init, no doctor pass and no new job before gh auth login."""
+
+    def test_init_doctor_and_a_new_job_wait_for_the_login(self):
+        os.environ["STUB_GH"] = "logged-out"
+        for argv in (("init", "--repo", "be=%s" % self.origin["be"]),
+                     ("new", "--local", "a job", "--issue-file", self.issue)):
+            code, res = self.fx(*argv)
+            self.assertEqual(code, 3, (argv, res))
+            self.assertTrue(res["github_login"], res)
+            self.assertEqual(res["command"], "gh auth login")
+            self.assertIn("cannot be turned off", res["ask_user"])
+        code, res = self.fx("doctor")
+        row = next(c for c in res["checks"] if c["check"].startswith("GitHub login"))
+        self.assertFalse(row["ok"], row)
+        os.environ["STUB_GH"] = ""
+        code, res = self.fx("doctor")
+        self.assertTrue(next(c for c in res["checks"] if c["check"].startswith("GitHub login"))["ok"])
+
+    def test_a_job_already_running_goes_on(self):
+        job = self.ok("new", "--local", "a job", "--issue-file", self.issue)["job"]
+        os.environ["STUB_GH"] = "logged-out"
+        code, res = self.fx("status")
+        self.assertEqual(code, 0, res)
+        self.assertIn(job, json.dumps(res))
+
+
+class LongFilesLeftTest(LongFilesTest):
+    # what LongFilesTest itself tries runs there, once
+    test_tidy_splits_knowledge_and_moves_logic_history = test_tidy_wants_the_files_committed_first = None
+    test_a_split_file_takes_staged_parts_and_learned_rules = test_the_writer_is_told_to_split_a_long_feature = None
+    test_lessons_reach_agents_without_their_notes = None
+
+    def test_a_long_table_with_no_headings_is_cut_between_rows(self):
+        kd = os.path.join(self.factory, "knowledge", "be")
+        rows = "".join("| mod%03d | `src/m%03d` | what module %d does, said at some length |\n" % (i, i, i)
+                       for i in range(120))
+        write(os.path.join(kd, "architecture.md"), "# Module map\n\n| Module | Path | Does |\n|---|---|---|\n" + rows)
+        self.ok("tidy", "--force")
+        folder = os.path.join(kd, "architecture")
+        parts = [n for n in os.listdir(folder) if n != "README.md"]
+        self.assertGreater(len(parts), 1)
+        limit = fx.doc_max_bytes(self.ctx())
+        for n in parts:
+            text = slurp(os.path.join(folder, n))
+            self.assertLessEqual(len(text.encode()), limit, n)
+            self.assertIn("| Module | Path | Does |", text)
+        whole = fx.doc_text(os.path.join(kd, "architecture.md"))
+        self.assertEqual(whole.count("| mod"), 120)
+
+    def test_tidy_names_the_split_commands_and_doctor_fails_until_done(self):
+        res = self.ok("tidy", "--force")
+        self.assertEqual([c.split(" logic ctx --split ")[1] for c in res["logic_split"]], ["logic/billing/credit.md"])
+        self.assertIn("not done yet", res["next_logic"])
+        code, res = self.fx("doctor")
+        row = next(c for c in res["checks"] if c["check"].startswith("knowledge and logic files under"))
+        self.assertFalse(row["ok"], row)
+        self.assertIn("logic/billing/credit.md", row["detail"])

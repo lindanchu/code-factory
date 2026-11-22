@@ -19,7 +19,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from test_security import STUB, SECRET_ENV, fx, load_json, sh, slurp, write, prompt_text
+from test_security import STUB, SECRET_ENV, fx, load_json, put_gh, sh, slurp, write, prompt_text
 
 KEY = "PROJ-7"
 CHECKS = "#!/usr/bin/env bash\nexit 0\n"
@@ -54,6 +54,7 @@ class ProjectCase(unittest.TestCase):
             os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
         for real in ("git", "bash", "tar"):
             os.symlink(shutil.which(real), os.path.join(self.bin, real))
+        put_gh(self.bin)
         env = {k: v for k, v in os.environ.items() if not k.startswith(("JIRA_", "GH_", "GITHUB_", "GITLAB_"))}
         env.update(GIT_CONFIG_GLOBAL=gitcfg, GIT_CONFIG_NOSYSTEM="1", FACTORY_STATE_DIR=os.path.join(self.tmp, "state"),
                    FACTORY_TOOLS_DIR=os.path.join(self.tmp, "tools"),

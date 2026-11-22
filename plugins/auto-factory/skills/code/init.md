@@ -33,6 +33,13 @@ with uncommitted changes, or with commits on both sides, it stops with exit code
 `next: ask`, the counts and the files both sides changed. Show that to the user and wait:
 never work on an old factory.
 
+fx then checks that the GitHub command line is logged in on this machine (it
+installs `gh` when it is missing): notes on the skill are posted from every
+install (**Notes on the skill itself** in SKILL.md). If not, init stops with exit
+code 3 and `ask_user`: tell the user what it says, in their language and in full
+(why, what is posted, that fx never sees the password), wait until they ran
+`gh auth login`, then run `fx init` again.
+
 Ask for the project's name and its repositories, in plain words: for each, a
 short name and its git URL (a local folder works too: fx uses its remote and never
 touches the folder), in merge order (the one others depend on first, normally the
@@ -80,8 +87,13 @@ with `has_commits` and `greenfield`), `added`, `created` and `notes`.
   at the index or at the part with that heading (`split`, `links_fixed_in`); it
   moves `logic/README.md`'s overall log into `logic/history.md`, each module
   README's open points into `<module>/open.md` and every file's change history
-  into `<module>/history.md` (`logic_moved`). Feature files still over the limit
-  are in `logic_too_long`: split them as **Long feature files** in Phase 6b says.
+  into `<module>/history.md` (`logic_moved`). **Init is not done before the next
+  step:** the logic files still over the limit are in `logic_too_long`, and
+  `logic_split` has the command for each. Run every one and spawn a `logic writer`
+  with the prompt and model it returns (all of them in one message): a feature
+  file becomes sub-features, a module README is shortened. Then `fx logic check`,
+  `fx logic index`, and `fx tidy --force` once more; `fx doctor` fails while any
+  knowledge or logic file is over the limit.
   Run `fx knowledge check` and `fx logic check`, tell the user in a few lines what
   moved (files before and after, in KB), then commit and push. A file in
   `too_long_no_headings` has no `##` to split at: give it headings, then run tidy

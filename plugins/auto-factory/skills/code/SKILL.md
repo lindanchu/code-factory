@@ -1518,11 +1518,13 @@ run and three per job.
    secrets anyway, and adds nothing about the user or the machine.
 2. `python3 ${CLAUDE_SKILL_DIR}/fx skill-note --job <KEY> --agent session --title "<what should change>"
    --where <plugin file, such as skills/code/SKILL.md, or an fx command, such as "fx gate"> --file <note>`.
-3. fx installs the GitHub command line (`gh`) when it is missing. When gh is not logged in, the answer has
-   `ask_user`: tell the user, in their language and in full, what it says. Logging in is only for posting this note
-   as a public issue on the skill's repository, under their GitHub account; what is posted is the note alone; fx
-   never sees the password; `FACTORY_SKILL_FEEDBACK=off` turns notes off. They log in with `gh auth login` when they
-   like, and the next note (or `fx skill-note --push`) posts what waited. Never stop or hold a job for this.
+3. fx installs the GitHub command line (`gh`) when it is missing. Notes are part of every install and cannot be
+   turned off: `fx init`, `fx new` and `fx doctor` stop (exit 3, `github_login: true`) until gh is logged in on the
+   machine. Their answer, and a note's when the login went away meanwhile, has `ask_user`: tell the user, in their
+   language and in full, what it says. Logging in is only for posting these notes as public issues on the skill's
+   repository, under their GitHub account; what is posted is the note alone; fx never sees the password. They run
+   `gh auth login`, then the same command again. A job already running is never stopped for this: its note waits
+   and the next one (or `fx skill-note --push`) posts it.
 
 Say in one line which notes were posted (`sent`, with their links), and nothing when none was.
 
@@ -1536,4 +1538,5 @@ In `logic/`, what changed when is in `logic/history.md` (fx adds a row for each 
 it), a module's open points are in its `open.md` (intake and spec read them), and a feature file over the limit is
 split into sub-features by the logic writer (`fx logic ctx --split <file>`; `fx logic check` lists them in
 `too_long`, which stops nothing). A factory written by an older version is brought to this form by re-running
-`/auto-factory:code init` (Phase 1: Files written by an older version).
+`/auto-factory:code init` (Phase 1: Files written by an older version). Init is not done while `fx doctor` lists a
+file over the limit: `fx tidy` gives the command for each logic file (`logic_split`).

@@ -2122,6 +2122,7 @@ def new_job(ctx, a, claim):
 
     if not baselines_config(ctx):  # with baselines, their pull below brings the factory up to date its own way
         factory_sync(ctx)  # a job never starts on an old factory
+    skill_feedback_required("a new job")
     bl_cfg = baselines_config(ctx)
     bl_pre = baselines_refresh(ctx, bl_cfg) if bl_cfg else None  # stops here, before a job exists
     # Fetch first: fail before touching git if Jira is unreachable.
@@ -2365,6 +2366,7 @@ def cmd_init(ctx, a):
     The project's repositories are never changed (except, with --initial-commit and the user's permission, an empty
     first commit in an empty one)."""
     factory_sync(ctx)  # never set up again what another machine already pushed
+    skill_feedback_required("/auto-factory:code init")
     cfg_path = os.path.join(ctx.factory, CONFIG_NAME)
     if not os.path.exists(cfg_path):
         # The principle: the factory never lives inside a project.
@@ -3770,8 +3772,7 @@ def cmd_ctx(ctx, a):
         else:
             lines.append("Dev server command: not configured; see AGENTS.md or CLAUDE.md for how to run the app")
     lines += baselines_prompt_lines(ctx, job, agent, cand, wp)
-    if not skill_feedback_off(ctx):
-        lines.append(skill_note_line(job, agent))
+    lines.append(skill_note_line(job, agent))
     res = {"job": job["id"], "agent": agent}
     fresh = ""
     if agent == "builder":
@@ -18905,6 +18906,15 @@ def doctor_checks(ctx, issue=None, session=True, live=False):
     heads, base, prov, reached = doctor_repos(ctx, add)
     if ctx.cfg:
         doctor_scripts(ctx, add)
+    nope = skill_feedback_ready()
+    add("GitHub login for notes on the skill (gh auth login)", not nope,
+        "logged in" if not nope else "%s: %s" % (nope["why"], nope.get("command") or "; ".join(nope.get("install") or [])))
+    if ctx.cfg and live:
+        long_ = doc_long_files(ctx)
+        add("knowledge and logic files under %d KB (an agent reads a whole file)" % (doc_max_bytes(ctx) // 1024),
+            not long_, "; ".join("%s %.0f KB" % (f, kb) for f, kb in long_[:8]) + (
+                " and %d more" % (len(long_) - 8) if len(long_) > 8 else "") + (
+                ": fx tidy, then a logic writer for each logic file (fx logic ctx --split <file>)" if long_ else ""))
     gi = (read(os.path.join(ctx.factory, ".gitignore"), "") or "").splitlines()
     add(".gitignore keeps jobs/ local", "jobs/" in gi or "/jobs/" in gi)
     mode = jira_mode(ctx)
@@ -27078,6 +27088,21 @@ def doc_limit_line(ctx):
             "file: fx records what it applies." % (doc_max_bytes(ctx) // 1024))
 
 
+def doc_long_files(ctx):
+    """The knowledge and logic files an agent may be pointed at that are over the limit, longest first: [(path, KB)].
+    history.md and open.md of logic are left out (no agent, or only intake and spec, reads them); lessons.md too (agents
+    get a short copy)."""
+    limit = doc_max_bytes(ctx)
+    found = []
+    kd = knowledge_dir(ctx)
+    for d in [kd] + [os.path.join(kd, n) for n in ctx.repo_names()]:
+        found += [os.path.join(d, n) for n in knowledge_names(d)]
+    ld = logic_dir(ctx)
+    found += [os.path.join(ld, n) for n in md_files(ld, recursive=True) if n.split("/")[-1] not in LOGIC_ASIDE]
+    rows = [(os.path.relpath(p, ctx.factory), doc_size(p) / 1024.0) for p in found if doc_size(p) > limit]
+    return sorted(rows, key=lambda r: -r[1])
+
+
 def doc_size(path):
     try:
         return os.path.getsize(path)
@@ -27193,6 +27218,54 @@ def doc_move_links(body, old_dir, new_dir):
     return re.sub(r"\]\(([^)\s#]+)(#[^)\s]*)?\)", fix, body)
 
 
+def doc_chunks(text, max_bytes, title=None):
+    """(head, [(title, text)]) for a text with no headings to split at: whole blocks (paragraphs, fenced blocks, tables)
+    packed into pieces under the limit; a table longer than that is cut between rows, its header repeated in each piece."""
+    lines = text.splitlines(True)
+    hm = next((i for i, l in enumerate(lines) if re.match(r"^#{1,6}\s+\S", l)), None)
+    head = "".join(lines[:hm + 1]) if hm is not None else ""
+    name = title or (re.sub(r"^#{1,6}\s+", "", lines[hm]).strip() if hm is not None else "Part")
+    blocks, cur, fence = [], [], False
+    for l in lines[hm + 1 if hm is not None else 0:]:
+        if l.lstrip().startswith("```"):
+            fence = not fence
+        if not fence and not l.strip() and cur:
+            blocks.append(cur)
+            cur = []
+            continue
+        if l.strip() or fence:
+            cur.append(l)
+    if cur:
+        blocks.append(cur)
+    room = int(max_bytes * 0.85)
+    pieces = []
+    for b in blocks:
+        if sum(len(x.encode("utf-8")) for x in b) <= room or not b[0].lstrip().startswith("|") or len(b) < 4:
+            pieces.append(b)
+            continue
+        top, rows, part = b[:2], b[2:], []  # a long table: its header and separator line go with each piece
+        for r in rows:
+            if part and sum(len(x.encode("utf-8")) for x in top + part + [r]) > room:
+                pieces.append(top + part)
+                part = []
+            part.append(r)
+        if part:
+            pieces.append(top + part)
+    out_, cur, size = [], [], 0
+    for b in pieces:
+        n = sum(len(x.encode("utf-8")) for x in b) + 1
+        if cur and size + n > room:
+            out_.append(cur)
+            cur, size = [], 0
+        cur.append("".join(b))
+        size += n
+    if cur:
+        out_.append(cur)
+    total = len(out_)
+    return head, [("%s (%d of %d)" % (name, i + 1, total), "## %s (%d of %d)\n\n%s\n" % (
+        name, i + 1, total, "\n".join(c).rstrip("\n"))) for i, c in enumerate(out_)]
+
+
 def doc_split(path, max_bytes, taken=(), title=None):
     """Split a markdown file over max_bytes at its first level of headings that gives two parts or more (##, then ###,
     ####): a folder of the same name (name-parts when taken holds it) with README.md, the index, and one file per part;
@@ -27202,9 +27275,13 @@ def doc_split(path, max_bytes, taken=(), title=None):
     if len(text.encode("utf-8")) <= max_bytes:
         return None
     level = next((lv for lv in (2, 3, 4) if len(doc_sections(text, lv)[1]) >= 2), None)
-    if not level:
-        return None
-    head, parts = doc_sections(text, level)
+    if level:
+        head, parts = doc_sections(text, level)
+    else:  # no headings to split at (one long table, one long list): in pieces of whole blocks
+        head, parts = doc_chunks(text, max_bytes, title)
+        if len(parts) < 2:
+            return None
+        level = 2
     old_dir, name = os.path.split(path)
     folder = os.path.join(old_dir, name[:-3] if name[:-3] not in taken else name[:-3] + "-parts")
     if os.path.exists(folder):
@@ -27309,6 +27386,20 @@ def knowledge_tidy(ctx, only=None):
             if not got:
                 stuck.append(os.path.relpath(p, ctx.factory))
                 continue
+            got["refs"] = doc_refs_rewrite(ctx, got)
+            splits.append(got)
+    for d in [kd] + [os.path.join(kd, n) for n in sorted(repos)]:  # a part that is still too long (an earlier tidy)
+        for rel in parts_names(d):
+            p = os.path.join(d, rel)
+            if os.path.basename(p) == "README.md" or (only is not None and p not in only) or doc_size(p) <= limit:
+                continue
+            got = doc_split(p, limit)
+            if not got:
+                stuck.append(os.path.relpath(p, ctx.factory))
+                continue
+            idx = os.path.join(os.path.dirname(p), "README.md")
+            name, new = os.path.basename(p), os.path.relpath(got["index"], os.path.dirname(p)).replace(os.sep, "/")
+            write_atomic(idx, (read(idx, "") or "").replace("[%s](%s)" % (name, name), "[%s](%s)" % (new, new)))
             got["refs"] = doc_refs_rewrite(ctx, got)
             splits.append(got)
     return splits, stuck
@@ -27439,15 +27530,18 @@ def cmd_tidy(ctx, a):
                       "links_fixed_in": [rel(f) for f in s["refs"]]} for s in splits],
            "too_long_no_headings": stuck, "logic_moved": moved, "logic_too_long": too_long,
            "lessons_kb": round(lsize / 1024.0, 1)}
-    if too_long:
-        res["next_logic"] = ("each feature file in logic_too_long is split into sub-features by the logic writer "
-                             "(init.md, Phase 6b: Long feature files)")
+    if too_long:  # semantic work: a logic writer for each, and init is not done before (fx doctor says so)
+        res["logic_split"] = ["%s logic ctx --split %s" % (FX_CMD, t["file"]) for t in too_long]
+        res["next_logic"] = ("not done yet: for each command in logic_split, run it and spawn a logic writer with the "
+                             "prompt and model it returns (one message, all of them), then fx logic check and fx logic "
+                             "index; fx doctor fails until no logic file is over %d KB" % (doc_max_bytes(ctx) // 1024))
     if lsize > doc_max_bytes(ctx):
         res["lessons_note"] = ("lessons.md is over the limit: at the next Learn, propose moving stable lessons into "
                                "the knowledge (fx lessons graduate); agents read a short copy meanwhile")
     changed = bool(splits or moved)
-    res["next"] = ("check (fx knowledge check, fx logic check), then commit and push the factory repository"
-                   if changed else "nothing to tidy")
+    res["next"] = ("%scheck (fx knowledge check, fx logic check), then commit and push the factory repository" % (
+        "split the long logic files first (next_logic); then " if too_long else "") if changed or too_long
+        else "nothing to tidy")
     out(res)
 
 
@@ -27481,14 +27575,6 @@ SKILL_NOTE_SECRET_RES = (
     re.compile(r"\b[0-9a-f]{32,}\b"),
     re.compile(r"\b(?=[A-Za-z0-9+]*\d)(?=[A-Za-z0-9+]*[A-Z])(?=[A-Za-z0-9+]*[a-z])[A-Za-z0-9+]{40,}={0,2}"),
 )
-
-
-def skill_feedback_off(ctx):
-    """Notes are on for every install; FACTORY_SKILL_FEEDBACK=off, or "skill_feedback": false in factory.json, turns
-    them off for a machine or a factory."""
-    if (os.environ.get("FACTORY_SKILL_FEEDBACK") or "").strip().lower() in ("0", "off", "no", "false"):
-        return True
-    return bool(ctx and ctx.cfg and ctx.cfg.get("skill_feedback") is False)
 
 
 def skill_note_line(job, agent):
@@ -27672,9 +27758,10 @@ SKILL_NOTE_LOGIN_WHY = (
     "what to change). Before posting, fx removes this project's names, links, ticket keys, paths, e-mail addresses "
     "and secrets, and it adds nothing about the user or this machine: no name, no operating system, no account. "
     "The issue shows the GitHub account that is logged in, as every GitHub issue does. How: run `gh auth login` in "
-    "a terminal and pick GitHub.com; fx never sees the password or the token. Until then the note waits on this "
-    "machine (%s) and goes out with the next note, or with `fx skill-note --push`. Not wanted at all: set "
-    "FACTORY_SKILL_FEEDBACK=off and fx never posts." % (SKILL_FEEDBACK_REPO, "<config>/skill-notes/pending"))
+    "a terminal and pick GitHub.com; fx never sees the password or the token. This is part of every install and "
+    "cannot be turned off: until gh is logged in, /auto-factory:code init does not finish, fx doctor fails and no new "
+    "job starts; a job already running goes on, and a note it writes waits on this machine (%s) for the next note "
+    "or `fx skill-note --push`." % (SKILL_FEEDBACK_REPO, "<config>/skill-notes/pending"))
 
 
 def skill_note_gh():
@@ -27687,6 +27774,27 @@ def skill_note_gh():
     return None, ("fx could not install the GitHub command line (gh) by itself (%s). It is needed only to post "
                   "notes about the skill as a GitHub issue. To install it: %s" % (
                       why, "; ".join(admin_commands("gh")) or "see https://cli.github.com"))
+
+
+def skill_feedback_ready():
+    """None when this machine can post notes on the skill (gh there, installed by fx when missing, and logged in to
+    GitHub); else what to tell the user."""
+    gh, why = skill_note_gh()
+    if not gh:
+        return {"why": why, "install": admin_commands("gh"), "ask_user": SKILL_NOTE_LOGIN_WHY}
+    if run_sep([gh, "auth", "status", "--hostname", "github.com"], timeout=60).returncode != 0:
+        return {"why": "gh is not logged in to GitHub", "command": "gh auth login", "ask_user": SKILL_NOTE_LOGIN_WHY}
+    return None
+
+
+def skill_feedback_required(what):
+    """init and every new job wait for a GitHub login on this machine: notes on the skill are not optional."""
+    nope = skill_feedback_ready()
+    if nope:
+        raise FxError("%s waits for the GitHub command line to be logged in on this machine (%s): notes on the skill "
+                      "are posted from every install. Tell the user why in their language (ask_user), wait for "
+                      "`gh auth login`, then run this again" % (what, nope["why"]), code=3,
+                      extra=dict(nope, next="ask", github_login=True))
 
 
 def skill_note_send(gh, note):
@@ -27746,10 +27854,6 @@ def skill_note_push(ctx):
 def cmd_skill_note(ctx, a):
     """A note on what the skill (its instructions, an agent's instructions, fx) should change, from an agent that met
     the problem in a real run. Posted as a public issue on the skill's repository, without anything private."""
-    if skill_feedback_off(ctx):
-        out({"ok": True, "posted": False, "off": True,
-             "note": "notes about the skill are off here (FACTORY_SKILL_FEEDBACK or skill_feedback in factory.json)"})
-        return
     queued = None
     if not a.push:
         if not (a.title and a.where and a.file):

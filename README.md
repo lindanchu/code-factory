@@ -1220,6 +1220,14 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
   jobs at once with room to spare (above); for heavy builds several at a time, raise `memory` in
   `fx-sandbox.yaml` before `fx sandbox install`, or with `limactl edit fx-sandbox`.
 
+### Upgrading to 3.10: a GitHub login on every machine, long files fully split
+
+- Notes on the skill cannot be turned off: until `gh auth login` was run on a machine, `/auto-factory:code init`
+  does not finish, `fx doctor` fails and no new job starts there (a job already running goes on).
+- A knowledge part with no headings left to split at (one long table) is cut into pieces of whole blocks, a long
+  table between its rows. `fx tidy` lists the `fx logic ctx --split` command of every logic file still over the
+  limit, and `fx doctor` fails until none is: re-run `/auto-factory:code init` to finish it.
+
 ### Upgrading to 3.9: scope, shared limits, a box that installs through Docker
 
 - The factory repository is fetched before `init`, `scan`, `new`, `knowledge ctx`, `logic ctx` and
@@ -1248,8 +1256,7 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
 - Notes on the skill itself: when an agent finds that the skill or fx really needs changing, `fx skill-note`
   posts it as a public issue on this repository, with the project's names, links, ticket keys, paths and
   secrets removed and nothing about the user or the machine. fx installs `gh` when it is missing; posting needs
-  `gh auth login` once (the note waits until then). `"skill_feedback": false` in `factory.json`, or
-  `FACTORY_SKILL_FEEDBACK=off`, turns it off.
+  `gh auth login` once.
 
 ## Set up a project: `init`
 

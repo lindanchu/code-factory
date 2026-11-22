@@ -315,6 +315,7 @@ class PrCase(ProjectCase):
         if not os.path.exists(self.gh_log):
             return []
         calls = [json.loads(l) for l in slurp(self.gh_log).splitlines()]
+        calls = [c for c in calls if c["argv"][:2] != ["auth", "status"]]  # the login a new job needs, no PR work
         return [c for c in calls if verb is None or c["argv"][:2] == ["pr", verb]]
 
     def remote_head(self, name, branch):

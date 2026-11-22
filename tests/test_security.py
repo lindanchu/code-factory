@@ -316,6 +316,27 @@ elif name == "limactl":
 
 TOOLS = ("gitleaks", "semgrep", "osv-scanner", "docker", "limactl")
 
+# The GitHub command line, logged in: init, fx doctor and every new job need it (notes on the skill). STUB_GH=logged-out
+# is a machine that never ran gh auth login. Nothing else of gh is used where this one is.
+GH_LOGIN_STUB = """#!%s
+import os, sys
+args = sys.argv[1:]
+if args[:2] == ["auth", "status"]:
+    sys.exit(1 if os.environ.get("STUB_GH") == "logged-out" else 0)
+if args[:1] == ["--version"]:
+    print("gh version 2.0.0 (stub)")
+    sys.exit(0)
+print("gh stub: %%s is not used in this test" %% " ".join(args), file=sys.stderr)
+sys.exit(1)
+"""
+
+
+def put_gh(bin_dir):
+    p = os.path.join(bin_dir, "gh")
+    if not os.path.exists(p):
+        write(p, GH_LOGIN_STUB % sys.executable)
+        os.chmod(p, 0o755)
+
 
 @contextlib.contextmanager
 def not_on_this_machine(*names):
@@ -367,6 +388,7 @@ class Factory:
             w = shutil.which(real)
             if w and not os.path.exists(os.path.join(self.bin, real)):
                 os.symlink(w, os.path.join(self.bin, real))
+        put_gh(self.bin)
         self.log = os.path.join(root, "stub.log")
         self.out = os.path.join(root, "out")
         os.makedirs(self.out)
@@ -1987,7 +2009,7 @@ class ScriptTest(unittest.TestCase):
             self.assertEqual(json.load(f)["version"], v)
         with open(os.path.join(ROOT, "plugins", "auto-factory", "skills", "code", "shared", "VERSION")) as f:
             self.assertEqual(f.read().strip(), v)  # the two skills ship together
-        self.assertEqual(v, "3.9.0")
+        self.assertEqual(v, "3.10.0")
 
     def test_three_commands(self):
         """/auto-factory:code and /auto-factory:review (no auto test here): a plugin skill's command is

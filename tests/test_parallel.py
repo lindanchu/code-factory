@@ -24,7 +24,7 @@ import time
 import unittest
 import unittest.mock
 
-from test_security import FX_PATH, SECRET_ENV, STUB, fx, prompt_text
+from test_security import FX_PATH, SECRET_ENV, STUB, fx, prompt_text, put_gh
 
 JIRA = "https://example.atlassian.net"
 PORT_BASE = 45100  # away from the ports of real jobs on the machine that runs the tests
@@ -99,6 +99,7 @@ class Box:
             p = os.path.join(self.bin, tool)
             write(p, STUB % {"python": sys.executable, "secret_names": sorted(SECRET_ENV)})
             os.chmod(p, os.stat(p).st_mode | stat.S_IEXEC)
+        put_gh(self.bin)
         for real in ("git", "bash", "tar", "sleep", "env", "grep", "test"):
             w = shutil.which(real)
             if w and not os.path.exists(os.path.join(self.bin, real)):
