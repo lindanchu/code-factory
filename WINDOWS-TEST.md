@@ -15,8 +15,8 @@ main.**
 ## Trạng thái khi bàn giao
 
 - Trên macOS: cả bộ test qua (1811 test, 18 bỏ qua vì cần VM sandbox thật).
-- Test với VM sandbox thật trên macOS (`FX_SANDBOX_REAL=1`, `test_isolation.py`): đang chạy lúc đẩy nhánh lên; kết quả
-  sẽ được ghi thêm vào đây.
+- Test với VM sandbox thật trên macOS (`FX_SANDBOX_REAL=1`, `test_isolation.py`): qua, 49 test (48 qua, 1 bỏ qua vì
+  cần bản Tauri thật trên Windows). Cách khởi chạy app mới trong box chạy được trên VM thật.
 - Chưa chạy lần nào trên Windows/WSL.
 
 ## 3.9.0 đổi những gì (phần có thể chạy khác trên Windows)
