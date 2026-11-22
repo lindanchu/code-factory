@@ -34,7 +34,3 @@ flowchart TD
 
 ## 5. Open points
 1. ...
-
-## Change history
-| Date | Change | Ticket |
-| ---- | ------ | ------ |

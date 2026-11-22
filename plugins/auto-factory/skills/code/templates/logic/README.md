@@ -10,10 +10,13 @@
 ## Folder structure
 ```
 logic/
-├── README.md     index, conventions, overall log
+├── README.md     index, conventions
+├── history.md    what changed when (fx adds a row for each change; no agent reads it to work)
 ├── shared.md     rules shared by the whole system
 └── <module>/
     ├── README.md     module-wide rules and the parameter table
+    ├── open.md       the module's open points, conflicts and questions
+    ├── history.md    older history moved out of the module's files
     └── <feature>.md  one file per feature
 ```
 
@@ -36,10 +39,7 @@ logic/
   gets its rows from its ticket.
 - UI text is quoted verbatim, in its original language.
 - Each rule cites the code that implements it (`path:lines`) and the test that covers it (or "no test").
-- A change of logic: update the file, add a row to its change history (old → new value) and to the overall
-  log below; move a settled open point into the rules.
-
-## Overall log
-| Date | File | Change |
-| ---- | ---- | ------ |
-<!-- log:end -->
+- Every file stays short (12 KB by default, `learning.file_max_kb`): an agent reads the whole file. A longer feature
+  is split into sub-features, each a feature file of its own.
+- A change of logic: update the file and move a settled open point into the rules. No file keeps a change history:
+  fx adds a row to [history.md](history.md) for every change it applies.

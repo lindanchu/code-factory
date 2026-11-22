@@ -26,7 +26,12 @@ agreement, or every gate fails.
 **Phase 1 · Scaffold.** The session must be in the factory repository, never
 in a project's repository. If fx says this is not a git repository, ask the user
 whether to run `git init` here (or to clone their empty factory repository), then
-do it.
+do it. Before anything else, fx checks that the factory repository is up to date with
+its remote (`fx init`, `fx scan`, `fx knowledge ctx`, `fx logic ctx`, `fx lessons collect`
+and `fx new` all do): behind with a clean tree, it pulls and says so in `notes`; behind
+with uncommitted changes, or with commits on both sides, it stops with exit code 3 and
+`next: ask`, the counts and the files both sides changed. Show that to the user and wait:
+never work on an old factory.
 
 Ask for the project's name and its repositories, in plain words: for each, a
 short name and its git URL (a local folder works too: fx uses its remote and never
@@ -65,6 +70,23 @@ with `has_commits` and `greenfield`), `added`, `created` and `notes`.
   these moves, and update `knowledge/README.md` where it names the moved files
   (`notes` says so). Citations may stay plain paths while the project has one
   repository.
+- **Files written by an older version** (a factory that has run jobs: long
+  knowledge files, the history inside `logic/` files): after `fx init`, run
+  `python3 ${CLAUDE_SKILL_DIR}/fx tidy` once (it wants `knowledge/` and `logic/`
+  committed first, so its changes can be looked at and undone on their own). It
+  splits every knowledge file over the limit (`learning.file_max_kb`, 12 KB) at its
+  `##` headings into a folder of the same name, whose `README.md` is the index
+  (one row per part: file, what it holds), and points every link to the old file
+  at the index or at the part with that heading (`split`, `links_fixed_in`); it
+  moves `logic/README.md`'s overall log into `logic/history.md`, each module
+  README's open points into `<module>/open.md` and every file's change history
+  into `<module>/history.md` (`logic_moved`). Feature files still over the limit
+  are in `logic_too_long`: split them as **Long feature files** in Phase 6b says.
+  Run `fx knowledge check` and `fx logic check`, tell the user in a few lines what
+  moved (files before and after, in KB), then commit and push. A file in
+  `too_long_no_headings` has no `##` to split at: give it headings, then run tidy
+  again. lessons.md stays one file: agents get a short copy without the dated
+  headings and the notes of where each lesson came from.
 - **A factory kept inside the project** (a `factory/` folder from an older
   version): ask for that folder and pass `--import <folder>` (a project of one
   repository). Tell the user what `notes` says to add by hand, then to remove the
@@ -89,13 +111,26 @@ source code yet) and `has_commits`. For each repository follow **Existing code**
 when `greenfield` is false, otherwise **New project**. All then continue at
 Phase 5.
 
+**Scope.** Before anyone reads the code, ask the user, one repository at a time,
+whether the factory should learn from all of it, or leave parts out (legacy code,
+an old API version, folders that are going away), and whether the logic and the
+permission table should cover every module or only some. Show what `fx scan`
+found (top folders, route files) so the answer is concrete. Write the answers into
+factory.json: in the repository's entry `"scope": {"include": [globs], "exclude":
+[globs], "note": "<why, in the user's words>"}` (globs from the repository's root;
+`*` also matches `/`; no include means everything), and at the top level
+`"logic_modules": [module slugs]` (empty: all). fx then gives the scope to every
+agent that reads code, and `fx knowledge check`, `fx style-sample`, `fx logic`,
+`fx limits` and `fx permissions` leave out what is outside it. Nothing to leave
+out: write nothing. Commit factory.json.
+
 **Existing code (Phases 3E–4E).**
 
 Rules for reading the code (they apply to every phase below and to later
 refreshes):
 
-- **Read everything.** Every main module of every repository is read, however
-  large: split the reading between parallel `Explore` agents by repository, area
+- **Read everything** in scope (**Scope** above). Every main module of every
+  repository is read, however large: split the reading between parallel `Explore` agents by repository, area
   or module (spawn them in one message), never skip a part. `fx knowledge check`
   lists each repository's main modules; each must end up in the module map of
   that repository's `knowledge/<repo>/architecture.md`.
@@ -277,15 +312,25 @@ per feature). Write it for **every** feature:
    (as `<repo>:<path>` in a project of several repositories) and spawn
    a `logic writer` with the returned prompt and model; spawn them **in one
    message** so they run in parallel. Each writes `logic/<slug>/`.
-3. Write `logic/README.md` (project name, owner, the index with one row per
-   feature file, conventions; keep the `<!-- index:end -->` and
-   `<!-- log:end -->` markers right after the last row of their tables) and
+3. Write `logic/README.md` (project name, owner, conventions; keep the
+   `<!-- index:end -->` marker right after the last row of the index, and leave
+   `logic/history.md` with its `<!-- log:end -->` as fx made it), then `python3 ${CLAUDE_SKILL_DIR}/fx logic index --log "<one line: what init wrote>"`:
+   it adds one index row per feature file the writers wrote, grouped by module
+   (never write those rows yourself, and do not ask the writers to), and
    `shared.md` (system-wide rules, cited), in the human language; when it is
-   Vietnamese use the team's headings (Mục lục, Quy ước, Nhật ký tổng).
+   Vietnamese use the team's headings (Mục lục, Quy ước; Nhật ký tổng in `history.md`).
 4. Ask the user (AskUserQuestion, at most 4 questions per round) about every
    **conflict** the writers found (back end vs front end, code vs issue or
    Confluence) and the most important open points; record each answer in the
-   logic file (into the rules, with a change-history row) or leave it open.
+   logic file (into the rules) or leave it open in the module's `open.md`.
+5. **Long feature files.** `fx logic check` lists in `too_long` the logic files
+   over the limit (12 KB by default): an agent reads the whole file. For each,
+   `python3 ${CLAUDE_SKILL_DIR}/fx logic ctx --split logic/<module>/<file>.md` and spawn a
+   `logic writer` with the returned prompt and model (all of them in one
+   message, one per module at a time): a feature file becomes sub-features in the
+   same format; a module README is shortened by moving the rules of one feature
+   into that feature's file. Either fixes the links. Then `fx logic check` and
+   `fx logic index` again.
 
 Then the app's limits: follow **/auto-factory:code limits** in SKILL.md (steps 2 to 6). Every
 limit that can stop tests or the scanner gets its environment variable and test value in its module's
@@ -303,7 +348,10 @@ Then prove the knowledge and the logic, before the user sees them:
    the knowledge (`--repo <name>` checks one repository's);
    `python3 ${CLAUDE_SKILL_DIR}/fx logic check` does the same for `logic/` plus its format (module
    READMEs, sections 1–5, a flow diagram per feature, every file indexed). Fix
-   everything they report and run them again until both are `clean`.
+   everything they report and run them again until both are `clean`. Then
+   `python3 ${CLAUDE_SKILL_DIR}/fx tidy --force` (the files are new: nothing to undo) splits any knowledge file over the limit
+   into an index and parts (and moves history and open points out of `logic/`
+   files); `fx knowledge check` once more after it.
 2. `python3 ${CLAUDE_SKILL_DIR}/fx knowledge review` gives the prompt for the knowledge reviewer, a
    fresh agent that checks the knowledge and the logic against the code. Spawn
    it; if its review file starts with `KNOWLEDGE REVIEW: CHANGES`, fix each
@@ -341,6 +389,29 @@ that git does not ignore). Rewrite each `checks/<repo>.sh` with that repository'
 real, non-interactive checks (what its CI runs: install if needed, lint, type
 check, tests, build; it runs in the repository's clone) and delete its
 `FACTORY_TODO` line.
+
+**Network in the job's box.** A job's commands run in a box of their own (fx
+sandbox). Only the install steps reach the network, through a proxy that lets
+through the package registries, the operating systems' package mirrors and
+`sandbox.allow`: `setup` and `fx run --job <job> --install`. Inside them `docker
+build` and `docker run` (and compose) get the proxy by themselves, so a
+Dockerfile's `RUN apk add`, `apt-get install`, `composer install` or `npm ci`
+works without `--build-arg`. Everything else runs with **no network at all**: the
+checks script, `app.up`, e2e, the UI check, the scanners. So whatever they need
+must come in at `setup`: images (`docker pull`), packages (`pnpm fetch` into a
+volume, then `pnpm install --offline` in the checks), another repository of the
+project (it is a clone next to this one, see the checks script's environment),
+never a `git clone` or `curl` to the internet in a checks script or `app.up`.
+A clone in the box has the files git sees but no `.git`: copy with `tar`, not
+`git archive`. When setup fails, fx names the first network error of its log and
+the host to allow, if any: ask the user before adding it to `sandbox.allow`.
+
+**Never trust what a script is said to do.** After any script of the factory
+(`ops/`, `checks/`, what `setup` and `app.up` run) was written, rewritten or carried
+over from another branch, read it again as it is now and run `fx doctor`: it runs
+`bash -n` on every script `factory.json` names and says which changed since the
+last selftest ran them. Only a selftest (or a job's setup and gate) shows that a
+script works; until then say "not run yet", never "done".
 
 **Phase 8 · Running app and UI checks.** Per repository: if its app can run
 locally, ask for or derive the one command that starts it for a job and set

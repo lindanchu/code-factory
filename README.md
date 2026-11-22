@@ -1220,6 +1220,37 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
   jobs at once with room to spare (above); for heavy builds several at a time, raise `memory` in
   `fx-sandbox.yaml` before `fx sandbox install`, or with `limactl edit fx-sandbox`.
 
+### Upgrading to 3.9: scope, shared limits, a box that installs through Docker
+
+- The factory repository is fetched before `init`, `scan`, `new`, `knowledge ctx`, `logic ctx` and
+  `lessons collect`. Behind with a clean tree, fx pulls; behind with changes of its own, it stops and asks.
+- Optional settings, asked by `init` (Phase 2, **Scope**): a repository's `scope` (`include` / `exclude`
+  globs: legacy code the factory never learns from) and `logic_modules` (the modules whose logic and
+  permission rows it keeps; the permission table lists the other modules' routes in `out_of_scope`).
+- `repos[].needs`: another repository whose code a repository's scripts read (a checks script that reads
+  the back end, an `app.up` that builds it). Jobs, selftests and reviews get a read clone of it, and every
+  script its path in `FACTORY_CLONE_<NAME>`: a job's box has no network to fetch it.
+- Limits of every route are written once, in `logic/shared.md`'s `## Limits` table, by an agent of their own
+  (`/auto-factory:code limits`); two rows citing the same lines with different variables are refused.
+- In a job's box, `docker build` and `docker run` (compose too) install through the box's proxy by
+  themselves; the operating systems' package mirrors and `api.github.com` are allowed during an install. A
+  host added to `sandbox.allow` reaches a job's existing box at its next install.
+- `fx doctor` checks the factory's scripts (`bash -n`, changed since the last selftest, fetching where there
+  is no network) and an empty repository login that hides the project's. Run `fx selftest` once after the
+  upgrade so doctor knows which commit it ran on.
+- Small jobs can take the light lane: intake proposes which steps to leave out, fx checks the real diff and puts
+  back what it needs. Gates read the factory from a git worktree at its pushed commit, so another session's
+  unfinished edits in the factory folder no longer stop them.
+- Long files: no knowledge or logic file grows past 12 KB (`learning.file_max_kb`). fx splits a longer knowledge
+  file into a folder with an index (`README.md`) and one file per `##` part; logic keeps its history in
+  `history.md` and a module's open points in `open.md`. Re-run `/auto-factory:code init` once after the upgrade:
+  it runs `fx tidy` and has the logic writer split feature files that are still too long.
+- Notes on the skill itself: when an agent finds that the skill or fx really needs changing, `fx skill-note`
+  posts it as a public issue on this repository, with the project's names, links, ticket keys, paths and
+  secrets removed and nothing about the user or the machine. fx installs `gh` when it is missing; posting needs
+  `gh auth login` once (the note waits until then). `"skill_feedback": false` in `factory.json`, or
+  `FACTORY_SKILL_FEEDBACK=off`, turns it off.
+
 ## Set up a project: `init`
 
 1. Create an empty private repository for the project's factory (for example

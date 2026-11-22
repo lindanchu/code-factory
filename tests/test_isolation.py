@@ -45,7 +45,7 @@ class InTheBoxTest(SandboxCase):
         cmds = [c["cmd"] for c in self.box_cmds()]
         self.assertIn("echo setup-ran", cmds)
         self.assertIn("echo checked", cmds)
-        self.assertTrue(any("setsid bash -lc" in c and self.server in c for c in cmds), cmds)
+        self.assertTrue(any("setsid bash -c" in c and "bash -lc" in c and self.server in c for c in cmds), cmds)
         job = self.job()
         self.assertTrue(job["sandbox"]["box"]["name"].startswith("fxbox-"))
 

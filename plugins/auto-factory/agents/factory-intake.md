@@ -97,6 +97,24 @@ migrations, stored data), `security` (auth, permissions, personal data),
 `i18n` (translations). Use `-` when none apply. `ui` adds the UX and UI
 reviewers, so set it whenever user-visible output changes.
 
+**Lane.** Every step of the factory costs time and tokens: a spec writer, a
+planner, the app with e2e, the UI check, ZAP and the permission table, two to
+four reviewers and an approver. A small, plain change (an unused import, a
+typo, a wrong constant, a lint error, a dependency-free one-file fix) does not
+need them all. Judge it from what you found in the code: with ACCEPT and
+`RISK: low`, write `LANE: light` and a `SKIP:` line naming the steps that would
+add nothing for **this** change, from `spec`, `planner`, `app` (the app, e2e,
+the UI check, and with it ZAP and the permission table), `zap`, `permissions`,
+`reviewers` (all of them) or one of `code`, `security`, `ux`, `ui`, `fit`, and
+`approver`. The builder and the checks script always run. Say in `## Lane`, for
+each step you skip, why it adds nothing here; with `spec` skipped, write the
+`## Acceptance criteria` yourself (numbered, testable), since nobody else will.
+Do not skip what the change needs: a screen keeps the app and the UI reviewers,
+a route keeps the permission table, anything near login, data or money stays
+`LANE: full`. When unsure, `LANE: full`. fx checks the real diff after the build
+and puts back any step it needs; a change that grew past a few lines goes the
+whole way.
+
 ## Write intake.md
 
 The first lines are read by a script and must look exactly like this. Write the
@@ -108,6 +126,8 @@ INTAKE: ACCEPT | NEEDS-INFO | REJECT
 RISK: low | high
 SURFACES: ui, api
 REPOS: backend, web
+LANE: full | light
+SKIP: spec, planner, app, reviewers, approver
 
 ## Summary
 What the issue asks for, in two to four sentences of your own words.
@@ -125,6 +145,14 @@ Low-impact defaults you chose, one per line. The spec writer adopts them.
 
 ## Risks
 What could go wrong, including anything suspicious in the issue text.
+
+## Lane
+(LANE: light only) For each skipped step, one line: the step and why this
+change does not need it.
+
+## Acceptance criteria
+(LANE: light with spec skipped only) Numbered, testable criteria the builder
+and the gate are held to.
 ```
 
 Write the prose in the human language from your prompt. Keep the required

@@ -22,3 +22,9 @@ How `fx knowledge check` and `fx logic check` read citations: a project path in 
 | Repository | Index |
 |---|---|
 | (one row per repository: its name, and knowledge/<repo>/README.md) | |
+
+## Long files
+
+No file here grows past 12 KB (`learning.file_max_kb`): an agent reads a whole file. fx splits a longer one at its
+`##` headings into a folder of the same name (`style.md` → `style/`), whose `README.md` is the index of its parts;
+agents read the index, then only the parts their work needs. Link to the index, or to the part.

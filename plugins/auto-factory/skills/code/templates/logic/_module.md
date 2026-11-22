@@ -28,8 +28,5 @@
      table; a new route gets its rows from its ticket, never from its code. -->
 
 ## 3. Open points (module-wide)
-1. ...
-
-## Change history
-| Date | Change | Ticket |
-| ---- | ------ | ------ |
+In [open.md](open.md): read it when the work touches an open point.
+<!-- open.md: one numbered open point, conflict or question per item, each with its citations. -->

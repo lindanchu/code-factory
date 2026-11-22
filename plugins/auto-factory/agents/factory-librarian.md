@@ -47,6 +47,12 @@ Read-only commands only.
    checkout (copy them, with their citation). A file marked "does not exist yet"
    may be created when the changes clearly call for it (for example the first
    API); say why.
+   A long file may already be a **folder of parts** (`style/`, its `README.md`
+   the index): your prompt lists it with a trailing `/`. Read the index, then
+   only the parts the changes touch, and stage those parts at the same path
+   (`<repo>/style/controller.md`), with the index when a part's row should say
+   something else. A file you stage may be over the limit in your prompt: fx
+   splits it at its `##` headings when it is applied.
 4. Decisions the team recorded (`rules.md`, `definition-of-done.md`, business
    rules in `domain.md`) are never removed or rewritten because of code alone.
    If the code seems to contradict one, leave that rule as it is and raise it
@@ -60,8 +66,8 @@ Read-only commands only.
 6. Files listed as `logic/<module>/<feature>.md` cite code that changed: stage
    the updated version under `logic/` in the staging folder (same path). Follow
    the team's format: update the rule rows and their Code/Test cells, keep
-   parameters in the module README only, add a change-history row (old → new,
-   "changed outside the factory: commit <sha>"). A change of behaviour nobody
+   parameters in the module README only, and no change-history row (fx records
+   each change it applies; say old → new and the commit in changes.md). A change of behaviour nobody
    decided in a ticket is still recorded, and also raised under Questions in
    changes.md.
 7. **Limits.** A limit the new commits add or change that can stop tests or

@@ -85,6 +85,17 @@ them to create a separate repository for the factory (for example
   them with `run_in_background: true`, tell the user in one line that the step started,
   and continue when the command completes. Never start the same command twice
   while one is still running.
+- **Several jobs, one factory folder.** A gate reads the factory as committed: fx keeps a git worktree of the
+  factory at the commit the gate began on (`<work>/_factory/<commit>`) and runs the settings and the checks scripts
+  from there, with `$FACTORY_DIR` naming it for every script. So editing the factory folder while other jobs run
+  (fixing a checks script for one of them) neither stops their gates nor sets their rounds aside; what you change
+  reaches the gates once committed and pushed. Have the factory's own scripts (`ops/`, what `setup` and `app.up`
+  run) find the factory through `$FACTORY_DIR`, not from the clone's path.
+- **The light lane.** Intake may put a small job on `LANE: light` and name the steps it can do without; fx keeps
+  every step the real diff needs. When `fx ctx <job> --agent <spec|planner|approver>` answers `skipped: true`, do not
+  spawn that agent: fx wrote its result file; run the `then` command. When a gate passes with no reviewers left,
+  its `next` is `approve`. Tell the user the `lane` line fx prints (what was left out, and why) once, when the job
+  reaches its pull request; it is in the PR description too.
 - When fx prints `"ok": false`:
   - exit code 75 with `next: wait`: nothing failed. With `busy`, this job already runs
     that step (in another session, or from your own earlier call): wait for it, do not
@@ -140,7 +151,8 @@ them to create a separate repository for the factory (for example
   - exit code 3: the environment needs a human (factory not set up yet, the
     project's repositories cannot be cloned, setup failed, uncommitted changes to the factory's
     own files or commits of this machine to the gate's settings, a factory repository
-    behind its remote with uncommitted changes,
+    behind its remote with uncommitted changes or commits of its own (`next: ask`, with
+    `behind`, `ahead` and `both_changed`: ask the user which to keep, never merge for them),
     baselines not uploaded or not reachable, unpushed work that a cleanup would
     delete).
     Tell the user exactly what fx said and stop. "not set up" → suggest
@@ -423,10 +435,15 @@ off and you never work around it. `fx new` and the gate answer `next: limits` (e
 a factory whose limits were never worked out (after the update to this version, or a new init).
 
 1. `python3 ${CLAUDE_SKILL_DIR}/fx limits check`. `ok: true` → say so in one line and stop.
-2. Spawn one `general-purpose` agent with `model: sonnet` per module folder of `logic/`, **in one message**, each with
+2. Spawn one `general-purpose` agent with `model: sonnet` per module folder of `logic/` (only the modules of
+   `logic_modules` when factory.json sets it), plus one for the module `shared` (the limits of every route, written
+   once in `logic/shared.md`), **in one message**, each with
    the prompt `Follow ${CLAUDE_SKILL_DIR}/limits.md` (the absolute path), then the fx command, the factory repository,
-   the module and its code (the paths its README cites). Each fills the module's parameter table (Env and Test
-   value) and answers one line per limit.
+   the module and its code (the paths its README cites; for `shared`, the app's route groups, middleware and base
+   module). Each fills the module's parameter table (Env and Test
+   value) and answers one line per limit. These agents (and the permissions and login agents) never start agents of
+   their own: you start every part, in the foreground, so that stopping the session stops them all. An answer
+   `split: <parts>` → spawn one agent per part yourself, with the same prompt and the part.
 3. Show the user the limits found, one line each (module, limit, today's value, the variable or MISSING, the test
    value), and ask whether they are right; correct what they say.
 4. `fx limits check --code`. Problems → give each to its module's agent once, then check again. `app.limits_env`
@@ -436,7 +453,9 @@ a factory whose limits were never worked out (after the update to this version, 
 5. `fx limits mark`, then commit `logic/` and `factory.json` and push.
 6. MISSING limits → `fx limits tasks` writes a fix task for each. Tell the user every other job waits for them;
    start them as jobs (`fx new --local "<title>" --issue-file <task_file> --base <branch>`, the branch asked as
-   always; at most 3 jobs per session). Once their pull requests are merged and **Learn** applied their logic,
+   always; at most 3 jobs per session). When the team already has a Jira issue for a fix (the user says so, or names
+   it), start that issue instead, so the job keeps its Jira link: `fx new <KEY> --fixes-limit <module>/<parameter>`
+   (as `fx limits tasks` names them; repeatable); fx adds the task's criteria to the issue. Once their pull requests are merged and **Learn** applied their logic,
    `fx limits check` passes and jobs start again.
 
 `next: limits` from the gate of a running job: the round did not count, no builder. Run the steps above; the job
@@ -455,7 +474,9 @@ confirm rules in plain words.
 1. `python3 ${CLAUDE_SKILL_DIR}/fx permissions check`. `ok: true` and no `base` lines → say so in one line and stop.
 2. Not `confirmed`, or `problems` → spawn one `general-purpose` agent with `model: opus` and the prompt `Follow
    ${CLAUDE_SKILL_DIR}/permissions.md` (the absolute path), then the fx command, the factory repository, where the
-   code is and `factory`. It writes the rows into `logic/` and the technical part into `stack/`.
+   code is and `factory`. It writes the rows into `logic/` and the technical part into `stack/`. It never starts
+   agents of its own; `split:` lines → spawn the agent again yourself (foreground) for each part, with the same prompt
+   and the part.
 3. Show the user its `rule:` lines and every `doubt:` line, in plain words, and ask whether they are right; each
    `ask:` too. Never the whole table. Give the answers to the same agent (SendMessage) until it has none left.
 4. `fx permissions check` again: `problems` → back to the agent once with them.
@@ -542,6 +563,12 @@ had to wait before it started; `waiting`), and each job's stack (`stacks`; one t
 `left_running` is not empty, containers of clones that are gone or of jobs that are over
 still run: show the list from `python3 ${CLAUDE_SKILL_DIR}/fx cleanup --stale` and ask; only when
 the user says yes, `fx cleanup --stale --yes` (volumes are kept).
+
+**How far is it?** When the user asks how far a gate or a selftest is, or how long it will take, never guess
+from log files: a running gate or selftest has `progress` in `fx capacity` (`running`) and in `fx status` (the job's
+row, or `selftest`): the part that runs now (`step`: checks, app up, e2e, ui check, security scan, permissions), the
+parts done (`steps`), for the permission table the cells called so far (`done`/`total`), and `left_min` when it can
+be told (from the cells, or from how long the last runs of the same step took, `left_by`). Say it in one line.
 
 The user can change how this machine is shared, in their own words; you write the
 setting, they never edit a file: `fx capacity --set <name>=<value>` (`--reset <name>`
@@ -965,8 +992,10 @@ reviewers and the pull requests use them:
       Later rounds use a single fresh builder in the job's own clones (fx pick
       deletes the candidates' clones).
 1. `python3 ${CLAUDE_SKILL_DIR}/fx setup <job>` installs dependencies in each clone of the job,
-   once (`skipped: already done` after that). On failure stop and give the user
-   the log path (`log`, or `logs` per repository). It runs in the job's own box in the sandbox
+   once (`skipped: already done` after that; `fx setup <job> --repo <repo> --force` runs one repository's setup
+   again, after its script changed). On failure stop and give the user the log path (`log`, or `logs` per
+   repository) and the network error fx names, if any. Tell the user its `warnings` (a Node older than the
+   project asks for, apps that did not start while their images could still be pulled). It runs in the job's own box in the sandbox
    VM, like everything of the job after it (see **The job's box**).
 2. `python3 ${CLAUDE_SKILL_DIR}/fx ctx <job> --agent builder`.
 3. If it returned `resume_agent_id` **and** you started that builder in this
@@ -1030,6 +1059,11 @@ one as it finishes.
    Tell the user one line per merged or returned package.
 
 ### Gate
+
+`python3 ${CLAUDE_SKILL_DIR}/fx gate <job> --dry-run` runs the whole gate and counts nothing (the round is put
+aside, the job stays where it was): use it when the factory's scripts (checks, `app.up`, e2e) changed, before they
+cost a round. A gate that fails because the job's box has no network (`void: true`, `next: stop`) is the factory's
+script to fix (fetch at setup, another repository through `repos[].needs`), never a builder's.
 
 `python3 ${CLAUDE_SKILL_DIR}/fx gate <job>` starts a round. For each changed repository, in merge
 order, stopping at the first failure: all work committed; no protected or frozen
@@ -1464,3 +1498,42 @@ is saved without the user's approval.
 
 After a job, when there is nothing new, no logic to apply and the knowledge is current, say
 nothing about learning.
+
+### Notes on the skill itself (`fx skill-note`)
+
+What the factory learns about a project goes into `lessons.md`. What it learns about the skill itself (these
+instructions, an agent's instructions, fx) goes to the skill's public repository as a GitHub issue, so the skill gets
+better for everyone. Every agent's prompt says how; the session writes one too, after a job ends (pull request open,
+or the job stopped), when it saw something worth it: a step that cost a lot for nothing (compare `fx status`'s
+tokens and minutes with the size of the change), a rule that sent the job the wrong way, an fx answer that misled.
+
+The bar is high: only what **really** needs changing, met in this run, with what happened as evidence. Not a taste,
+not a problem of the project's code or settings (that is a lesson or a fix in the factory repository), and not a
+repeat of a note already posted: fx comments on the open issue of the same note instead. At most one note per agent
+run and three per job.
+
+1. Write the note to a file in the job folder, in general words: `## Problem`, `## Evidence` (what happened in this
+   run: the step, the numbers, the fx answer), `## Change` (what to write or do instead). Never paste the project's
+   code, names, links or data. fx removes the project's names, links, ticket keys, paths, e-mail addresses and
+   secrets anyway, and adds nothing about the user or the machine.
+2. `python3 ${CLAUDE_SKILL_DIR}/fx skill-note --job <KEY> --agent session --title "<what should change>"
+   --where <plugin file, such as skills/code/SKILL.md, or an fx command, such as "fx gate"> --file <note>`.
+3. fx installs the GitHub command line (`gh`) when it is missing. When gh is not logged in, the answer has
+   `ask_user`: tell the user, in their language and in full, what it says. Logging in is only for posting this note
+   as a public issue on the skill's repository, under their GitHub account; what is posted is the note alone; fx
+   never sees the password; `FACTORY_SKILL_FEEDBACK=off` turns notes off. They log in with `gh auth login` when they
+   like, and the next note (or `fx skill-note --push`) posts what waited. Never stop or hold a job for this.
+
+Say in one line which notes were posted (`sent`, with their links), and nothing when none was.
+
+### Long files (`fx tidy`)
+
+An agent reads a whole file, so no knowledge or logic file grows past `learning.file_max_kb` (12 KB). A longer
+knowledge file becomes a folder of the same name: `README.md` is the index (one row per part: file, what it holds),
+one file per `##` part, and agents are pointed at the index and read only the parts their work needs. fx splits it
+itself, with no agent: `fx tidy` for the whole factory, and `fx knowledge apply` for what a refresh made too long.
+In `logic/`, what changed when is in `logic/history.md` (fx adds a row for each change it applies; no agent reads
+it), a module's open points are in its `open.md` (intake and spec read them), and a feature file over the limit is
+split into sub-features by the logic writer (`fx logic ctx --split <file>`; `fx logic check` lists them in
+`too_long`, which stops nothing). A factory written by an older version is brought to this form by re-running
+`/auto-factory:code init` (Phase 1: Files written by an older version).

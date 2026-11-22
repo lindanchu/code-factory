@@ -191,28 +191,32 @@ class ChecksTamperTest(GateCase):
             self.commit_in(self.work(self.job, n), "%s.txt" % n, "work\n")
 
     def test_an_uncommitted_change_to_another_repository_s_script(self):
-        write(os.path.join(self.factory, "checks", "fe.sh"), "exit 0 # tampered\n")
-        code, res = self.gate()
-        self.assertEqual(code, 3, res)
-        self.assertIn("checks/fe.sh", res["error"])
+        write(os.path.join(self.factory, "checks", "fe.sh"), 'echo tampered\nexit 0\n')
+        code, res = self.gate()  # the gate reads the scripts as committed, and says what it left out
+        self.assertEqual((code, res.get("gate")), (0, "PASS"), res)
+        self.assertTrue(any("left them out" in n and "checks/fe.sh" in n for n in res["notes"]), res)
+        self.assertNotIn("tampered", slurp(res["report"]))
 
     def test_a_helper_file_a_script_sources(self):
         write(os.path.join(self.factory, "checks", "_lib.sh"), "ok() { echo helper ran; }\n")
         write(os.path.join(self.factory, "checks", "be.sh"), '. "$(dirname "$0")/_lib.sh"\nok\n')
         self.commit_factory()
         write(os.path.join(self.factory, "checks", "_lib.sh"), "ok() { echo tampered; }\n")
-        code, res = self.gate()
-        self.assertEqual(code, 3, res)
-        self.assertIn("checks/_lib.sh", res["error"])
-        sh(["git", "checkout", "--", "checks/_lib.sh"], self.factory)
         write(os.path.join(self.factory, "checks", "_more.sh"), "ok() { :; }\n")
-        code, res = self.fx("gate", self.job)
-        self.assertEqual(code, 3, res)
-        self.assertIn("not committed: checks/_more.sh", res["error"])
-        os.remove(os.path.join(self.factory, "checks", "_more.sh"))
-        # the project's code, run by a checks script, rewrites the helper while the gate runs
-        lib = os.path.join(self.factory, "checks", "_lib.sh")
-        write(os.path.join(self.factory, "checks", "be.sh"), '. "$(dirname "$0")/_lib.sh"\necho "# x" >> %s\nok\n' % lib)
+        code, res = self.gate()
+        self.assertEqual((code, res.get("gate")), (0, "PASS"), res)
+        report = slurp(res["report"])
+        self.assertIn("helper ran", report)
+        self.assertNotIn("tampered", report)
+        left = "\n".join(n for n in res["notes"] if "left them out" in n)
+        self.assertIn("checks/_lib.sh", left)
+        self.assertIn("not committed: checks/_more.sh", left)
+
+    def test_the_code_rewriting_a_helper_while_the_gate_runs(self):
+        # the project's code, run by a checks script, rewrites the helper the gate reads (its frozen copy)
+        write(os.path.join(self.factory, "checks", "_lib.sh"), "ok() { echo helper ran; }\n")
+        write(os.path.join(self.factory, "checks", "be.sh"),
+              '. "$(dirname "$0")/_lib.sh"\necho "# x" >> "$(dirname "$0")/_lib.sh"\nok\n')
         self.commit_factory()
         code, res = self.gate()  # the round is put aside, not failed: the builder did nothing wrong
         self.assertEqual(code, 3, res)
@@ -221,8 +225,7 @@ class ChecksTamperTest(GateCase):
         self.assertIn("checks/_lib.sh", res["error"])
 
     def test_one_repository_s_checks_changing_another_s_script(self):
-        target = os.path.join(self.factory, "checks", "fe.sh")
-        write(os.path.join(self.factory, "checks", "be.sh"), "echo '# tampered' >> %s\nexit 0\n" % target)
+        write(os.path.join(self.factory, "checks", "be.sh"), 'echo "# tampered" >> "$(dirname "$0")/fe.sh"\nexit 0\n')
         self.commit_factory()
         code, res = self.gate()  # the round is put aside, not failed
         self.assertEqual(code, 3, res)

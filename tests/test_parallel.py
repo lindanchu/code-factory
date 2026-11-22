@@ -163,7 +163,7 @@ class Box:
     def fx(self, factory, *argv, stdin=None, env=None):
         return self.result(self.popen(factory, *argv, stdin=stdin, env=env), stdin)
 
-    def project(self, name):
+    def project(self, name, files=None):
         seed = os.path.join(self.root, "seed-" + name)
         os.makedirs(seed)
         sh(["git", "init", "-q", "-b", "main"], seed, self.env)
@@ -171,6 +171,8 @@ class Box:
         write(os.path.join(seed, "src", "a.py"), "a = 1\n")
         write(os.path.join(seed, "src", "b.py"), "b = 1\n")
         write(os.path.join(seed, "web", "c.js"), "var c = 1;\n")
+        for rel, text in (files or {}).items():
+            write(os.path.join(seed, rel), text)
         sh(["git", "add", "-A"], seed, self.env)
         sh(["git", "commit", "-q", "-m", "base"], seed, self.env)
         origin = os.path.join(self.root, name + ".git")
@@ -1172,12 +1174,12 @@ exit 0
         self.assertEqual(self.box.job(f, job)["stage"], "build")
         self.assertIn("sqli", slurp(os.path.join(f, "jobs", job, "round-1", "security.md")))
 
-    def test_a_file_written_by_hand_and_not_committed_stops_only_its_own_job(self):
+    def test_a_file_written_by_hand_and_not_committed_counts_for_nothing(self):
         write(os.path.join(self.f, "overrides", "OVR-1.json"),
               json.dumps({"unprotect": ["src/a.py"], "accepted_rules": [], "approved": "nobody"}))
-        code, res = self.box.fx(self.f, "gate", self.job)
-        self.assertEqual(code, 3, res)
-        self.assertIn("overrides/OVR-1.json", res["error"])
+        code, res = self.box.fx(self.f, "gate", self.job)  # the gate reads the factory as committed: no override
+        self.assertEqual(res.get("gate"), "FAIL", res)
+        self.assertTrue(any("left them out" in n and "overrides/OVR-1.json" in n for n in res["notes"]), res)
         other = self.box.new(self.f, "OVR-3")["job"]
         self.box.to_build(self.f, other)
         self.assertEqual(self.box.fx(self.f, "gate", other)[1].get("gate"), "PASS")
@@ -1990,7 +1992,9 @@ class LimitsTest(BoxCase):
     PLAIN = "| Password length | 8 | `app/User.php:4` | - | - |"
 
     def factory_with(self, name, *rows, limits_env="process"):
-        f = self.box.factory(name)
+        # the code the table cites is there: limits are marked only on logic that passes its check
+        cited = {p: "line\n" * 12 for p in ("config/api.php", "app/Login.php", "app/User.php")}
+        f = self.box.factory(name, origin=self.box.project(name, files=cited))
         write(os.path.join(f, "logic", "README.md"), "# Logic\n")
         write(os.path.join(f, "logic", "auth", "README.md"), self.TABLE % "\n".join(rows))
         cfg = json.load(open(os.path.join(f, "factory.json")))

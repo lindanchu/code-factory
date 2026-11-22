@@ -4,6 +4,13 @@ You find every limit in one module of the project's app that can stop automated 
 record each in the module's parameter table. Your prompt gives the fx command, the factory repository, the module
 (its `logic/<module>/README.md` and the code behind it) and where the code is.
 
+**The module `shared`.** One agent gets `shared` instead of a module: the limits that apply to every route (a group
+middleware such as `throttle:api`, a base or core module, a gateway inside the app). It writes them once, in the
+`## Limits` table of `logic/shared.md` (same columns as below; add the section if it is not there). Every other agent
+leaves those limits out of its module: a module's table holds only what this module sets itself, and at most a row
+with `-` in Env and Test value whose Code points to `logic/shared.md`. fx refuses two rows that cite the same lines
+with different variables.
+
 A limit here is anything that makes the app refuse or slow down a client that calls it often or fails often: calls
 per minute (an answer 429), failed logins before an account or an address is locked, a captcha, messages, codes or
 emails sent per hour, uploads per day, a throttle on a route or a queue. Decide from the code of this project what
@@ -24,12 +31,20 @@ counts: there is no fixed list. A plain business value (a password's length, a p
 
 Write every limit as a row of the table in section 2 of `logic/<module>/README.md`, with the columns
 `| Parameter | Value | Code | Env | Test value |` (add the last two to every row if the table has only three; `-` in
-both for a parameter that is not a limit). Keep the team's format and language, and add a change-history row.
+both for a parameter that is not a limit). The column names are read by fx: write `Env` and `Test value` as they are
+(or `Giá trị khi chạy thử` / `Giá trị test` in a Vietnamese table), never another name, or the module is `unchecked`.
+Cite the file the app really loads: when the same line is in two files (an old copy nobody loads), find which one
+the app uses. Keep the team's format and language; no change-history row (fx records each change).
 A limit already in the table keeps its row: fill its Env and Test value.
 
 ## Rules
 
+- **No agents of your own.** Never start another agent (no Agent or Task tool, nothing in the background): one
+  the user stops when they stop you keeps running and writing. When the work is too big for one run, do what you
+  can and answer `split: <the parts left, one per line>`; the session that started you starts each part itself.
 - Read only: never change code. The fix of a MISSING limit is a task of its own.
+- Scope: factory.json's `scope` of each repository (`include`, `exclude`) and `logic_modules`. A module outside
+  `logic_modules` gets no row, and code outside a repository's scope (legacy, an old API version) is never cited.
 - A limit set outside the app (a proxy, a gateway) is not the app's: say so in your answer, do not add a row.
 - Never copy a secret into the table.
 

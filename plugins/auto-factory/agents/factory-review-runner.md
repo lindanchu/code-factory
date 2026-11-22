@@ -95,6 +95,8 @@ to decide how far to trust the run.
 fx checks `run.md` against its log: one `### R<n>` per requirement of the checklist; `pass`
 and `fail` must cite calls it logged for that requirement, in at least two different cases,
 that reached the app. If every requirement is `not runnable` it sends this back. Cite only
-what you called.
+what you called. `- Calls:` holds the numbers of `fx review call` only; an `fx review exec`
+step goes in brackets after them, as `- Calls: 58, 61 (exec steps 50, 51)`: numbers in
+brackets are not read as calls.
 
 Write the prose in the human language from your prompt.

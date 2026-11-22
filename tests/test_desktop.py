@@ -6,6 +6,7 @@ built for Windows and driven in WebView2, is not part of this layer.
     python3 -I -m unittest discover -s tests -p test_desktop.py
 """
 import json
+import errno
 import os
 import shutil
 import subprocess
@@ -401,7 +402,7 @@ class ReviewFixesTest(unittest.TestCase):
             self.assertIn("is running", str(e.exception))
         with D._Lock(path, wait_sec=0):   # free again
             pass
-        with mock.patch.object(D.fcntl, "flock", side_effect=OSError(37, "No locks available")):
+        with mock.patch.object(D.fcntl, "flock", side_effect=OSError(errno.ENOLCK, "No locks available")):
             with self.assertRaises(D.DesktopError) as e:
                 with D._Lock(path):
                     pass

@@ -280,15 +280,28 @@ elif name == "limactl":
     run_env.update(env)
     with open(os.environ["STUB_LOG"], "a") as f:
         f.write(json.dumps({"tool": "box", "cmd": script, "cwd": cwd, "env": sorted(env)}) + "\n")
-    m = re.search(r"setsid bash -lc (.+?) >> (.+?) 2>&1 < /dev/null & echo \$! > (\S+)$", script)
+    m = re.search(r"setsid bash -l?c (.+?) >> (.+?) 2>&1 < /dev/null & echo \$! > (\S+)$", script)
     if m:
         log = shlex.split(m.group(2))[0]
         os.makedirs(os.path.dirname(log), exist_ok=True)
-        p = subprocess.Popen(["bash", "-c", shlex.split(m.group(1))[0]], cwd=cwd, env=run_env,
+        inner = shlex.split(m.group(1))[0]
+        em = re.match(r"bash -lc (.+); echo \$\? > (\S+)$", inner, re.S)
+        if em:  # the command, then its exit code where fx reads it (none left from an earlier start)
+            if os.path.exists(pidfile(em.group(2))):
+                os.remove(pidfile(em.group(2)))
+            inner = "bash -c %%s; echo $? > %%s" %% (em.group(1), shlex.quote(pidfile(em.group(2))))
+        p = subprocess.Popen(["bash", "-c", inner], cwd=cwd, env=run_env,
                              stdout=open(log, "ab"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                              start_new_session=True)
         with open(pidfile(m.group(3)), "w") as f:
             f.write(str(p.pid))
+        sys.exit(0)
+    m = re.match(r"cat (/run/\S+\.exit)$", script)
+    if m:  # the exit code of what was started above
+        try:
+            sys.stdout.write(open(pidfile(m.group(1))).read())
+        except OSError:
+            sys.exit(1)
         sys.exit(0)
     m = re.search(r"test -f (\S+) && kill", script)
     if m:
@@ -735,9 +748,19 @@ class FactorySettingsTest(FxTestCase):
         self.assertFalse(os.path.exists(os.path.join(self.f.out, "tampered")))
         self.assertEqual(self.f.job()["round"], 0)
 
-    def test_a_plain_change_is_refused(self):
+    def assert_left_out(self, because=""):
+        """A change the folder has and its commit has not never reaches the gate: it reads the factory as committed,
+        from a worktree of its own, runs nothing of the change, and says what it left out."""
+        code, res = self.gate()
+        self.assertEqual(code, 0, res)
+        self.assertEqual(res["gate"], "PASS", res)
+        self.assertTrue(any("left them out" in n and because in n for n in res.get("notes") or []), res)
+        self.assertFalse(os.path.exists(os.path.join(self.f.out, "tampered")))
+        self.f.save_job(stage="build", round=0, gate=None)  # the next try starts from a build again
+
+    def test_a_plain_change_is_left_out(self):
         self.tamper_checks()
-        self.assert_refused("checks.sh")
+        self.assert_left_out("checks.sh")
 
     def test_a_committed_factory_runs(self):
         self.assertEqual(self.gate()[1]["gate"], "PASS", self.checks_md())
@@ -748,13 +771,13 @@ class FactorySettingsTest(FxTestCase):
                 with self.subTest(how=how, name=name):
                     sh(["git", "update-index", how, name], self.fac)
                     tamper()
-                    self.assert_refused("differs from what is committed: %s" % name)
+                    self.assert_left_out("differs from what is committed: %s" % name)
                     sh(["git", "update-index", how.replace("--", "--no-"), name], self.fac)
                     sh(["git", "checkout", "-q", "--", name], self.fac)
 
     def test_telling_git_not_to_look_is_enough_to_stop_it(self):
         sh(["git", "update-index", "--assume-unchanged", "checks.sh"], self.fac)
-        self.assert_refused("git is told not to look at checks.sh")
+        self.assert_left_out("git is told not to look at checks.sh")
 
     def test_a_clean_filter_cannot_vouch_for_a_changed_file(self):
         blob = sh(["git", "rev-parse", "HEAD:checks.sh"], self.fac).strip()
@@ -763,7 +786,7 @@ class FactorySettingsTest(FxTestCase):
         size = os.path.getsize(os.path.join(self.fac, "checks.sh"))
         write(os.path.join(self.fac, "checks.sh"), "exit 0 #".ljust(size - 1, "x") + "\n")  # same size: git asks the filter
         self.assertEqual(sh(["git", "status", "--porcelain", "--", "checks.sh"], self.fac), "", "git itself sees nothing")
-        self.assert_refused("differs from what is committed: checks.sh")
+        self.assert_left_out("differs from what is committed: checks.sh")
 
     def test_a_symlink_is_not_the_file(self):
         other = os.path.join(self.tmp, "elsewhere.sh")
@@ -771,7 +794,7 @@ class FactorySettingsTest(FxTestCase):
         os.remove(os.path.join(self.fac, "checks.sh"))
         os.symlink(other, os.path.join(self.fac, "checks.sh"))
         sh(["git", "update-index", "--assume-unchanged", "checks.sh"], self.fac)
-        self.assert_refused("differs from what is committed: checks.sh")
+        self.assert_left_out("differs from what is committed: checks.sh")
 
     def crlf_checkout(self, name):
         sh(["git", "config", "core.autocrlf", "true"], self.fac)
@@ -793,7 +816,7 @@ class FactorySettingsTest(FxTestCase):
         """They break `set -e` and `false`, and git status says nothing with core.autocrlf on."""
         self.crlf_checkout("checks.sh")
         self.assertEqual(sh(["git", "status", "--porcelain", "--", "checks.sh"], self.fac).strip(), "")
-        self.assert_refused("differs from what is committed: checks.sh")
+        self.assert_left_out("differs from what is committed: checks.sh")
 
     def test_a_path_written_with_dot_slash(self):
         write(os.path.join(self.fac, "own.toml"), "x = 1\n")
@@ -949,8 +972,8 @@ class FactorySettingsTest(FxTestCase):
         self.assertEqual(res["next"], "gate")
 
     def test_what_checks_runs_cannot_change_them_unnoticed(self):
-        write(os.path.join(self.fac, "checks.sh"),
-              'echo "# later" >> "%s/factory.json"\nexit 0\n' % self.fac)
+        write(os.path.join(self.fac, "checks.sh"),  # the settings the gate reads: its frozen copy
+              'echo "# later" >> "$FACTORY_DIR/factory.json"\nexit 0\n')
         self.commit_all("checks that reach out")
         code, res = self.gate()
         self.assert_the_round_did_not_count(code, res)
@@ -970,11 +993,11 @@ class FactoryRulesTest(FactorySettingsTest):
     def test_a_rule_changed_behind_gits_back(self):
         sh(["git", "update-index", "--assume-unchanged", "rules/own.yml"], self.fac)
         write(os.path.join(self.fac, "rules", "own.yml"), "rules: [{}]\n")
-        self.assert_refused("rules/own.yml")
+        self.assert_left_out("rules/own.yml")
 
     def test_a_new_rule_that_is_not_committed(self):
         write(os.path.join(self.fac, "rules", "more.yml"), "rules: []\n")
-        self.assert_refused("not committed: rules/more.yml")
+        self.assert_left_out("not committed: rules/more.yml")
 
     def test_what_semgrep_would_not_load_is_nobodys_business(self):
         write(os.path.join(self.fac, "rules", ".DS_Store"), "finder\n")
@@ -994,7 +1017,7 @@ class FactoryRulesTest(FactorySettingsTest):
             with self.subTest(name=name):
                 sh(["git", "update-index", "--skip-worktree", name], self.fac)
                 write(os.path.join(self.fac, name), "changed = 1\n")
-                self.assert_refused(name)
+                self.assert_left_out(name)
                 sh(["git", "update-index", "--no-skip-worktree", name], self.fac)
                 sh(["git", "checkout", "-q", "--", name], self.fac)
 
@@ -1964,7 +1987,7 @@ class ScriptTest(unittest.TestCase):
             self.assertEqual(json.load(f)["version"], v)
         with open(os.path.join(ROOT, "plugins", "auto-factory", "skills", "code", "shared", "VERSION")) as f:
             self.assertEqual(f.read().strip(), v)  # the two skills ship together
-        self.assertEqual(v, "3.8.0")
+        self.assertEqual(v, "3.9.0")
 
     def test_three_commands(self):
         """/auto-factory:code and /auto-factory:review (no auto test here): a plugin skill's command is

@@ -36,13 +36,19 @@ the code, the knowledge or other modules' files.
 
 - `logic/<module>/README.md` from the module template: module-wide rules, the
   **parameter table** (every limit, duration, length, count: one place only;
-  other files link to it), module-wide open points, change history.
+  other files link to it); its section 3 only points to `logic/<module>/open.md`,
+  where the module-wide open points, conflicts and questions go.
 - One `logic/<module>/<feature>.md` per feature (a user-visible capability: a
   form, a list, an action, a flow), from the feature template: inputs and
   validation, back-end cases → results/error codes, front-end states with the
   component and the UI text **verbatim in its original language**, navigation,
-  a Mermaid flow of the main path and its error branches, open points, change
-  history (one row: today, "written from the code at init").
+  a Mermaid flow of the main path and its error branches, open points. No change
+  history in any file: fx records each change in `logic/history.md`.
+- **Short files.** Every file stays under the limit your prompt names (12 KB by
+  default): an agent reads the whole file. A feature that needs more is several
+  sub-features, each a feature file of its own with sections 1-5 (a request
+  step, a verify step, a reset step), linked to each other. With **Split only**
+  in your prompt, split that one file so, keeping every rule, citation and test.
 - Names: lowercase English, hyphenated (`invoice-export.md`).
 - Rules as **case → result** tables, not prose. Separate back end and front
   end; say what the front end blocks without calling the API.
@@ -63,8 +69,10 @@ the code, the knowledge or other modules' files.
 - Never copy secrets or real personal data; name variables, not values.
 
 Run the check command from your prompt before you finish and fix everything it
-reports for your module. Then reply with a short list: the files you wrote,
-the conflicts and the most important open points.
+reports for your module, except "not in the index of logic/README.md": the
+session adds the index rows afterwards with `fx logic index`, so never list
+rows for it either. Then reply with a short list: the files you wrote, the
+conflicts and the most important open points.
 
 ## Language
 
@@ -72,6 +80,6 @@ Write the prose in the human language from your prompt. Keep the section
 numbers (`## 1.` to `## 5.`), tables, code, paths, identifiers and quoted UI
 text exactly. When the human language is Vietnamese, use the team's headings:
 `## 1. Đầu vào`, `## 2. Xử lý phía BE`, `## 3. Hiển thị phía FE`,
-`## 4. Điều hướng`, `## 5. Điểm chưa chốt`, `## Lịch sử thay đổi`, and in the
+`## 4. Điều hướng`, `## 5. Điểm chưa chốt`, and in the
 module README `## 1. Quy tắc chung module`, `## 2. Bảng thông số`,
 `## 3. Điểm chưa chốt`.

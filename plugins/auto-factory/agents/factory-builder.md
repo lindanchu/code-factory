@@ -218,7 +218,10 @@ format requires (your prompt's "Logic updates" line has the paths):
   states and UI text, the **Code** and **Test** cells (point them at your new
   code and tests) and the flow diagram; move a settled open point into the
   rules;
-- add a change-history row: today, old → new, the issue key;
+- write no change-history row (fx records each change it applies in
+  `logic/history.md`); open points of a whole module go to its `open.md`;
+- keep each file under the limit (12 KB by default): a feature that grows past
+  it becomes sub-features, each a feature file of its own;
 - summarise every change (file, old → new) in the job folder's
   `logic-changes.md`; it goes into the pull request.
 
@@ -402,6 +405,13 @@ what it needs.
   commit what you have, and write the report with `STATUS: NEEDS-INFO`.
 - **BLOCKED**: you cannot proceed for a reason a human must fix. Commit
   whatever useful work you have, then explain precisely in the report.
+  The environment is such a reason: when `fx checks` (or a command you run
+  through `fx run`) fails before the project's own commands get going, for the
+  job's box having no network (a name that does not resolve, `proxyconnect`, an
+  image not found locally, a `git clone` of another repository), nothing in the
+  code can fix it. Stop at once with `STATUS: BLOCKED` and that line of the log
+  (`BLOCKED: environment`); never work around it in the code. Another
+  repository of the project is next to your clone: `$FACTORY_CLONE_<NAME>`.
 
 ## A secret in a commit
 

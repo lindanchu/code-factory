@@ -19,6 +19,11 @@ guards on each, the policies and gates, the queries that limit data to its owner
 accounts exist, with which role, owning which data), the knowledge's security file (roles and who may do what) and
 the logic of each module.
 
+**Scope.** factory.json may limit what the factory works from: each repository's `scope` (`include` and `exclude`
+globs, a `note`) and `logic_modules` (the modules whose logic and rows it keeps; empty: all). Read it first. Write
+rows, logic and seed data only for the modules `logic_modules` names; list every other module's routes in
+`out_of_scope` below; never read code outside a repository's scope to work out who may do what.
+
 ## The human part: in `logic/`
 
 Each module's `logic/<module>/README.md` gets a section `## Permissions` (in the knowledge's language: `## Quyền`),
@@ -41,6 +46,11 @@ Write what the app **should** do. Where the code does something else, or you can
 right and put the row in your doubts: the user decides.
 
 ## The technical part: `stack/permissions.json`
+
+A path of the factory repository in a logic file (`stack/permissions-api.json`, `checks/api.sh`) is not a citation
+of the code: fx's logic check knows the factory's folders and leaves them alone. Never cite the code without its
+repository (`api:routes/web.php`) in a project of several.
+
 
 (`stack/permissions-<repo>.json` in a project of several apps.) Never a password, token or key in it: commands read
 them when they run.
@@ -65,7 +75,8 @@ them when they run.
                       "own_by": {"key": {"id": "3"}}},
   "POST /admin/projects": {"body": {"name": "Permission check"}, "type": "form"}
  },
- "not_app": {"GET /_ignition/health-check": "a development package; not served in production"}
+ "not_app": {"GET /_ignition/health-check": "a development package; not served in production"},
+ "out_of_scope": {"* /api/v2/championship/**": "championship"}
 }
 ```
 
@@ -99,6 +110,9 @@ them when they run.
   `allow_status` when an allowed call answers something unusual; `no_change: "<why>"` for an allowed write that changes
   no data (a logout). Values come from the seed data.
 - `not_app`: routes that are not the app's (a development package), each with why. The user confirms each.
+- `out_of_scope`: when factory.json sets `logic_modules`, the routes of every other module, as `"METHOD /glob"`
+  (METHOD may be `*`; `*` in the path also matches `/`) with the module they belong to. They need no row, and
+  `fx permissions try` counts them apart. The user confirms the list. Never a module that `logic_modules` names.
 - `none: "<why>"` alone instead of all this, for an app that serves no route of its own (it only calls another API).
 
 ## Try it
@@ -107,6 +121,12 @@ With a job whose app runs (`fx app up <job>`): `fx permissions try <job>` calls 
 the table says, the routes without a row and the rows without a route. A mismatch where the code is wrong is a
 finding, not yours to fix: keep the table as it should be and report it. Fix the technical part until every other
 line is gone. `fx app down <job>` when done. At init there is no app: fx selftest runs it on the base branch.
+
+## No agents of your own
+
+Never start another agent (no Agent or Task tool, nothing in the background): one the user stops when they stop you
+keeps running and writing. When the work is too big for one run (many modules), do what you can and answer
+`split: <the parts left, one per line>` (with your other lines); the session that started you starts each part itself.
 
 ## Job mode
 
@@ -124,6 +144,7 @@ rows: <n> routes, users <names>
 rule: <one rule in plain words, such as "a viewer sees only the projects assigned to them">
 doubt: <METHOD /route>: <what the code does, what you wrote, the question for the user>
 ask: <what you need from the user, in plain words>
+split: <a part left for another run, such as the modules not done yet>
 ```
 
 At most 8 `rule:` lines, all `doubt:` lines (the user reads them, not the whole table), `ask:` only when you cannot go

@@ -24,7 +24,15 @@ The two kinds are always kept apart, each with its own logic:
 
 ## Rules
 
+- **No agents of your own.** Never start another agent (no Agent or Task tool, nothing in the background): one
+  the user stops when they stop you keeps running and writing. When the work is too big for one run, do what you
+  can and answer `split: <the parts left, one per line>`; the session that started you starts each part itself.
 - **Test accounts of the test stack only**, from its seed data. Never a real person's account, never production.
+- **A command that says why it failed.** It prints the HTTP status of each request on stderr (`curl -sS -o … -w
+  '%{http_code}\n' … >&2`) and exits non-zero when it got no value (`[ -n "$v" ] || exit 1`): a pipeline such as
+  `curl | sed | tail` exits 0 with nothing, and then nobody can tell a 401 from a 429 or a 502. fx keeps what it
+  printed on stderr in `login.log` (the job's folder, or `jobs/_selftest/`) and in its error. fx tries a scan's login
+  three times, a few seconds apart, before it says `next: login`: one that still fails is not a slow start.
 - **Never write a password, token or key into the command.** The command reads it when it runs: from the seed file,
   from the stack's environment, or by issuing a fresh key on the stack. The command runs in the app's folder with the
   app's environment, and prints the header's value as its **last line**.
@@ -42,7 +50,16 @@ The two kinds are always kept apart, each with its own logic:
   `fx login <job> --kind web|api --command '<command>' --header <header> --check <path> --role <role>`.
   Save it with `--save job` when the job's own change is what changed login (it then stays with the job until its
   pull request is merged), otherwise with `--save factory`. Stop the app when you are done (`fx app down <job>`).
-- **At init:** no app runs yet. Save with `--untested --save factory`; `fx selftest` proves it right after.
+- **At init:** no job runs yet. Start the base branch's app without one:
+  `fx app up --selftest --repo <repo>` (it clones and sets up the repository and the apps it needs), then try each
+  way on it exactly as above with `fx login --selftest --repo <repo> --kind ... --command ... --check ...`, and
+  save the one whose check answers 2xx with `--save factory`. `fx app down --selftest --repo <repo>` when done.
+  Never save a way you did not see work: a wrong one costs a selftest of half an hour to find out.
+- **Only when that app cannot be started here** (its setup or start fails for a reason you cannot fix, and you said
+  which): `--untested --why "<that reason>" --save factory`; `fx selftest` proves it. Your answer says it was not
+  tried, and why.
+- **Several repositories:** `--save factory` needs `--repo <repo>`: fx saves the way where that repository's scans
+  read it (its own `security` block when it has one, since that block replaces the project's).
 - Then write the description in `knowledge/<repo>/environment.md`, one section per kind: how the login works, the
   account and its role, the check page, what the command does, and what only another role can open. Write it in
   the knowledge's language. Never copy a password, token or key into it.
