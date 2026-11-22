@@ -17,7 +17,20 @@ main.**
 - Trên macOS: cả bộ test qua (1811 test, 18 bỏ qua vì cần VM sandbox thật).
 - Test với VM sandbox thật trên macOS (`FX_SANDBOX_REAL=1`, `test_isolation.py`): qua, 49 test (48 qua, 1 bỏ qua vì
   cần bản Tauri thật trên Windows). Cách khởi chạy app mới trong box chạy được trên VM thật.
-- Chưa chạy lần nào trên Windows/WSL.
+- Trên Windows/WSL (Ubuntu trong WSL2, kernel 6.18, Python 3.14, Lima qemu), 2026-11-22: cả 5 bước dưới đây qua,
+  không phải sửa gì.
+  1. Cả bộ test: 1811 test qua, 15 bỏ qua (17,9 phút).
+  2. Test với VM sandbox thật: 49 test (48 qua, 1 bỏ qua vì cần bản Tauri thật). VM đang tắt thì phải
+     `limactl start fx-sandbox` trước: test không tự bật nó.
+  3. Factory trên `/mnt/c` (một factory giả dựng như bộ test, factory, work và `_factory/` đều trên `/mnt/c`): gate
+     `--dry-run` tạo được `_factory/<sha12>/`, `local` và thư mục của lane là symlink thật, script trong `checks/` chạy
+     từ bản freeze, `$FACTORY_DIR` trỏ vào đó, đọc được `local/`, lane và file nó `source`. Không cần copy thay symlink.
+  4. CRLF: với `core.autocrlf=true`, bản trong factory thành CRLF nhưng bản freeze vẫn LF, gate chạy được. Đối chứng
+     với `FACTORY_NO_FREEZE=1`: round bị gạt ra ("differs from what is committed"), nên chính bản freeze làm việc này.
+  5. `gh`: test với `gh` giả qua (trong bộ test); `fx install run --names gh` tải `gh` 2.105.0 vào
+     `~/.cache/code-factory/tools/bin`, không cần sudo. Chưa đăng nhập, không gọi `fx skill-note` thật.
+- **Còn lại:** `RealDesktopReviewTest` (cần bản Tauri thật trên Windows, `FACTORY_TEST_TAURI=1`) chưa chạy ở đâu cả.
+  Nó không nằm trong 5 bước dưới đây; quyết có chạy hay không trước khi xoá file này.
 
 ## 3.9.0 đổi những gì (phần có thể chạy khác trên Windows)
 
