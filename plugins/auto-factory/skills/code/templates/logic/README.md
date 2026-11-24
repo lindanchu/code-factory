@@ -10,20 +10,23 @@
 ## Folder structure
 ```
 logic/
-├── README.md     index, conventions
+├── README.md     list of modules, conventions
 ├── history.md    what changed when (fx adds a row for each change; no agent reads it to work)
 ├── shared.md     rules shared by the whole system
 └── <module>/
-    ├── README.md     module-wide rules and the parameter table
+    ├── README.md     its feature table, module-wide rules and the parameter table
     ├── open.md       the module's open points, conflicts and questions
     ├── history.md    older history moved out of the module's files
     └── <feature>.md  one file per feature
 ```
 
-## Index
-| Module | File | Feature | Ticket |
-| ------ | ---- | ------- | ------ |
+## Modules
+| Module | Name |
+| ------ | ---- |
 <!-- index:end -->
+
+Each module's README.md lists its features in its feature table. fx keeps both tables (`fx logic index`): one row
+per module here, one per feature file there, so neither grows past the file limit.
 
 ## Conventions
 - Folder and file names: lowercase English, hyphenated.

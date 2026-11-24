@@ -1215,6 +1215,10 @@ def drop_clone(ctx, job, force=False):
             wp_stack_stop(ctx, job, pid)
     # a stack setup or an agent started: nothing stops it once its clone is gone
     clone_containers_stop([job["repos"][n]["worktree"] for n in names], ctx.work)
+    twins = [job["repos"][n]["worktree"].rstrip("/") + "-" + ZAP_TWIN for n in names]
+    clone_containers_stop([t for t in twins if os.path.isdir(t)], ctx.work)
+    for t in twins:  # the API scan's copies of the clones (security.zap_parallel on this machine)
+        shutil.rmtree(t, ignore_errors=True)
     for n in names:
         e = job["repos"][n]
         if e.get("setup_done"):
@@ -3588,8 +3592,9 @@ def cmd_ctx(ctx, a):
             "; a folder's README.md is the index of a long file split into parts: read it, then only the parts "
             "this work needs" if any(is_parts_dir(os.path.dirname(f)) for f in kf) else "", ", ".join(kf)))
     if logic_ready(ctx) and agent in ("intake", "spec", "builder", "code", "ux", "ui", "approver", "judge"):
-        lines.append("Project logic (the source of truth for business rules; read the index, then the files of the "
-                     "features this job touches): %s" % os.path.join(logic_dir(ctx), "README.md"))
+        lines.append("Project logic (the source of truth for business rules; read its list of modules, then the "
+                     "README.md of each module this job touches, whose feature table lists its features, then the "
+                     "files of those features): %s" % os.path.join(logic_dir(ctx), "README.md"))
     if logic_ready(ctx) and agent in ("intake", "spec"):
         opens = sorted(os.path.join(logic_dir(ctx), m, LOGIC_OPEN) for m in os.listdir(logic_dir(ctx))
                        if os.path.isfile(os.path.join(logic_dir(ctx), m, LOGIC_OPEN)))
@@ -4780,7 +4785,7 @@ def gate_round_repos(ctx, job, a, place):
             if n in idle:
                 continue
             try:
-                secs[n] = run_security(rctxs[n], views[n], sec_dir(n), urls.get(n))
+                secs[n] = run_security(rctxs[n], views[n], sec_dir(n), urls.get(n), stack=job)
             except ScannerLogin as e:
                 gate_void(ctx, job["id"], rn, rdir, place, "%s%s" % (label(n), e), next_step="login")
             for f_ in secs[n]["findings"]:
@@ -5229,7 +5234,7 @@ def gate_round_one(ctx, job, a, place):
         # Always: a factory.json without security.scanners means the template's defaults (all on). Every scanner runs.
         # Only ZAP may judge again what it found last round instead of scanning again, and only where zap_stored says so.
         try:
-            sec = run_security(ctx, job, rdir, app_url_, zap_from=zap_stored(ctx, job, rn, head))
+            sec = run_security(ctx, job, rdir, app_url_, zap_from=zap_stored(ctx, job, rn, head), stack=job)
         except ScannerLogin as e:
             gate_void(ctx, job["id"], rn, rdir, place, str(e), next_step="login")
         write_atomic(os.path.join(rdir, "security.md"), security_markdown(sec))
@@ -9237,7 +9242,9 @@ def limits_check(ctx, ldir=None, code=None, over=None):
         texts = {}
         for m in mods:
             for r in m["rows"] if m["cols"] else []:
-                for tok, a, b in CITE_RE.findall(r["code"]) if a else []:
+                for tok, a, b in CITE_RE.findall(r["code"]):
+                    if not a:
+                        continue  # a whole file or a pointer: no lines to compare
                     root, rel, err = cited_root(ctx, code, tok)
                     text = read(os.path.join(root, rel.lstrip("./")), None) if root and not err else None
                     for l in (text or "").splitlines()[int(a) - 1:int(b or a)]:
@@ -9331,6 +9338,14 @@ PERM_COMMANDS = {"routes": "prints every route of the app (for example `php arti
                  "restore": "puts the saved database back",
                  "fingerprint": "prints a line that changes whenever the data changes (sessions, logs and counters "
                                 "left out)"}
+
+
+PERM_RECIPE = 2  # how fx calls the permission table (2: everyone logs in before the snapshot); a kept selftest result
+# made another way stops counting
+
+
+class PermsKept(Exception):
+    """fx selftest: the permission table passed on exactly this before (its kept result stands)."""
 
 
 class PermsSetup(FxError):
@@ -9674,7 +9689,7 @@ def perm_login(rctx, job, url, who, conf):
     login = conf.get("login")
     if login:
         try:
-            header, value = login_run(rctx, job, dict(login, _kind="web"))
+            header, value = login_run(rctx, job, dict(login, _kind="web", _label="permission table (%s)" % who))
         except ScannerLogin as e:
             raise PermsSetup("%s cannot log in: %s" % (who, e.why))
         bad = login_check(url, login, header, value, extra=h)
@@ -9682,6 +9697,19 @@ def perm_login(rctx, job, url, who, conf):
             raise PermsSetup("%s cannot log in: %s" % (who, bad))
         h[header] = value
     return h
+
+
+def perm_still_in(url, conf, h):
+    """Whether the headers a kind of user logged in with still work, by its check page: after the database was put back
+    a login made before the snapshot normally does, and proving it is one call where logging in again may start a
+    container. No check page: it cannot be told, so no."""
+    login = conf.get("login")
+    if not login:
+        return True
+    if not login.get("check"):
+        return False
+    header = login.get("header") or "Authorization"
+    return not login_check(url, login, header, h.get(header), extra={k: v for k, v in h.items() if k != header})
 
 
 def perm_csrf(url, who, conf, headers):
@@ -9777,20 +9805,34 @@ def perm_matrix(rctx, job, url, tech, rows):
     whos = tech["who"]
     if tech.get("seed"):
         perm_cmd(rctx, job, tech["seed"], "seed", 900)
-    perm_cmd(rctx, job, tech["snapshot"], "snapshot", 900)
-    fp_cmd = lambda: perm_cmd(rctx, job, tech["fingerprint"], "fingerprint").strip()
-    fp0 = fp_cmd()
     sessions, missing, cells, mismatches, unchecked, count = {}, {}, [], [], [], [0]
+    # Everyone logs in before the snapshot: putting the database back then keeps their sessions and keys (a key made
+    # after it would be gone), so after a restore a login is only proved again, by one call, not made anew.
+    for who in sorted({p[1] for p in plan}):
+        sessions[who] = perm_login(rctx, job, url, who, whos[who])
+    perm_cmd(rctx, job, tech["snapshot"], "snapshot", 900)
+    fp = {"now": None}  # the data's fingerprint as last taken, while nothing can have changed it since
+
+    def fp_cmd():
+        fp["now"] = perm_cmd(rctx, job, tech["fingerprint"], "fingerprint").strip()
+        return fp["now"]
+    fp0 = fp_cmd()
+    to_prove = set()
 
     def restore():
         perm_cmd(rctx, job, tech["restore"], "restore", 900)
-        sessions.clear()
+        to_prove.update(sessions)
         if fp_cmd() != fp0:
             raise PermsSetup("its restore command does not bring the data back (the fingerprint differs)")
 
     def prepare(key, who):
+        if who in to_prove:
+            to_prove.discard(who)
+            if not perm_still_in(url, whos[who], sessions[who]):
+                sessions.pop(who)
         if who not in sessions:
             sessions[who] = perm_login(rctx, job, url, who, whos[who])
+            fp["now"] = None  # a login may write data of its own (a new key)
         h, form = sessions[who], {}
         if key.split(" ", 1)[0] not in PERM_READ:
             h, form = perm_csrf(url, who, whos[who], h)
@@ -9876,9 +9918,10 @@ def perm_matrix(rctx, job, url, tech, rows):
                     ok, why = False, ("its refusal is not the answer for an id that exists nowhere (%s and %s): it "
                                       "tells that the data exists" % (r["status"], m_["status"]))
         keep(key, who, vn, want, ok, why)
+    fp["now"] = None  # a read that wrote something is not put on the first write
     for key, who, vn, want, vals in writes:
         prepared = prepare(key, who)
-        before = fp_cmd()
+        before = fp["now"] or fp_cmd()  # the last one taken stands while only reads and CSRF pages came since
         r = call(key, who, vals, prepared)
         changed = fp_cmd() != before
         if unreached(key, r) and not changed:
@@ -10201,6 +10244,8 @@ def logic_check(ctx, ldir, code, only=None, check_index=True, link_roots=()):
         names = [n for n in names if n in only]
     problems, n_cite, n_exc = check_docs(ctx, ldir, names, code, link_roots=tuple(link_roots) + (logic_dir(ctx),))
     index = read(os.path.join(ldir, "README.md"), "") or ""
+    old_index = check_index and logic_index_old(index)
+    module_text = lambda m: read(os.path.join(ldir, m, "README.md"), "") or ""
     limit, too_long = doc_max_bytes(ctx), []
     for n in names:
         if n in ("README.md", "shared.md") or n.split("/")[-1] in LOGIC_ASIDE and n.count("/") <= 1:
@@ -10222,8 +10267,16 @@ def logic_check(ctx, ldir, code, only=None, check_index=True, link_roots=()):
             problems.append("%s: missing sections %s" % (n, ", ".join(missing)))
         if parts[1] != "README.md" and "```mermaid" not in text:
             problems.append("%s: no flow diagram (```mermaid)" % n)
-        if check_index and parts[1] != "README.md" and n not in index:
-            problems.append("%s: not in the index of logic/README.md" % n)
+        if check_index and parts[1] != "README.md" and not module_lists(module_text(parts[0]), parts[1]):
+            problems.append("%s: not in its module's feature table (logic/%s/README.md): %s adds it"
+                            % (n, parts[0], LOGIC_INDEX_MENDS))
+        if check_index and parts[1] == "README.md":
+            if not old_index and LOGIC_INDEX_END in index and not index_lists_module(index, parts[0]):
+                problems.append("%s/: not in the list of modules of logic/README.md: %s adds it"
+                                % (parts[0], LOGIC_INDEX_MENDS))
+            for f in module_table_gone(text, os.path.join(ldir, parts[0])):
+                problems.append("%s: its feature table lists %s, which does not exist: %s takes the row out"
+                                % (n, f, LOGIC_INDEX_MENDS))
         if doc_size(os.path.join(ldir, n)) > limit:
             too_long.append(n)
     if check_index and only is None:
@@ -10231,6 +10284,10 @@ def logic_check(ctx, ldir, code, only=None, check_index=True, link_roots=()):
             if os.path.isdir(os.path.join(ldir, d)) and not d.startswith(".") \
                     and not os.path.isfile(os.path.join(ldir, d, "README.md")):
                 problems.append("%s/: a module folder needs a README.md" % d)
+        if old_index:
+            problems.append("README.md: its index lists every feature, as an older version kept it: %s (or fx "
+                            "tidy) turns it into a list of modules, each module's README listing its features"
+                            % LOGIC_INDEX_MENDS)
         for ref in sorted(set(re.findall(r"[a-z0-9-]+/[a-z0-9-]+\.md|[a-z0-9-]+/README\.md", index))):
             if not os.path.isfile(os.path.join(ldir, ref)):
                 problems.append("README.md: the index lists %s, which does not exist" % ref)
@@ -10310,58 +10367,209 @@ def apply_logic(ctx, job, names, force=False):
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(os.path.join(sdir, n), dst)
     logic_tidy(ctx, ldir, only=set(names))  # a history or an open point the job wrote goes to its own file
+    # a new feature file into its module's feature table, a new module into logic/README.md
+    logic_index_sync(ldir, modules={n.split("/")[0] for n, is_new in zip(names, new) if is_new and n.count("/") == 1})
     idx = read(idx_path, "") or ""
-    new_rows, log_rows = [], []
-    for n, is_new in zip(names, new):
+    log_rows = []
+    for n in names:
         if n.split("/")[-1] in LOGIC_ASIDE:
             continue
-        if is_new and n.count("/") == 1 and not n.endswith("README.md") and n not in idx:
-            new_rows.append(logic_index_row(ldir, n, job["issue_key"]))
         log_rows.append("| %s | %s | %s: %s |" % (now()[:10], n, job["issue_key"],
                                                    (job.get("summary") or "").replace("|", "/")))
-    idx = logic_index_insert(idx, new_rows)
     log_path = logic_log_path(ldir)
     if log_path == idx_path:
         idx = insert_rows(idx, "log:end", log_rows)
     else:
         write_atomic(log_path, insert_rows(read(log_path, "") or "", "log:end", log_rows))
-    write_atomic(idx_path, idx)
+    if idx != (read(idx_path, "") or ""):
+        write_atomic(idx_path, idx)
     return names
 
 
-def logic_index_row(ldir, n, ticket=None):
-    """The index row of a feature file: module, link, its H1 and its ticket (the file's **Ticket:** line)."""
-    text = read(os.path.join(ldir, n), "") or ""
-    title = (re.search(r"(?m)^#\s+(.+)$", text) or [None, n])[1].strip()
-    if not ticket:
-        m = re.search(r"(?mi)^\*\*(?:Ticket|Ticket cha|Phiếu)\s*:?\*\*\s*:?\s*(.+)$", text)
-        ticket = (m.group(1).split("·")[0].strip() if m else "") or "-"
-    cell = lambda v: str(v).replace("|", "/")
-    return "| %s | [%s](%s) | %s | %s |" % (n.split("/")[0], n, n, cell(title), cell(ticket))
+# The logic's index has two levels, so that no index outgrows the file limit however many features there are:
+# logic/README.md lists the modules (one row each, before <!-- index:end -->), and each module's README.md lists its
+# features in its feature table. fx keeps both tables; an older index of one row per feature is turned into them.
+
+LOGIC_INDEX_END = "<!-- index:end -->"
+LOGIC_INDEX_MENDS = "fx logic index"  # every problem of the index names it: it mends them all
+LOGIC_MODULES_HEAD = ["| Module | Name |", "| ------ | ---- |"]
+LOGIC_FEATURES_HEAD = ["| Feature | File |", "| ------- | ---- |"]
+FEATURE_TABLE_HEAD_RE = re.compile(r"(?i)^\|\s*(?:feature|features|tính năng|chức năng)\s*\|")
+TABLE_SEP_RE = re.compile(r"^\s*\|\s*:?-")
 
 
-def logic_index_insert(idx, rows):
-    """The index with rows added, each after the last row of its module (grouped), else before <!-- index:end -->:
-    the marker stays right after the table's last row."""
-    for r in rows:
-        mod = r.split("|")[1].strip()
-        end = idx.find("<!-- index:end -->")
-        if end < 0:
-            break
-        start = idx.rfind("\n## ", 0, end)
-        lines = idx[:end].split("\n")
-        first = idx[:start + 1].count("\n") if start >= 0 else 0
-        at = None
-        for i in range(first, len(lines)):
-            cells = lines[i].strip().strip("|").split("|")
-            if lines[i].strip().startswith("|") and cells and cells[0].strip() == mod:
-                at = i
-        if at is None:
-            idx = insert_rows(idx, "index:end", [r])
-        else:
-            lines.insert(at + 1, r)
-            idx = "\n".join(lines) + idx[end:]
-    return idx
+def logic_title(path, fallback):
+    m = re.search(r"(?m)^#\s+(.+)$", read(path, "") or "")
+    return (m.group(1).strip() if m else fallback).replace("|", "/")
+
+
+def logic_row_of_feature(ldir, n):
+    """The row of a feature file (<module>/<feature>.md) in its module's feature table: its H1 and its link."""
+    f = n.split("/")[-1]
+    return "| %s | [%s](%s) |" % (logic_title(os.path.join(ldir, n), f[:-3]), f, f)
+
+
+def logic_module_row(ldir, mod):
+    """The row of a module in logic/README.md: its link and its name (the H1 of its README, without "Module" and its
+    slug)."""
+    name = logic_title(os.path.join(ldir, mod, "README.md"), mod)
+    name = re.sub(r"\s*\(%s\)\s*$" % re.escape(mod), "", name)
+    name = re.sub(r"(?i)^module\s+", "", name).strip() or mod
+    return "| [%s/](%s/README.md) | %s |" % (mod, mod, name)
+
+
+def logic_modules_on_disk(ldir):
+    return sorted(d for d in os.listdir(ldir) if not d.startswith(".") and
+                  os.path.isfile(os.path.join(ldir, d, "README.md"))) if os.path.isdir(ldir) else []
+
+
+def module_table_span(lines):
+    """(header line, line after the last row) of a module README's feature table: the table whose first column is
+    Feature, else the first table before the first ## heading. (None, where a new one goes) when there is none."""
+    first_h2 = next((i for i, l in enumerate(lines) if l.startswith("## ")), len(lines))
+    heads = [i for i, l in enumerate(lines) if FEATURE_TABLE_HEAD_RE.match(l.strip())]
+    heads = heads or [i for i in range(first_h2) if lines[i].lstrip().startswith("|")][:1]
+    for i in heads:
+        if i + 1 < len(lines) and TABLE_SEP_RE.match(lines[i + 1]):
+            j = i + 2
+            while j < len(lines) and lines[j].lstrip().startswith("|"):
+                j += 1
+            return i, j
+    return None, first_h2
+
+
+def module_table_text(text):
+    lines = text.split("\n")
+    i, j = module_table_span(lines)
+    return "\n".join(lines[i:j]) if i is not None else ""
+
+
+def module_lists(text, f):
+    """Whether a module README's feature table lists the feature file f (its file name)."""
+    return bool(re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(f), module_table_text(text)))
+
+
+def module_table_add(text, rows):
+    """A module README with rows added at the end of its feature table, or a feature table made before its first ##
+    heading."""
+    if not rows:
+        return text
+    lines = text.split("\n")
+    i, j = module_table_span(lines)
+    if i is not None:
+        lines[j:j] = rows
+        return "\n".join(lines)
+    block = LOGIC_FEATURES_HEAD + list(rows) + [""]
+    if j > 0 and lines[j - 1].strip():
+        block = [""] + block
+    lines[j:j] = block
+    return "\n".join(lines)
+
+
+def module_table_gone(text, mdir):
+    """The feature files a module README's feature table links to that are not in its folder."""
+    links = re.findall(r"\]\(\.?/?([A-Za-z0-9_-]+\.md)\)", module_table_text(text))
+    return sorted({f for f in links if not os.path.isfile(os.path.join(mdir, f))})
+
+
+def module_table_drop(text, gone):
+    """A module README without the rows of its feature table that link only to files in gone."""
+    if not gone:
+        return text
+    lines = text.split("\n")
+    i, j = module_table_span(lines)
+    if i is None:
+        return text
+    keep = []
+    for l in lines[i + 2:j]:
+        links = re.findall(r"\]\(\.?/?([A-Za-z0-9_-]+\.md)\)", l)
+        if not (links and all(f in gone for f in links)):
+            keep.append(l)
+    return "\n".join(lines[:i + 2] + keep + lines[j:])
+
+
+def index_lists_module(idx, mod):
+    return bool(re.search(r"\]\(\.?/?%s/(?:README\.md)?\)" % re.escape(mod), idx or ""))
+
+
+def logic_index_table(idx):
+    """(lines before the marker, index of the table's first line among them) of logic/README.md: the table right
+    before <!-- index:end -->. None without the marker."""
+    end = (idx or "").find(LOGIC_INDEX_END)
+    if end < 0:
+        return None
+    lines = idx[:end].rstrip("\n").split("\n")
+    k = len(lines)
+    while k > 0 and lines[k - 1].lstrip().startswith("|"):
+        k -= 1
+    return lines, k
+
+
+def logic_index_old(idx):
+    """Whether logic/README.md's index is an older one, of one row per feature."""
+    t = logic_index_table(idx)
+    if not t:
+        return False
+    table = t[0][t[1]:]
+    if any(f != "README.md" for l in table for _, f in re.findall(r"\(\.?/?([a-z0-9-]+)/([A-Za-z0-9_-]+\.md)\)", l)):
+        return True
+    return bool(table) and len(table[0].strip().strip("|").split("|")) >= 4  # its empty header: Module, File, Feature...
+
+
+def logic_index_convert(ldir):
+    """An older index of one row per feature turned into the list of modules: each feature it listed goes into its
+    module's feature table first. Returns {"modules": [...], "features": [...]} when it did, else None."""
+    path = os.path.join(ldir, "README.md")
+    idx = read(path)
+    if not idx or not logic_index_old(idx):
+        return None
+    lines, k = logic_index_table(idx)
+    order, moved = [], []
+    for l in lines[k:]:
+        for mod, f in re.findall(r"\(\.?/?([a-z0-9-]+)/([A-Za-z0-9_-]+\.md)\)", l):
+            if mod not in order:
+                order.append(mod)
+            mp = os.path.join(ldir, mod, "README.md")
+            if f == "README.md" or not os.path.isfile(mp) or not os.path.isfile(os.path.join(ldir, mod, f)):
+                continue
+            text = read(mp, "") or ""
+            if not module_lists(text, f):
+                write_atomic(mp, module_table_add(text, [logic_row_of_feature(ldir, "%s/%s" % (mod, f))]))
+                moved.append("%s/%s" % (mod, f))
+    on_disk = logic_modules_on_disk(ldir)
+    mods = [m for m in order if m in on_disk] + [m for m in on_disk if m not in order]
+    new = lines[:k] + LOGIC_MODULES_HEAD + [logic_module_row(ldir, m) for m in mods]
+    write_atomic(path, "\n".join(new) + "\n" + idx[idx.find(LOGIC_INDEX_END):])
+    return {"modules": mods, "features": moved}
+
+
+def logic_index_sync(ldir, modules=None):
+    """Both levels of the index brought to the files: every feature file in its module's feature table (rows of files
+    that are gone taken out), every module in logic/README.md. modules: only these. An older index is converted first.
+    {"converted", "features" (added), "removed", "modules" (added), "no_marker"}."""
+    res = {"converted": logic_index_convert(ldir), "features": [], "removed": [], "modules": [], "no_marker": False}
+    mods = [m for m in logic_modules_on_disk(ldir) if modules is None or m in modules]
+    for mod in mods:
+        mp, mdir = os.path.join(ldir, mod, "README.md"), os.path.join(ldir, mod)
+        text = read(mp, "") or ""
+        gone = module_table_gone(text, mdir)
+        new = module_table_drop(text, gone)
+        feats = [f for f in md_files(mdir) if f != "README.md" and f not in LOGIC_ASIDE and not f.startswith("_")
+                 and not module_lists(new, f)]
+        new = module_table_add(new, [logic_row_of_feature(ldir, "%s/%s" % (mod, f)) for f in feats])
+        if new != text:
+            write_atomic(mp, new)
+        res["features"] += ["%s/%s" % (mod, f) for f in feats]
+        res["removed"] += ["%s/%s" % (mod, f) for f in gone]
+    path = os.path.join(ldir, "README.md")
+    idx = read(path, "") or ""
+    if LOGIC_INDEX_END not in idx:
+        res["no_marker"] = True
+        return res
+    res["modules"] = [m for m in mods if not index_lists_module(idx, m)]
+    if res["modules"]:
+        write_atomic(path, insert_rows(idx, "index:end", [logic_module_row(ldir, m) for m in res["modules"]]))
+    return res
 
 
 def cmd_logic(ctx, a):
@@ -10379,34 +10587,30 @@ def cmd_logic(ctx, a):
             res = logic_check(ctx, logic_dir(ctx), knowledge_codes(ctx))
         clean = not res["problems"]
         nxt = "clean" if clean else "fix every problem, then check again"
-        if any(p_.endswith("not in the index of logic/README.md") for p_ in res["problems"]):
-            nxt += " (files not in the index: `fx logic index` adds their rows)"
+        if any(LOGIC_INDEX_MENDS in p_ for p_ in res["problems"]):
+            nxt += " (the index: `fx logic index` adds the missing rows and takes out those of files that are gone)"
         out(dict(ok=True, clean=clean, **res, next=nxt))
         return
     if a.action == "index":
         ldir = logic_dir(ctx)
         idx_path = os.path.join(ldir, "README.md")
-        idx = read(idx_path)
-        if idx is None or "<!-- index:end -->" not in idx:
-            raise FxError("logic/README.md has no <!-- index:end --> marker after its index table", code=3)
+        if LOGIC_INDEX_END not in (read(idx_path, "") or ""):
+            raise FxError("logic/README.md has no %s marker after its list of modules" % LOGIC_INDEX_END, code=3)
         if a.module and not os.path.isdir(os.path.join(ldir, a.module)):
             raise FxError("no module folder logic/%s/" % a.module, code=3)
-        names = [n for n in md_files(ldir, recursive=True) if n.count("/") == 1 and not n.endswith("/README.md")
-                 and n.split("/")[1] not in LOGIC_ASIDE
-                 and (not a.module or n.startswith(a.module + "/")) and n not in idx]
-        rows = [logic_index_row(ldir, n) for n in sorted(names)]
-        idx = logic_index_insert(idx, rows)
-        if a.log and rows:
+        res = logic_index_sync(ldir, modules={a.module} if a.module else None)
+        changed = res["converted"] or res["features"] or res["removed"] or res["modules"]
+        if a.log and changed:
             row = ["| %s | %s | %s |" % (now()[:10], ("logic/%s/" % a.module) if a.module else "logic/",
                                          a.log.replace("|", "/"))]
             if logic_log_path(ldir) == idx_path:
-                idx = insert_rows(idx, "log:end", row)
+                write_atomic(idx_path, insert_rows(read(idx_path, "") or "", "log:end", row))
             else:
                 write_atomic(logic_log_path(ldir), insert_rows(read(logic_log_path(ldir), "") or "", "log:end", row))
-        if rows:
-            write_atomic(idx_path, idx)
-        out({"ok": True, "added": [r for r in rows], "files": sorted(names),
-             "note": "commit logic/README.md" if rows else "every feature file is in the index"})
+        out({"ok": True, "added": res["features"], "removed": res["removed"], "modules_added": res["modules"],
+             "converted": res["converted"],
+             "note": "commit logic/" if changed else "every feature file is in its module's feature table, and "
+                                                     "every module in logic/README.md"})
         return
     if a.action == "ctx":
         factory_sync(ctx)
@@ -17329,7 +17533,11 @@ def zap_runs(ctx, target):
     """The ZAP scripts to run: (report name, script, arguments). Both modes also crawl with a real browser, so pages
     a script draws are seen too, and use the rules ZAP still calls alpha."""
     full = zap_mode(ctx) == "full"
-    limit = ["-z", "-config scanner.maxScanDurationInMins=%d" % zap_minutes(ctx)] if full else []
+    conf = ["-config scanner.maxScanDurationInMins=%d" % zap_minutes(ctx)] if full else []
+    for i, rx in enumerate(zap_excludes(ctx)):  # never crawled, proxied or attacked, by any of ZAP's parts
+        conf += ["-config globalexcludeurl.url_list.url(%d).regex=%s" % (i, rx),
+                 "-config globalexcludeurl.url_list.url(%d).enabled=true" % i]
+    limit = ["-z", " ".join(conf)] if conf else []
     runs = [("zap", "zap-full-scan.py" if full else "zap-baseline.py",
              ["-t", target, "-a", "-j"] + (["-m", "2"] if full else []) + limit)]
     spec = ctx.c("security.zap_openapi")
@@ -17337,8 +17545,16 @@ def zap_runs(ctx, target):
         p = urllib.parse.urlparse(target)
         runs.append(("zap-api", "zap-api-scan.py",
                      ["-t", "%s://%s/%s" % (p.scheme, p.netloc, spec.lstrip("/")), "-f", "openapi", "-a",
-                      "-O", "%s://%s" % (p.scheme, p.netloc)] + (limit if full else ["-S"])))
+                      "-O", "%s://%s" % (p.scheme, p.netloc)] + limit + ([] if full else ["-S"])))
     return runs
+
+
+def zap_excludes(ctx):
+    """security.zap_exclude: regexes of URLs ZAP leaves alone, such as an admin action that would end the scan's own
+    login (revoking the API key it scans with). ZAP splits its -z options at spaces, so a space is written \\s."""
+    ex = ctx.c("security.zap_exclude") or []
+    ex = [ex] if isinstance(ex, str) else ex
+    return [re.sub(r"\s", r"\\s", str(x).strip()) for x in ex if str(x).strip()]
 
 
 def zap_minutes(ctx):
@@ -17396,7 +17612,7 @@ def login_run(ctx, job, conf):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "a") as f:
             f.write("==== %s %s login: exit %s, %s line(s) on stdout\n%s\n" % (
-                now(), conf.get("_kind", "web"), r.returncode, len(lines), err[-4000:]))
+                now(), conf.get("_label") or conf.get("_kind", "web"), r.returncode, len(lines), err[-4000:]))
     except (OSError, FxError, AttributeError, KeyError, TypeError):  # no job folder to keep it in
         path = None
     if r.returncode != 0 or not lines:
@@ -17639,42 +17855,59 @@ def zap_cpus():
     return min(n, _DOCKER_NCPU[0]) if _DOCKER_NCPU[0] else None
 
 
-def scan_zap(ctx, job, url, rdir, notes=None, image=None):
-    """image: which image to run, when not the one security.zap_image names."""
+def scan_zap(ctx, job, url, rdir, notes=None, image=None, only=None, on_pass=None, api_at=None):
+    """image: which image to run, when not the one security.zap_image names. only: the names of the runs to make (zap,
+    zap-api), when not all of them. on_pass(name, findings): called as each run is over with its login kept to the
+    end (fx selftest keeps it, so that a later run that fails does not cost this one). api_at: (view, url) of a second
+    running copy of the app with its own database (security.zap_parallel, zap_twin): the API scan then runs against it
+    while the web scan runs against url, both at once, so neither can end the other's login or change its data."""
     image = image or ctx.c("security.zap_image", ZAP_IMAGE) or ZAP_IMAGE
     notes = notes if notes is not None else []
     os.makedirs(rdir, exist_ok=True)
-    runs_ = zap_runs(ctx, "http://placeholder/")
-    logins = scanner_logins(ctx, job, url, ["web"] + (["api"] if any(n == "zap-api" for n, _, _ in runs_) else []))
-    flags, target, note = zap_network(url)
-    if note:
-        notes.append(note)
-    # Named and labelled: its memory counts for the step that started it, and it is stopped when that step is.
-    cname = "fx-zap-%s-%s" % (re.sub(r"[^a-zA-Z0-9_.-]", "-", str(job.get("id") or "job"))[:40].strip("-.") or "job",
-                              secrets.token_hex(3))
-    held = _PLACES[-1].lease["id"] if _PLACES else ""
-    cmd, env = ["docker", "run", "--rm", "--name", cname, "--label", "fx.place=%s" % held, "-v",
-                "%s:/zap/wrk/:rw" % rdir], None
-    cpus = zap_cpus()
-    if cpus:
-        cmd += ["--cpus", str(cpus)]
-    tokens = sorted({v for _, v, _ in logins.values() if v}, key=len, reverse=True)
-    home = hasattr(os, "getuid")
-    if home:
-        # The container runs as this user, so its report lands in rdir without opening rdir to everyone. That uid has
-        # no passwd entry in the image, so Java cannot find a home for ZAP: give it a copy of the image's own, and a
-        # folder of its own to start from (the scripts write there).
-        cmd += ["--user", "%d:%d" % (os.getuid(), os.getgid()), "-e", "HOME=/tmp",
-                "-e", "JAVA_TOOL_OPTIONS=-Duser.home=/tmp/zap-user"]
+    names = [r[0] for r in zap_runs(ctx, "http://placeholder/") if only is None or r[0] in only]
+    apart = bool(api_at) and names == ["zap", "zap-api"]
+    kinds = sorted({"api" if n == "zap-api" else "web" for n in names}, key=["web", "api"].index)
+    if apart:
+        logins = scanner_logins(ctx, job, url, ["web"])
+        logins["api"] = scanner_logins(ctx, api_at[0], api_at[1], ["web", "api"])["api"]
     else:
+        logins = scanner_logins(ctx, job, url, ["web", "api"] if kinds == ["api"] else kinds)
+    at = {}  # kind: (view, the app's URL, docker flags, the URL ZAP reaches it at)
+    for kind, (view, app_url) in (("web", (job, url)), ("api", api_at if apart else (job, url))):
+        flags, target, note = zap_network(app_url)
+        if note and note not in notes:
+            notes.append(note)
+        at[kind] = (view, app_url, flags, target)
+    # Named and labelled: its memory counts for the step that started it, and it is stopped when that step is.
+    stem = "fx-zap-%s-%s" % (re.sub(r"[^a-zA-Z0-9_.-]", "-", str(job.get("id") or "job"))[:40].strip("-.") or "job",
+                             secrets.token_hex(3))
+    held = _PLACES[-1].lease["id"] if _PLACES else ""  # read once: the runs side by side are threads of this step
+    cpus = zap_cpus()
+    if cpus and apart:
+        cpus = max(0.5, round(float(cpus) / 2, 2))  # the step's share of the machine, between its two scans
+    home = hasattr(os, "getuid")
+    if not home:
         os.chmod(rdir, 0o777)  # no uid to run as: the ZAP container writes its report as its own user
-    found, refused = {}, {}
-    for name, script, args in zap_runs(ctx, target):
-        kind = "api" if name == "zap-api" else "web"
+    tokens = {"all": sorted({v for _, v, _ in logins.values() if v}, key=len, reverse=True)}
+    started = []
+
+    def one(name, script, args, kind):
+        """One run: (its report's data, None), or (None, why it gave none). Raises ScannerLogin."""
+        view, app_url, flags, target = at[kind]
+        cname = "%s-%s" % (stem, kind) if apart else stem
+        cmd = ["docker", "run", "--rm", "--name", cname, "--label", "fx.place=%s" % held, "-v", "%s:/zap/wrk/:rw" % rdir]
+        if cpus:
+            cmd += ["--cpus", str(cpus)]
+        if home:
+            # The container runs as this user, so its report lands in rdir without opening rdir to everyone. That uid
+            # has no passwd entry in the image, so Java cannot find a home for ZAP: give it a copy of the image's own,
+            # and a folder of its own to start from (the scripts write there).
+            cmd += ["--user", "%d:%d" % (os.getuid(), os.getgid()), "-e", "HOME=/tmp",
+                    "-e", "JAVA_TOOL_OPTIONS=-Duser.home=/tmp/zap-user"]
         header, token, _ = logins.get(kind) or (None, None, None)
-        run_cmd, env = cmd, None
+        env = None
         if token:  # by name: the value stays out of the command line, and only the container gets it
-            run_cmd = cmd + ["-e", "ZAP_AUTH_HEADER", "-e", "ZAP_AUTH_HEADER_VALUE", "-e", "ZAP_AUTH_HEADER_SITE"]
+            cmd += ["-e", "ZAP_AUTH_HEADER", "-e", "ZAP_AUTH_HEADER_VALUE", "-e", "ZAP_AUTH_HEADER_SITE"]
             # Without a site ZAP adds the header to every request, and its browser also fetches fonts and CDN scripts.
             env = dict(os.environ, ZAP_AUTH_HEADER=header, ZAP_AUTH_HEADER_VALUE=token,
                        ZAP_AUTH_HEADER_SITE=urllib.parse.urlparse(target).hostname or "")
@@ -17685,8 +17918,9 @@ def scan_zap(ctx, job, url, rdir, notes=None, image=None):
         report = os.path.join(rdir, name + ".json")
         if os.path.exists(report):
             os.remove(report)
+        started.append(cname)
         try:
-            r = run(run_cmd + flags + [image] + start + args + ["-J", name + ".json", "-I"], check=False, env=env,
+            r = run(cmd + flags + [image] + start + args + ["-J", name + ".json", "-I"], check=False, env=env,
                     timeout=max(1800, (zap_minutes(ctx) + 10) * 60))
         except subprocess.TimeoutExpired:
             try_out(["docker", "stop", "-t", "5", cname], timeout=60)
@@ -17696,29 +17930,190 @@ def scan_zap(ctx, job, url, rdir, notes=None, image=None):
             raise
         text = read(report, "") or ""
         log = r.stdout or ""
-        for t in tokens:
+        for t in tokens["all"]:
             text, log = text.replace(t, REDACTED), log.replace(t, REDACTED)
-        if tokens and text:
+        if tokens["all"] and text:
             write_atomic(report, text)
         write_atomic(os.path.join(rdir, name + ".log"), log)
         try:
             data = json.loads(text)
         except ValueError:
             return None, "ZAP produced no report (see %s.log)" % name
-        refused[kind] = zap_refused_pct(data)
-        zap_collect(found, data, target)
-    for kind, (header, token, conf) in logins.items():
-        if conf and conf.get("_kind") == kind:  # its own saved login: did ZAP keep it to the end of the scan?
-            bad = login_check(url, conf, header, token)
+        # Right after each run: did ZAP keep its own saved login to the end of it, and get past it?
+        header, token, conf = logins.get(kind) or (None, None, None)
+        if conf and conf.get("_kind") == kind:
+            bad = login_check(app_url, conf, header, token)
             if bad:
                 raise ScannerLogin(kind, bad + " after the scan: ZAP lost the login during it (a logout or "
                                               "password form, or the session ended)" + login_where_words(ctx, kind))
-        pct = refused.get(kind)
+        pct = zap_refused_pct(data)
         if pct is not None and pct >= LOGIN_REFUSED_PCT:
             raise ScannerLogin(kind, "%d%% of the %s scan's answers were 4xx, so it did not get past the login "
                                      "(401/403) or a limit (429: the limits must be raised on the test stack)%s"
                                % (pct, "API" if kind == "api" else "web", login_where_words(ctx, kind)))
+        return data, None
+
+    def passed(name, data, target):
+        if on_pass:
+            mine = {}
+            zap_collect(mine, data, target)
+            on_pass(name, zap_found(mine))
+
+    found = {}
+    if not apart:
+        scanned = False
+        for name, script, args in zap_runs(ctx, at["web"][3]):
+            if name not in names:
+                continue
+            kind = "api" if name == "zap-api" else "web"
+            if scanned and kind == "api" and (logins.get("api") or (None,) * 3)[2]:
+                # The scan before this one may have ended the login this one uses (a full web scan posts every form it
+                # finds, such as one that revokes the API's key): proved again, and taken anew when it no longer works.
+                header, token, conf = logins["api"]
+                if not conf.get("check") or login_check(url, conf, header, token):
+                    logins["api"] = scanner_logins(ctx, job, url, ["web", "api"] if conf.get("_kind") != "api"
+                                                   else ["api"])["api"]
+                    tokens["all"] = sorted(set(tokens["all"]) | {logins["api"][1]} - {None}, key=len, reverse=True)
+            scanned = True
+            data, err = one(name, script, args, kind)
+            if err:
+                return None, err
+            zap_collect(found, data, at[kind][3])
+            passed(name, data, at[kind][3])
+        return zap_found(found), None
+    # Side by side: the web scan on url, the API scan on its own copy of the app.
+    plan = [(name, kind, next(r for r in zap_runs(ctx, at[kind][3]) if r[0] == name))
+            for name, kind in (("zap", "web"), ("zap-api", "api"))]
+    outcome = {}
+    pool = concurrent.futures.ThreadPoolExecutor(2)
+    try:
+        futs = {name: pool.submit(one, name, run_[1], run_[2], kind) for name, kind, run_ in plan}
+        for name, _, _ in plan:
+            try:
+                outcome[name] = futs[name].result()
+            except FxError as e:
+                outcome[name] = e
+    except BaseException:
+        for c in started:  # fx is being stopped: so is what it started, in both threads
+            try_out(["docker", "stop", "-t", "5", c], timeout=60)
+        raise
+    finally:
+        pool.shutdown(wait=True)
+    for name, kind, _ in plan:  # what passed is kept first, whatever the other run did
+        o = outcome[name]
+        if isinstance(o, tuple) and o[0] is not None:
+            passed(name, o[0], at[kind][3])
+    for name, _, _ in plan:
+        if isinstance(outcome[name], FxError):
+            raise outcome[name]
+    for name, _, _ in plan:
+        if outcome[name][1]:
+            return None, outcome[name][1]
+    for name, kind, _ in plan:
+        zap_collect(found, outcome[name][0], at[kind][3])
     return zap_found(found), None
+
+
+ZAP_TWIN = "zapapi"  # the second copy of the app the API scan runs against (security.zap_parallel)
+
+
+def zap_parallel(ctx):
+    """Whether the API scan runs at the same time as the web scan, against a copy of the app of its own."""
+    return ctx.c("security.zap_parallel", False) is True and bool(ctx.c("security.zap_openapi"))
+
+
+@contextlib.contextmanager
+def zap_twin(ctx, stack, view, notes=None):
+    """With security.zap_parallel: a second copy of the app the API scan runs against, with its own database, ports and
+    (in a sandbox) box, started from the same commits and stopped afterwards; yields (its view of the repository
+    scanned, its URL). Without it, or with nothing to start it from: yields None, and both scans share the app.
+    stack: the job whose apps the gate started (the whole job); view: the repository scanned (repo_view)."""
+    if not stack or not zap_parallel(ctx):
+        yield None
+        return
+    sctx = ctx._ctx if isinstance(ctx, RepoCtx) else ctx  # every app of the job starts, not only this repository's
+    real = job_real_id(stack)
+    tid = "%s-%s" % (stack["id"], ZAP_TWIN)
+    repo = view.get("repo") or job_primary(stack)
+    on_host = tid.startswith("_") or jobs_on_host_for_tests() or job_host_waiver(sctx, real) or \
+        not getattr(sctx, "cfg", None)
+    twin = dict(stack, id=tid, of=real, port=ports_take(sctx, "%s|%s" % (sctx.factory, tid))[0],
+                app_dir=os.path.join(sctx.job_dir(real), ZAP_TWIN))
+    twin["repos"] = {n: dict(e) for n, e in stack["repos"].items()}
+    for k in ("box", "box_job"):
+        twin.pop(k, None)
+    clones = []
+    if on_host:  # no box of its own: a clone of its own, as app.up may write into the folder it runs in
+        for n, e in twin["repos"].items():
+            if os.path.isdir(e.get("worktree") or ""):
+                e["worktree"] = zap_twin_clone(sctx, n, e["worktree"])
+                clones.append(e["worktree"])
+    for f in JOB_REPO_FIELDS:
+        twin.pop(f, None)
+    twin = job_show_flat(twin)
+    progress(progress_label("app up (API scan)", stack))
+    try:
+        info = app_start(sctx, twin)
+        url = ((info.get("apps") or {}).get(repo) or info)["url"]
+        seed = os.path.join(sctx.job_dir(real), "ui", "seed.sh")
+        if os.path.exists(seed) and not run_seed(sctx, twin, seed, os.path.join(sctx.job_dir(real), ZAP_TWIN)):
+            raise FxError("ui/seed.sh failed on the API scan's copy of the app (%s/seed.log)" % ZAP_TWIN, code=3)
+        yield repo_view(sctx, twin, repo), url
+    finally:
+        try:
+            app_stop(sctx, twin)
+        finally:
+            box = None if on_host else job_box_rec(sctx, tid)
+            if box:
+                try:
+                    box_pause(box)  # its memory back until the next scan; it goes with the job (job_boxes_rest)
+                except (FxError, subprocess.SubprocessError, OSError):
+                    pass
+            if tid.startswith("_"):  # fx's own run (selftest): nothing keeps it
+                for c in clones:
+                    shutil.rmtree(c, ignore_errors=True)
+
+
+def zap_twin_clone(ctx, name, wt):
+    """The API scan's copy of a repository on this machine: <clone>-zapapi at the clone's commit, with its local files,
+    set up again whenever that commit moved. Kept with the job's clones (drop_clone deletes it)."""
+    dest = wt.rstrip("/") + "-" + ZAP_TWIN
+    head = git(["rev-parse", "HEAD"], wt).stdout.strip()
+    if not os.path.isdir(os.path.join(dest, ".git")):
+        shutil.rmtree(dest, ignore_errors=True)
+        run(["git", "clone", "-q", "--no-checkout", wt, dest], check=True)
+    git(["fetch", "-q", wt, head], dest)
+    git(["-c", "advice.detachedHead=false", "checkout", "-q", "-f", "--detach", head], dest)
+    mark = os.path.join(dest, ".git", "fx-zapapi-setup")
+    if (read(mark, "") or "").strip() != head:
+        known = name if name in ctx.repo_names() else None  # a job of an older factory names its one repository so
+        copy_local_files(ctx, dest, known)
+        rctx = repo_ctx(ctx, known)
+        cmd = rctx.c("setup", "")
+        if cmd:
+            env = project_env(ctx)
+            p = run(login_shell(ctx, cmd, env), cwd=dest, check=False, env=env,
+                    timeout=int(rctx.c("setup_timeout_sec", 1800) or 1800), group=True)
+            if p.returncode != 0:
+                raise FxError("setup of %s for the API scan's copy of the app exited %s" % (name, p.returncode), code=3)
+        write_atomic(mark, head + "\n")
+    return dest
+
+
+def zap_merge(lists):
+    """The findings of several ZAP runs as one list, as one scan_zap over all of them would have given them."""
+    found = {}
+    for lst in lists:
+        for f in lst or []:
+            key = (f.get("rule"), f.get("message")) + ((f.get("severity"),) if f.get("rule") == ZAP_LIBRARY_RULE else ())
+            g = found.get(key)
+            if g is None:
+                found[key] = dict(f, paths=list(f.get("paths") or []))
+                continue
+            g["paths"] = sorted(set(g["paths"]) | set(f.get("paths") or []))
+            if f.get("libraries") or g.get("libraries"):
+                g["libraries"] = sorted(set(g.get("libraries") or []) | set(f.get("libraries") or []))
+    return list(found.values())
 
 
 def zap_collect(found, data, target):
@@ -17767,8 +18162,9 @@ def zap_scan_mark(ctx, job):
     data the builder's seed loads. Reports made under another mark say nothing about a scan made now."""
     app = ctx.c("app") or {}
     return digest([scan_signature(ctx, "zap"), zap_baseline_image(ctx), zap_minutes(ctx), ctx.c("security.zap_openapi"),
-                   ctx.c("security.zap_auth"), {k: v for k, v in app.items() if not str(k).startswith("_")} if isinstance(app, dict) else app,
-                   ctx.c("e2e"), file_mark(os.path.join(ctx.job_dir(job["id"]), "ui", "seed.sh"))])[:16]
+                   ctx.c("security.zap_auth"), zap_excludes(ctx), {k: v for k, v in app.items() if not str(k).startswith("_")} if isinstance(app, dict) else app,
+                   ctx.c("e2e"), file_mark(os.path.join(ctx.job_dir(job["id"]), "ui", "seed.sh"))]
+                  + (["parallel"] if zap_parallel(ctx) else []))[:16]
 
 
 def zap_stored(ctx, job, rn, head):
@@ -17834,9 +18230,11 @@ def zap_image_id(ctx):
 
 def zap_settings(ctx):
     """What ZAP is asked to do, as the factory's owner set it."""
-    return "%d/%s/%s/%s/%s" % (SCAN_VERSION, zap_mode(ctx), "api" if ctx.c("security.zap_openapi") else "web",
-                               "login" if (ctx.c("security.zap_auth") or {}).get("command") else "no-login",
-                               ctx.c("security.zap_image", ZAP_IMAGE) or ZAP_IMAGE)
+    return "%d/%s/%s/%s/%s%s" % (SCAN_VERSION, zap_mode(ctx), "api" if ctx.c("security.zap_openapi") else "web",
+                                 "login" if (ctx.c("security.zap_auth") or {}).get("command") else "no-login",
+                                 ctx.c("security.zap_image", ZAP_IMAGE) or ZAP_IMAGE,
+                                 # the API scan on an app of its own finds other things: a baseline of its own
+                                 "/parallel" if zap_parallel(ctx) else "")
 
 
 def scan_signature(ctx, tool):
@@ -17929,7 +18327,7 @@ def zap_same_place(a, b):
     return bool(pa & pb) if pa and pb else a.get("message") == b.get("message")
 
 
-def zap_confirm(ctx, job, url, rdir, found, accepted, notes, image):
+def zap_confirm(ctx, job, url, rdir, found, accepted, notes, image, api_at=None):
     """A finding that would block is believed only when a second scan finds it again at the same place. ZAP's guesses
     (comparing answers to slightly different requests) change from one scan to the next: a scan that once saw
     'SQL injection' where a page answered differently for another reason rarely sees it on the same page twice, while a
@@ -17941,7 +18339,7 @@ def zap_confirm(ctx, job, url, rdir, found, accepted, notes, image):
              and SEV_RANK.get(x["severity"], 2) >= limit]
     if not would or ctx.c("security.zap_confirm", True) is False:
         return
-    again, err = scan_zap(ctx, job, url, os.path.join(rdir, "zap-confirm"), [], image)
+    again, err = scan_zap(ctx, job, url, os.path.join(rdir, "zap-confirm"), [], image, api_at=api_at)
     if err:
         notes.append("zap: the second scan, to confirm %d blocking finding(s), did not finish (%s): they block as found"
                      % (len(would), err))
@@ -18090,13 +18488,14 @@ def block_rank(ctx):
     return SEV_RANK.get(word, SEV_RANK[BLOCK_SEVERITY])
 
 
-def run_security(ctx, job, rdir, app_url_, whole=False, zap_from=None):
+def run_security(ctx, job, rdir, app_url_, whole=False, zap_from=None, stack=None):
     progress(progress_label("security scan", job))
     """All enabled scanners; returns findings, the blocking list, skipped notes, other notes, the enabled scanners
     that did not run (missed; ZAP without Docker is only noted as skipped) and the required ones that did not
     (required_failed). whole: everything in the branch and its history, not only what the job changed; every finding
     then counts as new. zap_from: the reports of an earlier round that ZAP may judge again instead of scanning (see
-    zap_stored); ran and zap_scan in the answer say what did run, and when ZAP's reports were made."""
+    zap_stored); ran and zap_scan in the answer say what did run, and when ZAP's reports were made. stack: the whole job
+    whose apps run, for security.zap_parallel (the API scan's own copy of the app, zap_twin)."""
     wt = job["worktree"]
     accepted = accepted_entries(ctx, None if whole else job)  # before anything runs: a mistake here is the factory's, and says so
     mb = None if whole else git(["merge-base", job["base_ref"], "HEAD"], wt).stdout.strip()
@@ -18194,13 +18593,14 @@ def run_security(ctx, job, rdir, app_url_, whole=False, zap_from=None):
                 notes.append("zap: round %d's reports of this commit %s, so ZAP scanned again" % (
                     zap_from["round"], "could not be read (%s)" % why if kept is None else
                     "still hold %d finding(s) that block by the rules as they are now" % len(still)))
-            f, err = scan_zap(ctx, job, app_url_, os.path.join(rdir, "zap"), notes, image)
-            if not err:
-                zap_scan.update(scanned=now())
-                f = compared(f, "zap")
-                if not whole:
-                    zap_confirm(ctx, job, app_url_, rdir, f, accepted, notes, image)
-                return f, None
+            with zap_twin(ctx, stack, job, notes) as api_at:
+                f, err = scan_zap(ctx, job, app_url_, os.path.join(rdir, "zap"), notes, image, api_at=api_at)
+                if not err:
+                    zap_scan.update(scanned=now())
+                    f = compared(f, "zap")
+                    if not whole:
+                        zap_confirm(ctx, job, app_url_, rdir, f, accepted, notes, image, api_at)
+                    return f, None
             return compared(f, "zap"), err
         use("headers", None, hdrs)
         if sc["zap"] and not shutil.which("docker"):
@@ -18304,7 +18704,7 @@ def cmd_security(ctx, a):
     for n in change:
         os.makedirs(os.path.join(rdir, n), exist_ok=True)
         secs[n] = run_security(repo_ctx(ctx, n), repo_view(ctx, job, n), os.path.join(rdir, n) if several else rdir,
-                               urls.get(n))
+                               urls.get(n), stack=job)
         for f in secs[n]["findings"]:
             f["repo"] = n
     res = security_merge(secs, several)
@@ -18697,7 +19097,7 @@ def audit_scan(ctx, a, names):
                     url = (info.get("apps") or {n: info})[n]["url"]
                 except (FxError, subprocess.TimeoutExpired) as e:
                     app_note = "headers/zap: the app could not start, so nothing looked at it: %s" % str(e)[:300]
-            res = run_security(rctx, repo_view(ctx, job, n), rdir, url, whole=True)
+            res = run_security(rctx, repo_view(ctx, job, n), rdir, url, whole=True, stack=job if url else None)
         finally:
             if started:
                 app_stop(ctx, job)
@@ -22386,8 +22786,9 @@ def review_ctx(ctx, a):
             "; a folder's README.md is the index of a long file split into parts: read it, then only the parts "
             "this work needs" if any(is_parts_dir(os.path.dirname(f)) for f in kf) else "", ", ".join(kf)))
     if logic_ready(ctx) and agent not in ("security", "verifier"):
-        lines.append("Project logic (the source of truth for business rules; read the index, then the files of the "
-                     "features this touches): %s" % os.path.join(logic_dir(ctx), "README.md"))
+        lines.append("Project logic (the source of truth for business rules; read its list of modules, then the "
+                     "README.md of each module this touches, whose feature table lists its features, then the files "
+                     "of those features): %s" % os.path.join(logic_dir(ctx), "README.md"))
     lp = lessons_for(ctx, agent, job, REVIEW_LESSONS[agent])
     if lp:
         lines.append("Lessons from earlier jobs (read first): %s" % lp)
@@ -24608,8 +25009,8 @@ def review_check_findings(ctx, job, findings):
             mine = [f for f in findings if f["reviewer"] == r and f["severity"] != "question"]
             if mine and not any(re.search(r"(?i)\bChecked against:.*(?:logic|knowledge)/[\w./-]+\.md", f["text"]) for f in mine):
                 bad.setdefault(r, []).append("no finding has a `Checked against:` line naming a logic/ or knowledge/ file, so "
-                                             "the logic was not read: read at least logic/README.md and the files of the "
-                                             "features this touches, and name them there")
+                                             "the logic was not read: read at least logic/README.md, the README.md of the "
+                                             "modules and the files of the features this touches, and name them there")
     wrong = {r: said for r, said in bad.items() if said}
     if wrong:  # all of them at once: they are respawned together, not one round of agents per reviewer
         raise FxError("; ".join("round-%d/review-%s.md: %s" % (job["round"], r, "; ".join(said)) for r, said in wrong.items()),
@@ -27059,7 +27460,7 @@ LOGIC_HISTORY = "history.md"   # what changed when: never needed to work, so no 
 LOGIC_OPEN = "open.md"         # a module's open points: read by intake and spec
 LOGIC_ASIDE = (LOGIC_HISTORY, LOGIC_OPEN)
 HISTORY_HEAD_RE = re.compile(r"(?i)^##\s+(?:\d+\.\s*)?(?:lịch sử(?: thay đổi)?|change ?log|change history|history|"
-                             r"overall log|nhật ký(?: thay đổi)?)\s*$")
+                             r"overall (?:log|history)|nhật ký(?: tổng| thay đổi| chung)?|lịch sử tổng)\s*$")
 OPEN_HEAD_RE = re.compile(r"(?i)^##\s+(?:\d+\.\s*)?(?:điểm chưa chốt|open points?|open questions?)\b")
 
 
@@ -27429,9 +27830,10 @@ def logic_history_add(path, title, sections, intro):
 
 
 def logic_tidy(ctx, ldir=None, only=None):
-    """logic/README.md's overall log into logic/history.md; each module README's history and open points into its
-    history.md and open.md; each feature file's history into its module's history.md. only: these files (relative to
-    ldir). Returns (what moved, feature files still over the limit)."""
+    """logic/README.md's overall log into logic/history.md, and its index of every feature (an older version's) into
+    a list of modules, each module's feature table listing its features; each module README's history and open points
+    into its history.md and open.md; each feature file's history into its module's history.md. only: these files
+    (relative to ldir). Returns (what moved, feature files still over the limit)."""
     ldir = ldir or logic_dir(ctx)
     moved, too_long = [], []
     if not os.path.isdir(ldir):
@@ -27457,6 +27859,11 @@ def logic_tidy(ctx, ldir=None, only=None):
             rest = rest.replace(LOGIC_OLD_RULE, LOGIC_NEW_RULE)  # the rule an older template wrote
             write_atomic(idx, rest.rstrip("\n") + "\n\nWhat changed when: [%s](%s).\n" % (LOGIC_HISTORY, LOGIC_HISTORY))
             moved.append({"file": "README.md", "to": LOGIC_HISTORY, "what": "overall log"})
+    if only is None:
+        conv = logic_index_convert(ldir)  # one row per feature: a list of modules, each README listing its features
+        if conv:
+            moved.append({"file": "README.md", "to": "<module>/README.md", "what": "index of %d features, now a list "
+                          "of %d modules" % (len(conv["features"]), len(conv["modules"]))})
     for mod in sorted(os.listdir(ldir)):
         md = os.path.join(ldir, mod)
         if not os.path.isdir(md) or mod.startswith("."):
@@ -27577,13 +27984,48 @@ SKILL_NOTE_SECRET_RES = (
 )
 
 
+# A path of the app (/admin/projects/{id}/key/{key}/revoke) names the project's own pages in its own words: each part
+# that is not one of these goes, and the path keeps its shape. Paths of a machine's system folders stay whole.
+SKILL_NOTE_ROUTE_WORDS = SKILL_NOTE_COMMON | {
+    "v1", "v2", "v3", "v4", "login", "logout", "signin", "signout", "signup", "register", "health", "healthz", "ping",
+    "status", "me", "user", "users", "account", "accounts", "settings", "profile", "search", "item", "items", "key",
+    "keys", "token", "tokens", "openapi", "swagger", "json", "yaml", "yml", "xml", "txt", "html", "index", "new",
+    "edit", "delete", "create", "update", "list", "upload", "download", "export", "import", "static", "assets",
+    "public", "robots", "favicon", "ico", "svg", "png", "graphql", "callback", "oauth", "session", "sessions",
+    "password", "reset", "verify", "revoke", "role", "roles", "permission", "permissions", "file", "files", "page",
+    "pages", "home", "dashboard", "report", "reports", "rest", "rpc", "webhook", "webhooks", "csrf", "cookie", "branch",
+    "branches"}
+SKILL_NOTE_SYSTEM_DIRS = ("tmp", "etc", "var", "usr", "opt", "bin", "sbin", "dev", "proc", "sys", "run", "private",
+                          "zap", "lib", "mnt", "srv", "workspace")
+SKILL_NOTE_ROUTE_RE = re.compile(r"(?<![\w.:/<>~\\-])(/[^\s/?#)\]\"'`,;<>|]+(?:/[^\s/?#)\]\"'`,;<>|]*)*)([?#][^\s)\]\"'`,;<>|]*)?")
+
+
+def skill_note_routes(text):
+    """Every path of the app in a note with the parts that are the project's own words (not SKILL_NOTE_ROUTE_WORDS,
+    numbers or {placeholders}) replaced by <part>, and its query by <query>."""
+    def part(seg):
+        if not seg or re.fullmatch(r"\{[^}]*\}|:\w+|\d+|\*+|<[^>]*>|\.\.?", seg):
+            return seg
+        words = [w for w in re.split(r"[-_.]+", seg.lower()) if w]
+        return seg if words and all(w in SKILL_NOTE_ROUTE_WORDS or w.isdigit() for w in words) else "<part>"
+
+    def path(m):
+        p, q = m.group(1), m.group(2)
+        segs = p.split("/")[1:]
+        if segs[0] in SKILL_NOTE_SYSTEM_DIRS or segs[0].startswith("auto-factory:"):
+            return m.group(0)  # a folder of a machine, or a command of this plugin
+        return "/" + "/".join(part(x) for x in segs) + ("%s<query>" % q[0] if q else "")
+    return SKILL_NOTE_ROUTE_RE.sub(path, text)
+
+
 def skill_note_line(job, agent):
     return ("Skill notes: only when these instructions or fx itself really need changing (a step that cost a lot for "
             "nothing in this job, an instruction that is wrong or misleads, an fx answer that sent you the wrong way; "
             "not a taste, and not a problem of this project's code), write a note with `## Problem`, `## Evidence` (what "
             "happened in this run) and `## Change` (what to write or do instead) and run `%s skill-note --job %s "
             "--agent %s --title \"<what should change>\" --where <plugin file or fx command> --file <note>`. It becomes "
-            "a public GitHub issue: write it in general words, never paste this project's code, names, links or data. "
+            "a public GitHub issue: write it in general words, never paste this project's code, names, links, page or "
+            "route paths, or data. "
             "At most one note per run, and none when nothing really needs changing." % (FX_CMD, job["id"], agent))
 
 
@@ -27657,6 +28099,7 @@ def skill_note_scrub(ctx, text):
             text = text.replace(os.path.realpath(p), name).replace(p, name)
     text = re.sub(r"(?<![\w<])(?:/Users|/home|/root)/[^\s:)'\"`]+|\b[A-Za-z]:\\Users\\[^\s:)'\"`]+", "<path>", text)
     text = re.sub(r"~/[^\s:)'\"`]+", "~/<path>", text)
+    text = skill_note_routes(text)
     for t in sorted(skill_note_private(ctx), key=len, reverse=True):
         text = re.sub(r"(?i)(?<![\w-])%s(?![\w])" % re.escape(t), "<name>", text)
     text = re.sub(r"\b([A-Z][A-Z0-9]{1,9})-(\d+)\b",
@@ -28246,6 +28689,60 @@ def security_merge(secs, several):
     return m
 
 
+# fx selftest takes hours on a large project (the permission table calls every cell, ZAP attacks for its minutes), and
+# one step that fails used to cost all of them again. Now each long step that passes is kept in the selftest's folder
+# (jobs/_selftest/resume.json) with what it ran on, and the next selftest uses it again instead of running it, as long as
+# all of that is the same: the commits of the repositories, fx's way of running the step, and the settings and files of
+# the factory the step reads. The checks script, the permission table, and each ZAP run (web, API) are kept apart, so
+# a fixed API login runs only the API scan again. Setup and the app always run; --fresh runs everything.
+
+SELFTEST_RESUME = "resume.json"
+SELFTEST_RECIPE = 1  # raise it when fx changes how a kept step runs: what was kept then stops counting
+SELFTEST_STEPS_WORDS = {"checks": "the checks script", "permissions": "the permission table",
+                        "zap:zap": "the ZAP web scan", "zap:zap-api": "the ZAP API scan"}
+
+
+def selftest_saved(logdir, fresh=False):
+    if fresh:
+        return {}
+    try:
+        d = json.loads(read(os.path.join(logdir, SELFTEST_RESUME)) or "{}")
+    except ValueError:
+        return {}
+    return dict(d.get("steps") or {}) if isinstance(d, dict) and d.get("recipe") == SELFTEST_RECIPE else {}
+
+
+def selftest_keep(logdir, saved):
+    write_atomic(os.path.join(logdir, SELFTEST_RESUME), json.dumps({"recipe": SELFTEST_RECIPE, "steps": saved},
+                                                                   indent=1, ensure_ascii=False) + "\n")
+
+
+def selftest_settings(ctx, drop=("security",)):
+    """factory.json without what the step does not read (the scanners' settings, for the checks and the permission
+    table: a fixed scanner login runs only the scan again)."""
+    try:
+        cfg = json.loads(read(os.path.join(settings_root(ctx), CONFIG_NAME)) or "{}")
+    except ValueError:
+        return "not valid JSON"
+    strip = lambda d: {k: v for k, v in d.items() if k not in drop} if isinstance(d, dict) else d
+    cfg = strip(cfg)
+    if isinstance(cfg.get("repos"), list):
+        cfg["repos"] = [strip(r) for r in cfg["repos"]]
+    return digest(cfg)
+
+
+def selftest_files(ctx, kinds=()):
+    """The factory's files a step could read (as the checks' fingerprint counts them), without the ones only the
+    scanner logins of these kinds name in their commands."""
+    marks = factory_scan(ctx)[0]
+    named = set()
+    for kind in kinds:
+        conf = ctx.c(LOGIN_KEYS[kind])
+        cmd = str(conf.get("command") or "") if isinstance(conf, dict) else ""
+        named |= {rel for rel in marks if cmd and rel in cmd}
+    return digest(sorted((k, v) for k, v in marks.items() if k not in named))
+
+
 def selftest_repo(ctx, a, n, port, logdir, clone_of, bl_cfg, bl_pre, first):
     """One repository's selftest: setup, its checks script, its app (after the apps it needs), app.schema, e2e and the
     base branch's header and ZAP findings. Returns what baseline.json keeps for it."""
@@ -28262,6 +28759,24 @@ def selftest_repo(ctx, a, n, port, logdir, clone_of, bl_cfg, bl_pre, first):
                                           "commit": git(["rev-parse", "HEAD"], w, check=False).stdout.strip()[:12],
                                           "clone": w}
     extra_env.update(clone_env(job))
+    saved = selftest_saved(logdir, getattr(a, "fresh", False))
+    res["reused"] = {}
+
+    def commits():
+        return sorted((m, git(["rev-parse", "HEAD"], r["worktree"], check=False).stdout.strip())
+                      for m, r in job["repos"].items() if r.get("worktree"))
+
+    def kept(name, key):
+        """What a step that passed on exactly this kept; None when it must run."""
+        s_ = saved.get(name)
+        if isinstance(s_, dict) and s_.get("key") == key:
+            res["reused"][SELFTEST_STEPS_WORDS.get(name, name)] = s_.get("at")
+            return s_
+        return None
+
+    def keep(name, key, **data):
+        saved[name] = dict(data, key=key, at=now())
+        selftest_keep(logdir, saved)
 
     def step(name, cmd, timeout):
         progress(name if len(ctx.repos) <= 1 else "%s: %s" % (n, name))
@@ -28295,9 +28810,18 @@ def selftest_repo(ctx, a, n, port, logdir, clone_of, bl_cfg, bl_pre, first):
         ok = step("setup", rctx.c("setup"), int(rctx.c("setup_timeout_sec", 1800)))
     if ok:
         script = checks_script(ctx, None, n)
-        step("checks", "bash %s" % shlex.quote(script), int(rctx.c("gate_timeout_sec", 1800)))
-        dirty = worktree_dirt(ctx, wt, n)
-        res["leftover_files"] = (dirty[0].splitlines() + dirty[1])[:30]
+        key = digest([CHECKS_RECIPE, commits(), file_mark(script), selftest_settings(ctx),
+                      selftest_files(ctx, ("web", "api")), sorted(dict(baselines_env(rctx, wt), **extra_env).items())])
+        old = kept("checks", key)
+        if old:
+            res["steps"]["checks"] = dict(old["step"], reused=old["at"])
+            res["leftover_files"] = old.get("leftover_files") or []
+        else:
+            step("checks", "bash %s" % shlex.quote(script), int(rctx.c("gate_timeout_sec", 1800)))
+            dirty = worktree_dirt(ctx, wt, n)
+            res["leftover_files"] = (dirty[0].splitlines() + dirty[1])[:30]
+            if res["steps"]["checks"]["ok"]:
+                keep("checks", key, step=res["steps"]["checks"], leftover_files=res["leftover_files"])
     if ok and rctx.c("app.up") and not a.no_app:
         made = []
         try:
@@ -28330,9 +28854,16 @@ def selftest_repo(ctx, a, n, port, logdir, clone_of, bl_cfg, bl_pre, first):
             if tech:
                 # The base branch through the permission table: what the gate tells apart from a job's own.
                 tab = perm_tables(rctx)
+                key = digest([PERM_RECIPE, commits(), tab["rows"], tech, selftest_settings(ctx),
+                              selftest_files(ctx, ("web", "api"))])
+                old = kept("permissions", key) if not tab["problems"] else None
                 try:
                     if tab["problems"]:
                         raise PermsSetup("the rows have problems:\n- " + "\n- ".join(tab["problems"][:20]))
+                    if old:
+                        res["permissions"] = old["permissions"]
+                        res["steps"]["permissions"] = dict(old["step"], reused=old["at"])
+                        raise PermsKept()
                     pr = perm_matrix(rctx, view, info["url"], tech, tab["rows"])
                     write_atomic(os.path.join(logdir, "permissions.md"), perm_markdown(pr, "Permission table, base "
                                                                                            "branch"))
@@ -28342,6 +28873,9 @@ def selftest_repo(ctx, a, n, port, logdir, clone_of, bl_cfg, bl_pre, first):
                     res["steps"]["permissions"] = {"ok": True, "cells": len(pr["cells"]), "seconds": pr["seconds"],
                                                    "base_issues": len(pr["mismatches"]) + len(pr["unrowed"]) +
                                                    len(pr["stale"])}
+                    keep("permissions", key, permissions=res["permissions"], step=res["steps"]["permissions"])
+                except PermsKept:
+                    pass
                 except PermsSetup as e:
                     res["steps"]["permissions"] = {"ok": False, "error": e.why, "next": "permissions"}
             if rctx.c("e2e"):
@@ -28356,9 +28890,23 @@ def selftest_repo(ctx, a, n, port, logdir, clone_of, bl_cfg, bl_pre, first):
                 if not err:
                     res["security"]["headers"] = f
             if sc["zap"] and shutil.which("docker") and not a.no_zap:
-                f, err = scan_zap(rctx, view, info["url"], os.path.join(logdir, "zap"))
+                base = [SCAN_VERSION, commits(), scan_signature(rctx, "zap"), zap_minutes(rctx), zap_excludes(rctx),
+                        zap_parallel(rctx), selftest_settings(ctx, ("security", "e2e"))]
+                keys = {"zap": digest(base + [rctx.c("security.zap_auth"), selftest_files(ctx, ("api",))]),
+                        "zap-api": digest(base + [rctx.c("security.zap_auth"), rctx.c("security.zap_api_auth"),
+                                                  rctx.c("security.zap_openapi"), selftest_files(ctx)])}
+                runs = [r[0] for r in zap_runs(rctx, info["url"])]
+                have = {r: kept("zap:" + r, keys[r]) for r in runs}
+                todo = [r for r in runs if not have[r]]
+                f, err = [], None
+                if todo:
+                    with zap_twin(rctx, job, view) if set(todo) == {"zap", "zap-api"} else \
+                            contextlib.nullcontext() as api_at:
+                        f, err = scan_zap(rctx, view, info["url"], os.path.join(logdir, "zap"), only=set(todo),
+                                          on_pass=lambda r, found: keep("zap:" + r, keys[r], findings=found),
+                                          api_at=api_at)
                 if not err:
-                    res["security"]["zap"] = f
+                    res["security"]["zap"] = zap_merge([have[r]["findings"] for r in runs if have[r]] + [f])
                 else:
                     res["security_skipped"] = [err]
             # After the scans: the first ZAP run on a machine is what pulls the image and gives it its id.
@@ -28967,6 +29515,8 @@ def build_parser():
     s.add_argument("--no-app", action="store_true")
     s.add_argument("--keep", action="store_true", help="keep the _selftest clone for inspection")
     s.add_argument("--no-zap", action="store_true", help="skip the ZAP baseline on the base branch")
+    s.add_argument("--fresh", action="store_true", help="run every step again, even one that passed on exactly this "
+                   "before (jobs/_selftest/resume.json)")
     s.set_defaults(fn=cmd_selftest)
 
     s = sub.add_parser("init", help="set this factory repository up for one project and its repositories; run again "

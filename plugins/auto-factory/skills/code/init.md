@@ -85,8 +85,9 @@ with `has_commits` and `greenfield`), `added`, `created` and `notes`.
   `##` headings into a folder of the same name, whose `README.md` is the index
   (one row per part: file, what it holds), and points every link to the old file
   at the index or at the part with that heading (`split`, `links_fixed_in`); it
-  moves `logic/README.md`'s overall log into `logic/history.md`, each module
-  README's open points into `<module>/open.md` and every file's change history
+  moves `logic/README.md`'s overall log into `logic/history.md`, turns its index
+  of every feature into a list of modules (each feature goes into its module
+  README's feature table), each module README's open points into `<module>/open.md` and every file's change history
   into `<module>/history.md` (`logic_moved`). **Init is not done before the next
   step:** the logic files still over the limit are in `logic_too_long`, and
   `logic_split` has the command for each. Run every one and spawn a `logic writer`
@@ -278,6 +279,11 @@ answers did not settle:
      `$FACTORY_URL_<NAME>` (such as `$FACTORY_URL_BACKEND/login`), which every app
      started after it has.
    - Does the app serve an OpenAPI description? Set `security.zap_openapi`.
+     Then ask how the web and API scans run: one after the other on the job's
+     app (`security.zap_parallel: false`, the default, less memory), or side by
+     side, the API scan on a second copy of the app with its own database
+     (`true`: about half the time, neither can break the other's login or data,
+     a second stack's memory while ZAP runs). Explain both; the user chooses.
 5. Languages: which human languages the product supports and which is the
    default; which language the factory should speak.
 6. Conventions and style: confirm the commit format, error format and the
@@ -312,9 +318,9 @@ lessons to `python3 ${CLAUDE_SKILL_DIR}/fx lessons save`.
 
 **Phase 6b · Write the logic.** `logic/` in the factory repository is the
 source of truth for the business logic of every feature, in the team's format
-(`logic/README.md` index and conventions, `shared.md`, one folder per module
-with a `README.md` holding module rules and the only parameter table, one file
-per feature). Write it for **every** feature:
+(`logic/README.md` list of modules and conventions, `shared.md`, one folder per
+module with a `README.md` holding its feature table, module rules and the only
+parameter table, one file per feature). Write it for **every** feature:
 1. From the module map, the routes and the pages, list the business modules
    (slug, the code folders and files behind each) and their features; show the
    plan to the user as a short table.
@@ -325,10 +331,11 @@ per feature). Write it for **every** feature:
    a `logic writer` with the returned prompt and model; spawn them **in one
    message** so they run in parallel. Each writes `logic/<slug>/`.
 3. Write `logic/README.md` (project name, owner, conventions; keep the
-   `<!-- index:end -->` marker right after the last row of the index, and leave
-   `logic/history.md` with its `<!-- log:end -->` as fx made it), then `python3 ${CLAUDE_SKILL_DIR}/fx logic index --log "<one line: what init wrote>"`:
-   it adds one index row per feature file the writers wrote, grouped by module
-   (never write those rows yourself, and do not ask the writers to), and
+   `<!-- index:end -->` marker right after the last row of its list of modules,
+   and leave `logic/history.md` with its `<!-- log:end -->` as fx made it), then `python3 ${CLAUDE_SKILL_DIR}/fx logic index --log "<one line: what init wrote>"`:
+   it adds one row per module to `logic/README.md` and one row per feature file
+   to its module README's feature table, and takes out the rows of files that
+   are gone (never write those rows yourself, and do not ask the writers to), and
    `shared.md` (system-wide rules, cited), in the human language; when it is
    Vietnamese use the team's headings (Mục lục, Quy ước; Nhật ký tổng in `history.md`).
 4. Ask the user (AskUserQuestion, at most 4 questions per round) about every
@@ -569,7 +576,11 @@ and runs its setup, its checks script, its app (with the apps it needs), e2e, an
 the header and ZAP scans of the base branch (their baseline lets the gate block
 only new findings), saves the database schema when `app.schema` is set (`schema`
 in the output), then writes `baseline.json` (one part per repository) and deletes
-the clones. With a schema, compare it
+the clones. A long step that passed (the checks script, the permission table,
+each ZAP run) is kept, and the next selftest uses it again while the commits and
+what the step reads are the same (`reused` in the output says which): after a
+fix, run selftest again and only what failed runs; `--fresh` runs everything.
+With a schema, compare it
 with the data model you wrote (tables, columns, relations, indexes,
 constraints): fix the knowledge where the models or migrations misled you,
 and run `fx knowledge check` again. Agents get the schema's path in their

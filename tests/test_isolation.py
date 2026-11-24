@@ -729,6 +729,79 @@ class RealJobFlowTest(FxTestCase):
 
 
 
+DOCKER = shutil.which("docker")
+API_SERVER_JS = """const http = require('http');
+const spec = JSON.stringify({openapi: '3.0.0', info: {title: 't', version: '1'},
+  paths: {'/items': {get: {responses: {'200': {description: 'ok'}}}}}});
+http.createServer((q, r) => {
+  if (q.url === '/openapi.json') { r.setHeader('Content-Type', 'application/json'); return r.end(spec); }
+  r.setHeader('Content-Type', 'text/html'); r.end(q.url === '/health' ? 'ok' : '<html><body>app</body></html>');
+}).listen(Number(process.argv[2]), '127.0.0.1');
+"""
+
+
+@unittest.skipUnless(os.environ.get("FX_SANDBOX_REAL") == "1" and shutil.which("limactl") and DOCKER,
+                     "the real sandbox VM and Docker: FX_SANDBOX_REAL=1 after fx sandbox install")
+class RealZapTwinTest(FxTestCase):
+    """security.zap_parallel in the real VM with the real ZAP: the API scan's copy of the app starts in a box of its
+    own beside the job's, both scans run at once and pass, the copy is stopped and its box paused, the job's own app is
+    untouched, and the copy's box goes with the job."""
+    tools = ("gitleaks", "semgrep", "osv-scanner")  # docker: the real one, for ZAP
+    cfg = {"setup": "npm init -y >/dev/null", "app": {"up": "node server.js {port}", "health": "/health",
+                                                     "start_timeout_sec": 60},
+           "ports": {"base": 25400, "step": 10}}
+
+    def setUp(self):
+        super().setUp()
+        for name, path in (("limactl", LIMACTL), ("docker", DOCKER)):
+            os.symlink(path, os.path.join(self.f.bin, name))
+        p = mock.patch.dict(os.environ, {"FACTORY_TEST_JOB_BOX": "1"})
+        p.start()
+        self.addCleanup(p.stop)
+        write(os.path.join(self.f.factory, "checks.sh"), "exit 0\n")
+        cfg = load_json(os.path.join(self.f.factory, "factory.json"))
+        cfg["security"] = {"zap_openapi": "/openapi.json", "zap_parallel": True}
+        write(os.path.join(self.f.factory, "factory.json"), json.dumps(cfg))
+        self.f.commit({".gitignore": "node_modules/\n", "server.js": API_SERVER_JS})
+        self.f.save_job(port=25400)
+        self.addCleanup(self.fx, "cleanup", "T-1", "--force")
+
+    def test_the_api_scan_on_its_own_box_beside_the_web_scan(self):
+        code, res = self.fx("setup", "T-1", "--force")
+        self.assertEqual(code, 0, res)
+        ctx = self.f.ctx()
+        job = ctx.load("T-1")
+        url = fx.app_start(ctx, job)["url"].rstrip("/")
+        try:
+            self.assertTrue(fx.http_up(url + "/health"))
+            kept = []
+            with fx.zap_twin(ctx, job, job) as (view, turl):
+                turl = turl.rstrip("/")
+                self.assertNotEqual(turl, url)
+                self.assertTrue(fx.http_up(turl + "/health"), "the copy answers here")
+                twin_box = fx.job_box_rec(ctx, "T-1-zapapi")
+                self.assertEqual(twin_box["job"], "T-1")
+                self.assertNotEqual(twin_box["name"], fx.job_box_rec(ctx, "T-1")["name"], "a box of its own")
+                t0 = time.time()
+                found, err = fx.scan_zap(ctx, job, url + "/", os.path.join(self.tmp, "zap"), [],
+                                         on_pass=lambda n, f: kept.append(n), api_at=(view, turl + "/"))
+                took = time.time() - t0
+            self.assertIsNone(err)
+            self.assertEqual(kept, ["zap", "zap-api"])
+            for name in ("zap.json", "zap-api.json"):
+                self.assertTrue(os.path.getsize(os.path.join(self.tmp, "zap", name)) > 0, name)
+            self.assertFalse(fx.http_up(turl + "/health"), "the copy is stopped after the scan")
+            self.assertIs(fx.box_running(twin_box), False, "its box is paused")
+            self.assertTrue(fx.http_up(url + "/health"), "the job's own app untouched")
+            sys_out = "both ZAP scans side by side: %.0f s, %d finding(s)" % (took, len(found or []))
+            print("\n" + sys_out)
+        finally:
+            fx.app_stop(ctx, job)
+        code, res = self.fx("cleanup", "T-1", "--force")
+        self.assertEqual(code, 0, res)
+        self.assertIsNone(fx.box_running(twin_box), "the copy's box went with the job")
+
+
 @unittest.skipUnless(os.environ.get("FX_SANDBOX_REAL") == "1" and shutil.which("limactl"),
                      "the real sandbox VM: FX_SANDBOX_REAL=1 after fx sandbox install")
 class RealReviewFlowTest(SandboxCase):

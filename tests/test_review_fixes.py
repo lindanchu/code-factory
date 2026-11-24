@@ -26,10 +26,11 @@ from test_project_repos import ProjectCase
 from test_project_gate import GateCase
 from test_security import fx, load_json, sh, slurp, write
 
-LOGIC_README = ("# Logic\n\n## Index\n| Module | File | Feature | Ticket |\n|---|---|---|---|\n"
-                "| billing | [billing/invoices.md](billing/invoices.md) | Invoices | - |\n<!-- index:end -->\n\n"
+LOGIC_README = ("# Logic\n\n## Modules\n| Module | Name |\n|---|---|\n"
+                "| [billing/](billing/README.md) | Billing |\n<!-- index:end -->\n\n"
                 "## Overall log\n| Date | File | Change |\n|---|---|---|\n<!-- log:end -->\n")
-MODULE = "# Billing\n\n## 1. Rules\nNone.\n\n## 2. Parameters\n| Parameter | Value | Code | Env | Test value |\n" \
+MODULE = "# Billing\n\n| Feature | File |\n|---|---|\n| Invoices | [invoices.md](invoices.md) |\n\n" \
+         "## 1. Rules\nNone.\n\n## 2. Parameters\n| Parameter | Value | Code | Env | Test value |\n" \
          "|---|---|---|---|---|\n%s\n"
 FEATURE = ("# %s\n\n**Ticket:** SHOP-%d · - · -\n\n## 1. Input\n%s\n\n## 2. BE\nx\n\n## 3. FE\nx\n\n## 4. Nav\nx\n\n"
            "## 5. Open\nx\n\n```mermaid\nflowchart LR\n  a-->b\n```\n")
@@ -214,14 +215,67 @@ class SharedLimitsTest(LogicCase):
 
 
 class LogicIndexTest(LogicCase):
-    def test_a_new_feature_gets_one_row_next_to_its_module(self):
-        write(os.path.join(self.factory, "logic", "billing", "refunds.md"), FEATURE % ("Refunds", 2, "x"))
+    def test_a_new_feature_gets_a_row_in_its_modules_table(self):
+        ld = os.path.join(self.factory, "logic")
+        write(os.path.join(ld, "billing", "refunds.md"), FEATURE % ("Refunds", 2, "x"))
         res = self.ok("logic", "index", "--log", "init wrote the logic")
-        self.assertEqual(len(res["added"]), 1)
-        idx = slurp(os.path.join(self.factory, "logic", "README.md"))
-        self.assertIn("| billing | [billing/refunds.md](billing/refunds.md) | Refunds | SHOP-2 |\n<!-- index:end -->", idx)
-        self.assertIn("init wrote the logic", idx)
+        self.assertEqual(res["added"], ["billing/refunds.md"])
+        mod = slurp(os.path.join(ld, "billing", "README.md"))
+        self.assertIn("| Invoices | [invoices.md](invoices.md) |\n| Refunds | [refunds.md](refunds.md) |\n\n## 1.", mod)
+        self.assertNotIn("refunds", slurp(os.path.join(ld, "README.md")), "the top index lists modules only")
+        self.assertIn("init wrote the logic", slurp(os.path.join(ld, "README.md")))
         self.assertEqual(self.ok("logic", "index")["added"], [], "only what is not there yet")
+
+    def test_a_new_module_gets_a_row_and_a_feature_table(self):
+        ld = os.path.join(self.factory, "logic")
+        write(os.path.join(ld, "tax", "README.md"), "# Module Tax rules (tax)\n\n**Parent ticket:** -\n\n## 1. Rules\nx\n")
+        write(os.path.join(ld, "tax", "vat.md"), FEATURE % ("VAT", 3, "x"))
+        res = self.ok("logic", "index")
+        self.assertEqual((res["added"], res["modules_added"]), (["tax/vat.md"], ["tax"]))
+        self.assertIn("| [tax/](tax/README.md) | Tax rules |\n<!-- index:end -->", slurp(os.path.join(ld, "README.md")))
+        self.assertIn("**Parent ticket:** -\n\n| Feature | File |\n| ------- | ---- |\n| VAT | [vat.md](vat.md) |\n\n## 1.",
+                      slurp(os.path.join(ld, "tax", "README.md")))
+
+    def test_check_names_what_the_index_lacks_and_index_mends_it(self):
+        ld = os.path.join(self.factory, "logic")
+        write(os.path.join(ld, "billing", "refunds.md"), FEATURE % ("Refunds", 2, "x"))
+        os.remove(os.path.join(ld, "billing", "invoices.md"))
+        probs = fx.logic_check(self.ctx(), ld, {"be": self.tmp, "fe": self.tmp})["problems"]
+        self.assertTrue(any("billing/refunds.md: not in its module's feature table" in p for p in probs), probs)
+        self.assertTrue(any("lists invoices.md, which does not exist" in p for p in probs), probs)
+        res = self.ok("logic", "index")
+        self.assertEqual((res["added"], res["removed"]), (["billing/refunds.md"], ["billing/invoices.md"]))
+        probs = fx.logic_check(self.ctx(), ld, {"be": self.tmp, "fe": self.tmp})["problems"]
+        self.assertFalse([p for p in probs if "fx logic index" in p], probs)
+
+    def test_an_index_of_every_feature_becomes_a_list_of_modules(self):
+        # an older index: one row per feature, Vietnamese headers; the module README has no feature table yet
+        ld = os.path.join(self.factory, "logic")
+        write(os.path.join(ld, "README.md"), "# Logic\n\n## Mục lục\n| Module | File | Tính năng | Ticket |\n|---|---|---|---|\n"
+              "| billing | [billing/invoices.md](billing/invoices.md) | Hoá đơn | SHOP-1 |\n"
+              "| billing | [billing/refunds.md](billing/refunds.md) | Hoàn tiền | SHOP-2 |\n<!-- index:end -->\n\n## Quy ước\nx\n")
+        write(os.path.join(ld, "billing", "README.md"), "# Module Thanh toán (billing)\n\n## 1. Rules\nx\n\n## 2. P\nx\n")
+        write(os.path.join(ld, "billing", "refunds.md"), FEATURE % ("Hoàn tiền", 2, "x"))
+        probs = fx.logic_check(self.ctx(), ld, {"be": self.tmp, "fe": self.tmp})["problems"]
+        self.assertTrue(any("as an older version kept it" in p for p in probs), probs)
+        res = self.ok("tidy", "--force")
+        self.assertTrue(any("now a list of 1 modules" in m["what"] for m in res["logic_moved"]), res["logic_moved"])
+        idx = slurp(os.path.join(ld, "README.md"))
+        self.assertIn("## Mục lục\n| Module | Name |\n| ------ | ---- |\n| [billing/](billing/README.md) | Thanh toán |\n"
+                      "<!-- index:end -->\n\n## Quy ước", idx)
+        mod = slurp(os.path.join(ld, "billing", "README.md"))
+        self.assertIn("| Invoices | [invoices.md](invoices.md) |\n| Hoàn tiền | [refunds.md](refunds.md) |", mod)
+        probs = fx.logic_check(self.ctx(), ld, {"be": self.tmp, "fe": self.tmp})["problems"]
+        self.assertFalse([p for p in probs if "fx logic index" in p], probs)
+
+    def test_apply_puts_a_new_feature_in_its_modules_table(self):
+        ctx = self.ctx()
+        job = {"id": "SHOP-8", "issue_key": "SHOP-8", "summary": "s", "repos": {}}
+        sdir = os.path.join(self.factory, "jobs", "SHOP-8", "logic")
+        write(os.path.join(sdir, "billing", "refunds.md"), FEATURE % ("Refunds", 8, "x"))
+        with mock.patch.object(fx, "logic_check", lambda *a, **k: {"problems": []}):
+            fx.apply_logic(ctx, job, ["billing/refunds.md"], force=True)
+        self.assertIn("[refunds.md](refunds.md)", slurp(os.path.join(self.factory, "logic", "billing", "README.md")))
 
     def test_apply_keeps_a_staged_index(self):
         ctx = self.ctx()
@@ -233,7 +287,7 @@ class LogicIndexTest(LogicCase):
             fx.apply_logic(ctx, job, ["README.md", "billing/credits.md"], force=True)
         idx = slurp(os.path.join(self.factory, "logic", "README.md"))
         self.assertIn("# Logic, staged", idx)
-        self.assertIn("billing/credits.md", idx)
+        self.assertIn("[credits.md](credits.md)", slurp(os.path.join(self.factory, "logic", "billing", "README.md")))
 
 
 class FactoryPathsTest(LogicCase):
@@ -567,7 +621,8 @@ elif args[:2] == ["issue", "comment"]:
 NOTE = ("## Problem\nThe gate of SHOP-12 in shop-factory waited 50 minutes on a box with no network.\n\n"
         "## Evidence\nfx said so in /Users/somebody/work/shop-factory/jobs/SHOP-12/gate.log; the app at "
         "https://git.shop.example/team/shop-api failed. Mail ops@shop.example, token ghp_abcdefghijklmnopqrstuvwxyz0123. "
-        "UTF-8 and CVE-2024-1234 stay.\n\n"
+        "UTF-8 and CVE-2024-1234 stay. POST /quan-ly/cua-hang/{id}/key/{key}/huy-bo?tab=keys revoked it; "
+        "GET /api/v1/ping and /tmp/zap-user stay.\n\n"
         "## Change\nVoid the round when the box is offline.\n")
 
 
@@ -601,9 +656,11 @@ class SkillNoteTest(ProjectCase):
         create = next(c for c in calls if c[:2] == ["issue", "create"])
         self.assertIn("lindanchu/code-factory", create)
         self.assertTrue(create[create.index("--title") + 1].startswith("[skill] "))
-        for private in ("SHOP-12", "shop-factory", "somebody", "git.shop.example", "ops@", "ghp_", "shop-api"):
+        for private in ("SHOP-12", "shop-factory", "somebody", "git.shop.example", "ops@", "ghp_", "shop-api",
+                        "quan-ly", "cua-hang", "huy-bo", "tab=keys"):
             self.assertNotIn(private, body)
-        for kept in ("UTF-8", "CVE-2024-1234", "`fx gate`", "Void the round", "fx-note: ", fx.VERSION):
+        for kept in ("UTF-8", "CVE-2024-1234", "`fx gate`", "Void the round", "fx-note: ", fx.VERSION,
+                     "/<part>/<part>/{id}/key/{key}/<part>?<query>", "/api/v1/ping", "/tmp/zap-user"):
             self.assertIn(kept, body)
         for machine in ("Darwin", "macOS", "Linux", "Machine", self.tmp):
             self.assertNotIn(machine, body)
@@ -696,9 +753,9 @@ class LongFilesTest(LogicCase):
         write(os.path.join(kd, "be", "testing.md"), "# Testing\n\nSee `style.md#migration` and [style](style.md).\n")
         write(os.path.join(kd, "fe", "README.md"), "# fe\n")
         write(os.path.join(kd, "fe", "style.md"), "# Style of fe\n\nshort\n")
-        write(os.path.join(self.factory, "logic", "README.md"), LOGIC_README.replace(
-            "<!-- index:end -->", "| billing | [billing/credit.md](billing/credit.md) | Credit | - |\n<!-- index:end -->"))
-        write(os.path.join(self.factory, "logic", "billing", "README.md"), MODULE % "" +
+        write(os.path.join(self.factory, "logic", "README.md"), LOGIC_README)
+        write(os.path.join(self.factory, "logic", "billing", "README.md"), MODULE.replace(
+            "|\n\n## 1.", "|\n| Credit | [credit.md](credit.md) |\n\n## 1.") % "" +
               "\n## 3. Open points\n1. Is a credit note a refund?\n\n## Change history\n| Date | Change | Ticket |\n"
               "|---|---|---|\n| 01.11.2026 | written | SHOP-1 |\n")
         write(os.path.join(self.factory, "logic", "billing", "credit.md"), FEATURE % ("Credit", 2, "Long text. " * 300) +
@@ -744,6 +801,13 @@ class LongFilesTest(LogicCase):
         check = fx.logic_check(ctx, ld, {"be": self.tmp, "fe": self.tmp}, check_index=True)
         self.assertFalse([p for p in check["problems"] if "history.md" in p or "open.md" in p], check["problems"])
         self.assertEqual(check["too_long"], ["billing/credit.md"])
+
+    def test_history_headings_in_both_languages(self):
+        for h in ("## Overall log", "## Overall history", "## Nhật ký tổng", "## 4. Nhật ký thay đổi", "## Nhật ký",
+                  "## Lịch sử thay đổi", "## Changelog"):
+            self.assertTrue(fx.HISTORY_HEAD_RE.match(h), h)
+        for h in ("## Nhật ký đăng nhập", "## Overall rules"):
+            self.assertFalse(fx.HISTORY_HEAD_RE.match(h), h)
 
     def test_tidy_wants_the_files_committed_first(self):
         code, res = self.fx("tidy")

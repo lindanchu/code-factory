@@ -372,8 +372,11 @@ apply to your factory.
 | Attacks on the running app: SQL injection, XSS and the like | `security.zap_mode: "full"` | Off by default: ZAP writes junk through every form it finds, so `app.up` must give each job a throw-away database. Stops after `security.zap_minutes`. |
 | Pages behind the login | `security.zap_auth` (web login) | Worked out from the code by an agent at `init` (`login.md`), never written by hand: a command that prints a test account's session cookie, a `check` page that must answer 2xx with it, and the account's `role`. The value goes only to the ZAP container, which sends it only to the app's host, and is taken out of its reports. |
 | API routes no page links to | `security.zap_openapi` and `security.zap_api_auth` (API login) | Where the app serves its OpenAPI description, such as `/openapi.json`, and how a client of the API logs in (a token or key), kept apart from the web login. |
+| Web and API scans side by side, each on its own copy of the app | `security.zap_parallel: true` | Off by default (one after the other on the job's app). On: the API scan runs on a second copy of the app with its own database (and its own box in the sandbox), at the same time as the web scan: about half the time, and neither can break the other's login or data. Costs a second stack's memory while ZAP runs, its first setup, and on this machine a second clone of each repository. |
+| Nothing destructive the scan should leave alone | `security.zap_exclude` | Regexes of URLs ZAP never crawls, posts to or attacks, such as an admin action that revokes the API key the API scan uses. What is left out is not scanned, so keep the list short. |
 
-Every scan logs in first and calls each `check` page, and calls it again after the scan. A check that fails, a
+Every scan logs in first and calls each `check` page, and calls it again after the scan. The API login is
+proved again right before the API scan, and taken anew if the web scan before it ended it. A check that fails, a
 login lost during the scan, or a scan most of whose answers were 4xx (401/403: no login; 429: a limit) stops the
 gate without a builder (`next: login`): the agent works the login out again, and asks you what the code does not
 tell. A job whose own change alters login keeps its way for itself until its pull requests are merged. Every agent
@@ -382,6 +385,11 @@ that needs to log in uses the same saved way, through `fx login <job> --kind web
 
 Run `fx selftest` again after changing `zap_mode`, `zap_openapi`, `zap_auth` or the ZAP
 image, including after pulling a newer `:stable`: other scans find other old problems.
+A selftest keeps each long step that passed (the checks script, the permission table, the ZAP web scan, the
+ZAP API scan) and uses it again while the commits and what that step reads are unchanged, so after fixing a
+login only the scan that failed runs again (`--fresh` runs everything). The permission table logs everyone in
+once, before its snapshot of the database: after putting the database back it only proves each login on its
+check page.
 Until then the gate and `fx doctor` say so, and header or ZAP findings do not block
 because of what the base branch already has.
 
@@ -1220,6 +1228,23 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
   jobs at once with room to spare (above); for heavy builds several at a time, raise `memory` in
   `fx-sandbox.yaml` before `fx sandbox install`, or with `limactl edit fx-sandbox`.
 
+### Upgrading to 3.11: a two-level logic index, a selftest that goes on, ZAP scans that keep their logins
+
+- The logic index has two levels: `logic/README.md` lists the modules, and each module's `README.md` lists its
+  features in its feature table, so neither outgrows the file limit. `fx tidy` (or `fx logic index`) turns an
+  older index of one row per feature into that; `fx logic index` keeps both tables. A Vietnamese overall log
+  headed `Nhật ký tổng` now moves to `logic/history.md` too.
+- `fx selftest` keeps each long step that passed (the checks script, the permission table, the ZAP web scan, the
+  ZAP API scan) in `jobs/_selftest/resume.json`, and the next selftest uses it again while the commits and what
+  the step reads are unchanged: after a fix, only what failed runs again. `--fresh` runs everything.
+- The permission table logs everyone in once, before its snapshot of the database, and after putting the
+  database back only proves each login on its check page; a write's data fingerprint is taken once, not twice.
+- The API scan's login is proved again right before the API scan, and taken anew when the web scan ended it.
+  `security.zap_exclude` keeps URLs out of every ZAP run. `security.zap_parallel: true` runs the API scan at the
+  same time as the web scan, on a second copy of the app with its own database (and box): run `fx selftest`
+  again after turning it on.
+- Notes on the skill also take out the project's own words in page and route paths.
+
 ### Upgrading to 3.10: a GitHub login on every machine, long files fully split
 
 - Notes on the skill cannot be turned off: until `gh auth login` was run on a machine, `/auto-factory:code init`
@@ -1301,10 +1326,12 @@ then reviews the knowledge against the code before you approve it. With
 `app.schema` set, the real database structure is read too.
 
 **Project logic.** Next to the knowledge, init writes `logic/`: the business
-logic of every feature, in the team's feature-logic-docs format (an index with
-an overall log, `shared.md`, one folder per module with its rules and the only
-parameter table, one file per feature: inputs, back end, front end, navigation,
-a Mermaid flow, open points, change history). Every rule cites the code that
+logic of every feature, in the team's feature-logic-docs format (a list of
+modules, `shared.md`, one folder per module with its feature table, its rules and
+the only parameter table, one file per feature: inputs, back end, front end,
+navigation, a Mermaid flow, open points). fx keeps both tables with `fx logic
+index`, so no index outgrows the file limit, and records every change in
+`logic/history.md`. Every rule cites the code that
 implements it and the test that covers it (or "no test"), and `fx logic check`
 verifies both and the format. Back-end/front-end differences and anything the
 code does not decide become open points or questions, never guesses. In each

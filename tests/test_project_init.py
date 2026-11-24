@@ -17,9 +17,9 @@ import unittest
 from test_project_repos import CHECKS, ProjectCase, old_keys_id
 from test_security import fx, load_json, sh, slurp, write, prompt_text
 
-LOGIC_INDEX = "# Logic\n\n| Module | File | Title | Issue |\n|---|---|---|---|\n| billing | [billing/invoices.md]" \
-              "(billing/invoices.md) | Invoices | - |\n<!-- index:end -->\n\n<!-- log:end -->\n"
-LOGIC_MODULE = "# Billing\n\n## 1. What it does\nInvoices.\n\n## 2. Features\n- invoices.md\n"
+LOGIC_INDEX = "# Logic\n\n| Module | Name |\n|---|---|\n| [billing/](billing/README.md) | Billing |\n<!-- index:end -->" \
+              "\n\n<!-- log:end -->\n"
+LOGIC_MODULE = "# Billing\n\n| Feature | File |\n|---|---|\n| Invoices | [invoices.md](invoices.md) |\n\n## 1. What it does\nInvoices.\n\n## 2. Features\n- invoices.md\n"
 LOGIC_FEATURE = "# Invoices\n\n## 1. Goal\nBill.\n\n## 2. Rules\n%s\n\nMore.\n\nMore.\n\n## 3. Flow\n```mermaid\nflowchart LR\n  a-->b\n```\n" \
                 "\n## 4. Data\nNone.\n\n## 5. Tests\nNone.\n"
 

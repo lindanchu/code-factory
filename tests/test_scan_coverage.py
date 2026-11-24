@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -1249,6 +1250,45 @@ class BaselineTest(CoverageCase):
         stamp = load_json(os.path.join(self.f.factory, "baseline.json"))["security_scan"]["zap"]
         self.assertTrue(stamp.endswith("sha256:pulled"), stamp)
 
+    def test_selftest_runs_again_only_what_did_not_pass(self):
+        self.set_security(required=[], zap_openapi="/openapi.json")
+        asked = []
+        web = {"tool": "zap", "rule": "zap-1", "message": "web thing", "severity": "low", "paths": ["/a"]}
+        api = {"tool": "zap", "rule": "zap-2", "message": "api thing", "severity": "low", "paths": ["/api/b"]}
+
+        def zap(ctx, job, url, rdir, notes=None, image=None, only=None, on_pass=None, api_at=None):
+            asked.append(sorted(only))
+            if len(asked) == 1:  # the web scan passes, then the API scan finds its key revoked
+                on_pass("zap", [web])
+                raise fx.ScannerLogin("api", "its check page /ping answered 401 after the scan")
+            for r in only:
+                on_pass(r, [web] if r == "zap" else [api])
+            return ([web] if "zap" in only else []) + ([api] if "zap-api" in only else []), None
+
+        def selftest(*args):
+            with mock.patch.object(fx, "app_start", return_value={"url": "http://127.0.0.1:5100/"}), \
+                    mock.patch.object(fx, "app_stop"), \
+                    mock.patch.object(fx, "scan_headers", lambda c, j, u: ([], None)), \
+                    mock.patch.object(fx, "scan_zap", zap):
+                return self.fx("selftest", *args)[1]
+        first = selftest()
+        self.assertFalse(first["ok"])
+        self.assertNotIn("reused", first.get("steps", {}).get("checks", {}))
+        second = selftest()
+        self.assertEqual(asked[1], ["zap-api"], "the web scan passed on exactly this: kept")
+        self.assertIn("the checks script", second["reused"])
+        self.assertIn("reused", second["steps"]["checks"])
+        found = load_json(os.path.join(self.f.factory, "baseline.json"))["security"]["zap"]
+        self.assertEqual(sorted(f["message"] for f in found), ["api thing", "web thing"])
+        selftest()
+        self.assertEqual(len(asked), 2, "everything passed: no scan")
+        selftest("--fresh")
+        self.assertEqual(asked[2], ["zap", "zap-api"])
+        self.set_security(required=[], zap_openapi="/openapi.json", zap_exclude=[".*/revoke"])
+        third = selftest()
+        self.assertEqual(asked[-1], ["zap", "zap-api"], "a ZAP setting changed: both scans again")
+        self.assertIn("the checks script", third["reused"], "the checks do not read the scanners' settings")
+
     def test_selftest_records_what_made_the_baseline(self):
         with mock.patch.object(fx, "app_start", return_value={"url": "http://127.0.0.1:5100/"}), \
                 mock.patch.object(fx, "app_stop"), mock.patch.object(fx, "scan_headers", lambda c, j, u: ([], None)):
@@ -1702,6 +1742,36 @@ class ZapRunsTest(CoverageCase):
         self.assertIsNone(err)
         self.assertEqual([r["zap_auth"] for r in runs], ["cookie-1", "key-1"])
 
+    def test_the_api_login_is_taken_anew_when_the_web_scan_ended_it(self):
+        # a full web scan posts every form, such as one that revokes the very key the API scan was given
+        n = os.path.join(self.tmp, "keys-issued")
+        self.set_security(zap_openapi="/openapi.json", zap_auth={"command": "echo cookie-1", "header": "Cookie"},
+                          zap_api_auth={"command": "n=$(cat %s 2>/dev/null || echo 0); n=$((n+1)); echo $n > %s; "
+                                                   "echo key-$n" % (n, n), "header": "Authorization", "check": "/ping"})
+        seen = []
+
+        def check(url, conf, header, value, extra=None):
+            seen.append(value)
+            return "its check page /ping answered 401" if value == "key-1" and seen.count("key-1") > 1 else None
+        with mock.patch.object(fx, "login_check", side_effect=check):
+            _, err, _, runs = self.scan()
+        self.assertIsNone(err)
+        self.assertEqual([r["zap_auth"] for r in runs], ["cookie-1", "key-2"])
+
+    def test_urls_left_out_of_every_run(self):
+        self.set_security(zap_openapi="/openapi.json", zap_exclude=[".*/key/.*/revoke$", ".*/log out"])
+        _, _, _, runs = self.scan()
+        for r in runs:
+            z = r["argv"][r["argv"].index("-z") + 1]
+            self.assertIn("-config globalexcludeurl.url_list.url(0).regex=.*/key/.*/revoke$", z)
+            self.assertIn("-config globalexcludeurl.url_list.url(1).regex=.*/log\\sout", z)
+            self.assertIn("url(1).enabled=true", z)
+        self.set_security(zap_mode="full", zap_exclude=[".*/logout"])
+        _, _, _, runs = self.scan()
+        z = runs[-1]["argv"][runs[-1]["argv"].index("-z") + 1]  # the calls add up across scans: the last one
+        self.assertIn("scanner.maxScanDurationInMins=", z)
+        self.assertIn("url(0).regex=.*/logout", z)
+
     def test_an_api_with_no_login_of_its_own_uses_the_web_one_as_before(self):
         self.set_security(zap_openapi="/openapi.json", zap_auth={"command": "echo tok"})
         _, _, _, runs = self.scan()
@@ -1728,6 +1798,64 @@ class ZapRunsTest(CoverageCase):
             with self.assertRaises(fx.ScannerLogin) as e:
                 self.scan()
         self.assertIn("lost the login", str(e.exception))
+
+    def scan_apart(self, on_pass=None, **env):
+        rdir = os.path.join(self.tmp, "zap")
+        job = self.f.job()
+        twin = dict(job, id=job["id"] + "-zapapi")
+        t0 = time.time()
+        with mock.patch.object(fx.sys, "platform", "darwin"), mock.patch.dict(os.environ, env):
+            found, err = fx.scan_zap(self.f.ctx(), job, "http://127.0.0.1:5100/", rdir, [], on_pass=on_pass,
+                                     api_at=(twin, "http://127.0.0.1:5200/"))
+        return found, err, time.time() - t0, [c for c in self.f.calls("docker") if c["argv"][0] == "run"]
+
+    def test_side_by_side_each_scan_on_its_own_app(self):
+        self.set_security(zap_openapi="/openapi.json", zap_auth={"command": "echo cookie-1", "header": "Cookie"},
+                          zap_api_auth={"command": "echo key-1", "header": "X-Api-Key"})
+        _, err, took, runs = self.scan_apart(STUB_SLEEP_DOCKER="2")
+        self.assertIsNone(err)
+        self.assertEqual(len({r["argv"][r["argv"].index("--name") + 1] for r in runs}), 2, "a container each")
+        by = {"api" if "zap-api-scan.py" in self.script(r["argv"]) else "web": r for r in runs}
+        self.assertIn(":5100", by["web"]["argv"][by["web"]["argv"].index("-t") + 1])
+        self.assertEqual(by["api"]["argv"][by["api"]["argv"].index("-O") + 1], "http://host.docker.internal:5200")
+        self.assertEqual((by["web"]["zap_auth"], by["api"]["zap_auth"]), ("cookie-1", "key-1"))
+        self.assertLess(took, 3.6, "side by side, not one after the other (2 s each)")
+
+    def test_side_by_side_what_passed_is_kept_when_the_other_fails(self):
+        self.set_security(zap_openapi="/openapi.json",
+                          zap_api_auth={"command": "echo key-1", "header": "X-Api-Key", "check": "/ping"})
+        seen = []
+
+        def check(url, conf, header, value, extra=None):
+            seen.append(url)
+            return "its check page /ping answered 401" if ":5200" in url and seen.count(url) > 1 else None
+        kept = []
+        with mock.patch.object(fx, "login_check", side_effect=check):
+            with self.assertRaises(fx.ScannerLogin) as e:
+                self.scan_apart(on_pass=lambda name, found: kept.append(name))
+        self.assertEqual((kept, e.exception.kind), (["zap"], "api"))
+
+    def test_the_api_scans_own_app_is_started_and_always_stopped(self):
+        ctx, job = self.f.ctx(), self.f.job()
+        with fx.zap_twin(ctx, job, job) as at:
+            self.assertIsNone(at, "off by default: both scans on the job's app")
+        self.set_security(zap_openapi="/openapi.json", zap_parallel=True)
+        ctx, started, stopped = self.f.ctx(), [], []
+        with mock.patch.object(fx, "app_start", side_effect=lambda c, j: started.append(j) or
+                               {"url": "http://127.0.0.1:%d/" % j["port"]}), \
+                mock.patch.object(fx, "app_stop", side_effect=lambda c, j: stopped.append(j["id"])):
+            with self.assertRaises(RuntimeError):
+                with fx.zap_twin(ctx, job, job) as (view, url):
+                    raise RuntimeError("the scan broke")
+        twin = started[0]
+        self.assertEqual(twin["id"], job["id"] + "-zapapi")
+        self.assertNotEqual(twin["port"], job["port"])
+        wt = fx.job_primary(job) and job["repos"][fx.job_primary(job)]["worktree"]
+        self.assertEqual(view["worktree"], wt.rstrip("/") + "-zapapi", "a clone of its own on this machine")
+        self.assertTrue(os.path.isdir(os.path.join(view["worktree"], ".git")))
+        self.assertEqual(url, "http://127.0.0.1:%d/" % twin["port"])
+        self.assertEqual(stopped, [twin["id"]])
+        self.assertTrue(fx.zap_settings(ctx).endswith("/parallel"), "a baseline of its own")
 
     def test_findings_say_where_and_merge_across_runs(self):
         self.set_security(zap_openapi="/openapi.json")

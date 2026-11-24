@@ -639,7 +639,7 @@ class OwnClonesTest(BoxCase):
                                               "test -f README.md && echo end >> \"$FX_TEST_OUT/selftests\"\n")
         first = self.box.popen(f, "selftest", "--no-app")
         self.wait_for(lambda: os.path.exists(os.path.join(self.box.out, "selftests")), what="the first selftest's checks")
-        second = self.box.popen(f, "selftest", "--no-app")
+        second = self.box.popen(f, "selftest", "--no-app", "--fresh")  # else it uses the first one's passed checks
         (c1, r1), (c2, r2) = self.box.result(first), self.box.result(second)
         self.assertEqual((c1, c2), (0, 0), (r1, r2))
         self.assertTrue(r1["ok"] and r2["ok"], (r1.get("steps"), r2.get("steps")))
@@ -2074,6 +2074,11 @@ class LimitsTest(BoxCase):
         write(os.path.join(code, "config", "api.php"), "<?php\nreturn [\n  'rate' => 60,\n];\n")
         res = fx.limits_check(Ctx(), ldir, {"app": code})
         self.assertTrue(any("does not read API_RATE_LIMIT" in p for p in res["problems"]), res["problems"])
+        # a Code cell citing a whole file (no line range) before one with lines: no crash in the duplicate-line pass
+        write(os.path.join(code, "config", "api.php"), "<?php\nreturn [\n  'rate' => env('API_RATE_LIMIT', 60),\n];\n")
+        whole = "| Burst per minute | 60 | `config/api.php` | API_RATE_LIMIT | 1000000 |"
+        write(os.path.join(ldir, "auth", "README.md"), self.TABLE % "\n".join([whole, self.RATE]))
+        self.assertEqual(fx.limits_check(Ctx(), ldir, {"app": code})["problems"], [])
 
 
 if __name__ == "__main__":

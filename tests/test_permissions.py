@@ -193,6 +193,29 @@ class MatrixTest(MatrixCase):
             fx.perm_matrix(self.ctx, self.job, self.url, t, ROWS)
         self.assertIn("viewer cannot log in", e.exception.why)
 
+    def test_everyone_logs_in_once_and_a_fingerprint_is_used_again(self):
+        t = self.tech(fingerprint="echo x >> fps; cksum db.json")
+        for who in ("viewer", "admin"):
+            t["who"][who]["login"]["command"] = "echo %s >> logins; echo 'Bearer %s'" % (who, who)
+        res = fx.perm_matrix(self.ctx, self.job, self.url, t, ROWS)
+        self.assertEqual(res["mismatches"], [])
+        # before the snapshot, and proved on /me after each restore instead of made again
+        self.assertEqual(sorted(slurp(os.path.join(self.tmp, "logins")).split()), ["admin", "viewer"])
+        # the snapshot's, one before the writes, after each of the three writes (guest, viewer, admin), after each of
+        # the two restores: each write after the first starts from the fingerprint taken after the one before (9 before)
+        self.assertEqual(len(slurp(os.path.join(self.tmp, "fps")).split()), 7)
+
+    def test_a_login_lost_with_the_restore_is_made_again(self):
+        t = self.tech()
+        t["who"]["admin"]["login"]["command"] = "echo admin >> logins; echo 'Bearer admin'"
+        rows = dict(ROWS)
+        rows["POST /admin/archive"] = {"module": "projects", "cells": {"guest": "no", "viewer": "no", "admin": "yes"}}
+        t["requests"]["POST /admin/archive"] = {"body": {"name": "y"}}
+        routes = json.loads(ROUTES) + [{"method": "POST", "uri": "admin/archive"}]
+        with mock.patch.object(fx, "perm_still_in", return_value=False):
+            res = fx.perm_matrix(self.ctx, self.job, self.url, dict(t, routes="echo '%s'" % json.dumps(routes)), rows)
+        self.assertEqual(len(slurp(os.path.join(self.tmp, "logins")).split()), 2, res["mismatches"])
+
     def test_a_restore_that_does_not_bring_the_data_back(self):
         with self.assertRaises(fx.PermsSetup) as e:
             self.run_matrix(restore="true")

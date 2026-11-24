@@ -69,9 +69,9 @@ the code, the knowledge or other modules' files.
 - Never copy secrets or real personal data; name variables, not values.
 
 Run the check command from your prompt before you finish and fix everything it
-reports for your module, except "not in the index of logic/README.md": the
-session adds the index rows afterwards with `fx logic index`, so never list
-rows for it either. Then reply with a short list: the files you wrote, the
+reports for your module, except what it says `fx logic index` mends (the
+module's row in `logic/README.md`, the rows of your README's feature table):
+the session runs it afterwards, so leave that table to fx. Then reply with a short list: the files you wrote, the
 conflicts and the most important open points.
 
 ## Language

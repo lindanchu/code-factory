@@ -5,6 +5,7 @@
 
 | Feature | File |
 | ------- | ---- |
+<!-- the module's features, one row per feature file: fx logic index adds the rows -->
 
 ## 1. Module-wide rules
 | Rule | Code | Test |

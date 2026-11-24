@@ -1451,7 +1451,7 @@ is saved without the user's approval.
 4. Logic from merged jobs: `python3 ${CLAUDE_SKILL_DIR}/fx logic pending`. For each job in `ready`
    (every one of its pull requests is merged; `repos` shows each one's state), show the user its `changes` and ask
    (AskUserQuestion) whether to apply them to `logic/`, then
-   `python3 ${CLAUDE_SKILL_DIR}/fx logic apply --job <J>` (it adds the index and overall-log rows) or
+   `python3 ${CLAUDE_SKILL_DIR}/fx logic apply --job <J>` (it adds the index rows: a new feature to its module's feature table, a new module to `logic/README.md`; and the history rows) or
    `fx logic skip --job <J>`. Exit code 3 with `conflicts`: the file changed
    since the job staged it; merge both versions into the staged file, show the
    user, then `fx logic apply --job <J> --force`. `fx logic pending` only lists:
