@@ -133,7 +133,7 @@ them to create a separate repository for the factory (for example
     its step "Rows of a job"). Never work around it.
   - `next: login` (exit code 3, from the gate, `fx selftest` or `fx login`; `kind` is
     `web` or `api`): **Scanner login.** The saved way to log in does not work, or the
-    scanner lost its login during the scan, or most of a scan's answers were 4xx. It is
+    scanner lost its login during the scan, or most of a scan's answers were 401/403/429. It is
     not the job's code: never send a builder. With a job, `fx app up <job>` first. Spawn a
     `general-purpose` agent with `model: sonnet` and as prompt: `Follow
     ${CLAUDE_SKILL_DIR}/login.md` (the absolute path), then the fx command, the factory

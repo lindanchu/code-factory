@@ -1785,6 +1785,45 @@ class ZapRunsTest(CoverageCase):
         self.assertEqual(e.exception.kind, "web")
         self.assertIn("99%", str(e.exception))
 
+    def answers(self, pct, **codes):
+        """A ZAP report whose 4xx answers are pct%, with ZAP's samples of them by code (c404=18, c401=2...)."""
+        inst = [{"uri": "http://h/x", "evidence": k[1:]} for k, n in codes.items() for _ in range(n)]
+        site = [{"alerts": [{"pluginid": "100000", "riskcode": "0", "alert": "Client Error", "instances": inst}]}]
+        return json.dumps({"site": site if inst else [], "insights": [{"key": "insight.code.4xx", "statistic": str(pct)}]})
+
+    def scan_api(self, report, check="/ping", **security):
+        self.set_security(zap_openapi="/openapi.json", zap_api_auth=dict(
+            {"command": "echo key-1", "header": "X-Api-Key"}, **({"check": check} if check else {})), **security)
+        notes = []
+        with mock.patch.object(fx, "login_check", return_value=None), mock.patch.object(fx.sys, "platform", "darwin"), \
+                mock.patch.dict(os.environ, STUB_ZAP_REPORT=report):
+            found, err = fx.scan_zap(self.f.ctx(), self.f.job(), "http://127.0.0.1:5100/", os.path.join(self.tmp, "z"),
+                                     notes)
+        return err, notes
+
+    def test_404_and_422_are_the_scans_own_guesses_not_a_lost_login(self):
+        err, notes = self.scan_api(self.answers(93, c404=18, c422=2))
+        self.assertIsNone(err)
+        self.assertTrue(any("93% of the API scan's answers were 404, 422" in n and "OpenAPI examples" in n
+                            for n in notes), notes)
+
+    def test_refusals_still_stop_the_scan_for_its_login(self):
+        with self.assertRaises(fx.ScannerLogin) as e:
+            self.scan_api(self.answers(99, c401=19, c404=1))
+        self.assertEqual(e.exception.kind, "web")  # the web scan's report is the same stub, and comes first
+        self.assertIn("94% of the web scan's answers refused it", str(e.exception))
+        self.assertIn("401: 19", str(e.exception))
+
+    def test_the_limit_is_a_setting(self):
+        err, _ = self.scan_api(self.answers(99, c401=19, c404=1), zap_refused_pct=95)
+        self.assertIsNone(err)
+
+    def test_without_samples_a_check_page_that_still_answers_is_believed(self):
+        err, notes = self.scan_api(self.answers(99), zap_auth={"command": "echo cookie-x1", "header": "Cookie",
+                                                             "check": "/me"})
+        self.assertIsNone(err)
+        self.assertTrue(any("99%" in n for n in notes), notes)
+
     def test_a_check_page_that_cannot_be_reached_stops_before_the_scan(self):
         self.set_security(zap_auth={"command": "echo tok", "check": "/me"})
         with mock.patch.object(fx, "login_check", return_value="its check page /me answered 401"):

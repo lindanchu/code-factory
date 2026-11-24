@@ -377,9 +377,10 @@ apply to your factory.
 
 Every scan logs in first and calls each `check` page, and calls it again after the scan. The API login is
 proved again right before the API scan, and taken anew if the web scan before it ended it. A check that fails, a
-login lost during the scan, or a scan most of whose answers were 4xx (401/403: no login; 429: a limit) stops the
-gate without a builder (`next: login`): the agent works the login out again, and asks you what the code does not
-tell. A job whose own change alters login keeps its way for itself until its pull requests are merged. Every agent
+login lost during the scan, or a scan most of whose answers refused it (401/403: no login; 429: a limit; 80% by
+default, `security.zap_refused_pct`) stops the gate without a builder (`next: login`): the agent works the login
+out again, and asks you what the code does not tell. 404 and 422 do not count: an active scan guesses ids and
+bodies that do not exist, and many of them only add a note that the scan reached less of the app. A job whose own change alters login keeps its way for itself until its pull requests are merged. Every agent
 that needs to log in uses the same saved way, through `fx login <job> --kind web|api`.
 | What is already in the code and its history | `fx audit-scan` | Every scanner over a whole branch. One task file per rule to fix, ready for `fx new --local`. |
 
@@ -1227,6 +1228,13 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
 - The VM's memory: one box per job at once (and per candidate or package). Its 6 GB held three small web
   jobs at once with room to spare (above); for heavy builds several at a time, raise `memory` in
   `fx-sandbox.yaml` before `fx sandbox install`, or with `limactl edit fx-sandbox`.
+
+### Upgrading to 3.11.1: a scan stops for its login only when it was refused
+
+- A ZAP scan stops the gate for its login (`next: login`) only when most of its answers were 401, 403 or 429, as
+  ZAP's samples of its 4xx answers tell (80% by default, `security.zap_refused_pct`). 404 and 422 are the scan's own
+  guesses at ids and bodies: many of them only add a note that the scan reached less of the app. A report without
+  samples counts every 4xx as before, unless the login's check page still answered 2xx after the scan.
 
 ### Upgrading to 3.11: a two-level logic index, a selftest that goes on, ZAP scans that keep their logins
 

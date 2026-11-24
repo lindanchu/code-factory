@@ -17565,7 +17565,8 @@ LOGIN_KINDS = {"web": "web (UI) login", "api": "API login"}
 LOGIN_KEYS = {"web": "security.zap_auth", "api": "security.zap_api_auth"}
 LOGIN_TRIES = 3  # a scanner's login is tried this many times before next: login
 LOGIN_RETRY_SEC = int(os.environ.get("FACTORY_LOGIN_RETRY_SEC", "5") or 5)  # and so long apart
-LOGIN_REFUSED_PCT = 80  # a scan that many of whose answers were 4xx did not get past the login (or a limit)
+LOGIN_REFUSED_PCT = 80  # a scan that many of whose answers refused it (401, 403, 429) did not get past the login or a
+# limit (security.zap_refused_pct)
 
 
 class ScannerLogin(FxError):
@@ -17815,7 +17816,11 @@ def cmd_login(ctx, a):
     out(res)
 
 
-def zap_refused_pct(data):
+LOGIN_REFUSED_CODES = (401, 403, 429)  # what a scan that lost its login, or ran into a limit, is answered
+ZAP_CLIENT_ERROR_RULE = "100000"  # "A Client Error response code was returned": each instance's evidence is its code
+
+
+def zap_4xx_pct(data):
     """The share of 4xx answers a ZAP report's insights give, or None."""
     for i in (data.get("insights") or []) if isinstance(data, dict) else []:
         if i.get("key") == "insight.code.4xx":
@@ -17824,6 +17829,38 @@ def zap_refused_pct(data):
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def zap_client_errors(data):
+    """{status: how many} of the 4xx answers ZAP kept a sample of (its Client Error alert), {} when it kept none."""
+    got = {}
+    for site in (data.get("site") or []) if isinstance(data, dict) else []:
+        for al in site.get("alerts") or []:
+            if str(al.get("pluginid")) != ZAP_CLIENT_ERROR_RULE:
+                continue
+            for i in al.get("instances") or []:
+                m = re.search(r"\b(4\d\d)\b", str(i.get("evidence") or ""))
+                if m:
+                    got[int(m.group(1))] = got.get(int(m.group(1)), 0) + 1
+    return got
+
+
+def zap_refused_pct(data):
+    """The share of a scan's answers that refused it (401, 403, 429), or None when the report cannot tell: ZAP's share of
+    4xx answers, times the part of its 4xx samples that are refusals. A 404 or a 422 is the scan's own guessing at ids
+    and bodies (an active scan fuzzes every one), not a lost login."""
+    pct, codes = zap_4xx_pct(data), zap_client_errors(data)
+    if pct is None or not codes:
+        return None
+    return int(round(pct * sum(codes.get(c, 0) for c in LOGIN_REFUSED_CODES) / float(sum(codes.values()))))
+
+
+def zap_refused_limit(ctx):
+    """security.zap_refused_pct: the share of refused answers (401, 403, 429) that stops a scan for its login."""
+    try:
+        return max(1, min(100, int(ctx.c("security.zap_refused_pct", LOGIN_REFUSED_PCT) or LOGIN_REFUSED_PCT)))
+    except (TypeError, ValueError):
+        return LOGIN_REFUSED_PCT
 
 
 ZAP_LIBRARY_RULE = "zap-10003"
@@ -17946,11 +17983,23 @@ def scan_zap(ctx, job, url, rdir, notes=None, image=None, only=None, on_pass=Non
             if bad:
                 raise ScannerLogin(kind, bad + " after the scan: ZAP lost the login during it (a logout or "
                                               "password form, or the session ended)" + login_where_words(ctx, kind))
-        pct = zap_refused_pct(data)
-        if pct is not None and pct >= LOGIN_REFUSED_PCT:
-            raise ScannerLogin(kind, "%d%% of the %s scan's answers were 4xx, so it did not get past the login "
-                                     "(401/403) or a limit (429: the limits must be raised on the test stack)%s"
-                               % (pct, "API" if kind == "api" else "web", login_where_words(ctx, kind)))
+        pct, all4, codes = zap_refused_pct(data), zap_4xx_pct(data), zap_client_errors(data)
+        limit = zap_refused_limit(ctx)
+        what = "API" if kind == "api" else "web"
+        proved = bool(conf and conf.get("_kind") == kind and conf.get("check"))  # its check page answered 2xx above
+        if pct is None and not proved:
+            pct = all4  # no sample of the codes and no check page: every 4xx counts, as nothing else can tell
+        if pct is not None and pct >= limit:
+            said = ", ".join("%d: %d" % (c, codes[c]) for c in sorted(codes)) if codes else ""
+            raise ScannerLogin(kind, "%d%% of the %s scan's answers refused it (401/403: it did not get past the login; "
+                                     "429: a limit, which must be raised on the test stack)%s%s"
+                               % (pct, what, " (4xx sampled: %s)" % said if said else "", login_where_words(ctx, kind)))
+        if all4 is not None and all4 >= limit:
+            top = ", ".join("%d" % c for c, _ in sorted(codes.items(), key=lambda x: -x[1])[:2]) or "4xx"
+            notes.append("zap: %d%% of the %s scan's answers were %s, the scan's own guesses at ids and bodies, not a "
+                         "refused login: %s, so it reached less of the app than it could"
+                         % (all4, what, top, "its OpenAPI examples may name ids or values the test data does not have"
+                            if kind == "api" else "many of the pages it tried do not exist"))
         return data, None
 
     def passed(name, data, target):
