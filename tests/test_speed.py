@@ -889,6 +889,158 @@ class CandidatesChecksTest(BoxCase):
 
 
 # --------------------------------------------------------------------------
+# 3c. a run the machine was too small for says nothing about the code (#6)
+
+def pw_failure(n, error):
+    return ("  %d) [chromium] › e2e/page-%d.spec.ts:12:5 › page %d shows its list ──────────\n\n    %s\n\n"
+            "      at e2e/page-%d.spec.ts:14:20\n\n" % (n, n, n, error, n))
+
+
+CRASHED = "".join(pw_failure(n, "Error: browserContext.newPage: Target crashed") for n in (1, 2, 3))
+CRASHABLE = '''echo ran >> "$FX_TEST_OUT/checks.ran"
+if [ -e "$FX_TEST_OUT/report" ]; then cat "$FX_TEST_OUT/report"; echo "  3 failed"; echo "  890 passed (24.1m)"; exit 1; fi
+exit 0
+'''
+OOM_LOG = ("2026-11-24T10:01:02+0000 fx-sandbox kernel: Out of memory: Killed process 4242 (chrome-headless) "
+           "total-vm:1234kB\n"
+           "2026-11-24T10:01:09+0000 fx-sandbox kernel: Memory cgroup out of memory: Killed process 77 (postgres)\n"
+           "2026-11-24T10:02:00+0000 fx-sandbox kernel: Out of memory: Killed process 4250 (chrome-headless)\n")
+
+
+class MachineShortTest(ChecksCase):
+    script = CRASHABLE
+
+    def report(self, text):
+        write(os.path.join(self.f.out, "report"), text)
+
+    def in_a_vm(self, kills, mem_gib=6):
+        """The checks as they run in a job's box in a VM of mem_gib on a machine of 24 GiB, whose kernel killed kills."""
+        real = fx.checks_execute
+
+        def in_box(*a, **k):
+            r = real(*a, **k)
+            if not r["ok"]:
+                r.update(vm_oom=kills, in_box=True)
+            return r
+        return [mock.patch.object(fx, "checks_execute", in_box),
+                mock.patch.object(fx, "sandbox_vm_row", return_value={"name": "fx-sandbox", "memory": mem_gib * 2 ** 30,
+                                                                      "cpus": 4}),
+                mock.patch.object(fx, "meter_host", return_value={"total_mb": 24 * 1024.0, "avail_mb": 20000.0,
+                                                                  "pressure": 0, "pressure_source": "-"})]
+
+    def test_only_crashed_browsers_put_the_round_aside(self):
+        self.report(CRASHED)
+        write(os.path.join(self.f.jd, "build.md"), "STATUS: READY\n")
+        code, res = self.gate()
+        self.assertEqual((code, res.get("void"), res.get("next")), (3, True, "stop"), res)
+        self.assertIn("every test that failed (3) is a browser that crashed", res["error"])
+        self.assertEqual(self.times_run(), 2)  # the flaky retry still ran first, and crashed as well
+        job = self.f.job()
+        self.assertEqual((job["round"], fx.rounds_left(job)), (0, 3))
+        self.assertEqual([x["commit"] for x in job["machine_short"]], [self.head()])
+        self.assertEqual(load_json(os.path.join(res["kept"], "machine-short.json"))["crashed"], 3)
+        code, res = self.gate()  # the same commit on the same machine: this time it counts
+        self.assertEqual((code, res["gate"], res["rounds_left"]), (0, "FAIL", 2), res)
+        self.assertIn("failed again for want of memory", self.checks_md())
+
+    def test_a_test_that_failed_otherwise_is_a_failure(self):
+        self.report(CRASHED + pw_failure(4, "Error: expect(received).toBe(expected)"))
+        code, res = self.gate()
+        self.assertEqual((code, res["gate"], res["rounds_left"]), (0, "FAIL", 2), res)
+        self.assertNotIn("machine_short", self.f.job())
+
+    def test_the_vm_out_of_memory_is_not_run_again_and_names_its_size(self):
+        self.report(pw_failure(1, "Error: page.goto: net::ERR_CONNECTION_REFUSED"))  # not a crash: the app was killed
+        kills = [{"at": "2026-11-24T10:01:02", "process": "chrome-headless"},
+                 {"at": "2026-11-24T10:02:00", "process": "chrome-headless"}]
+        with contextlib.ExitStack() as st:
+            for p in self.in_a_vm(kills):
+                st.enter_context(p)
+            code, res = self.gate()
+            self.assertEqual((code, res.get("void"), res.get("next")), (3, True, "stop"), res)
+            self.assertEqual(self.times_run(), 1)  # no second run in a VM short of memory
+            self.assertIn("its kernel killed chrome-headless (2 times)", res["error"])
+            self.assertIn("The sandbox VM has 6 GiB of memory (this machine 24.0 GiB)", res["error"])
+            self.assertIn("sandbox install --memory 12", res["error"])
+            self.assertEqual(self.f.job()["machine_short"][0]["memory_gib"], 6)
+        with contextlib.ExitStack() as st:  # the person gave it more: the same commit is put aside once more
+            for p in self.in_a_vm(kills, mem_gib=12):
+                st.enter_context(p)
+            code, res = self.gate()
+            self.assertEqual((code, res.get("void")), (3, True), res)
+            self.assertIn("--memory 16", res["error"])
+
+    def test_the_kernel_log_reads_only_the_vms_own_shortage(self):
+        with mock.patch.object(fx, "vm_run", return_value=subprocess.CompletedProcess([], 0, OOM_LOG.encode(), b"")):
+            kills = fx.vm_oom_kills(time.time())
+        self.assertEqual([k["process"] for k in kills], ["chrome-headless", "chrome-headless"])  # not the cgroup's
+        with mock.patch.object(fx, "vm_run", return_value=subprocess.CompletedProcess([], 1, b"", b"no")):
+            self.assertIsNone(fx.vm_oom_kills(time.time()))
+
+
+class SandboxSizeTest(FxTestCase):
+    def machine(self, gib, cpus=8):
+        return [mock.patch.object(fx, "meter_host", return_value={"total_mb": gib * 1024.0}),
+                mock.patch.object(fx.os, "cpu_count", return_value=cpus)]
+
+    def size(self, gib, ncpu=8, **kw):
+        with contextlib.ExitStack() as st:
+            for p in self.machine(gib, ncpu):
+                st.enter_context(p)
+            return fx.sandbox_size(**kw)
+
+    def test_a_share_of_the_machine_never_less_than_before(self):
+        self.assertEqual((self.size(24)["memory_gib"], self.size(24)["cpus"]), (12, 4))
+        self.assertEqual(self.size(64, 16)["memory_gib"], 32)
+        self.assertEqual((self.size(8)["memory_gib"], self.size(8, 2)["cpus"]), (6, 2))
+        self.assertEqual(self.size(0)["memory_gib"], 6)  # a machine that does not say
+
+    def test_the_persons_size_is_kept(self):
+        self.assertEqual(self.size(24, memory=16)["by"], "you")
+        got = self.size(24)
+        self.assertEqual((got["memory_gib"], got["cpus"], got["by"]), (16, 4, "you"))  # cpus: still the share
+        self.assertEqual(self.size(24, cpus=6)["memory_gib"], 16)
+        with self.assertRaises(fx.FxError):
+            self.size(24, memory=23)
+        with self.assertRaises(fx.FxError):
+            self.size(24, cpus=9)
+
+    def test_the_template_gets_the_size(self):
+        text = slurp(fx.sandbox_template({"memory_gib": 12, "cpus": 6}))
+        self.assertIn('\nmemory: "12GiB"\n', text)
+        self.assertIn("\ncpus: 6\n", text)
+        self.assertNotIn("6GiB", text)
+
+    def resize(self, has_gib, want, asked=False, restart=False, boxes=()):
+        calls = []
+
+        def run(argv, *a, **k):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        with mock.patch.object(fx, "sandbox_vm_row", return_value={"status": "Running", "memory": has_gib * 2 ** 30,
+                                                                   "cpus": 4}), \
+                mock.patch.object(fx, "sandbox_running_boxes", return_value=list(boxes)), \
+                mock.patch.object(fx.subprocess, "run", run):
+            return fx.sandbox_resize(dict(want, by="you"), asked, restart), calls
+
+    def test_install_grows_a_small_vm_and_never_shrinks_one_unasked(self):
+        res, calls = self.resize(6, {"memory_gib": 12, "cpus": 4})
+        self.assertEqual(res["resized"]["to"], {"memory_gib": 12, "cpus": 4})
+        self.assertEqual([c[:2] for c in calls], [["limactl", "stop"], ["limactl", "edit"]])
+        self.assertIn("--memory", calls[1])
+        self.assertEqual(self.resize(16, {"memory_gib": 12, "cpus": 4}), (None, []))
+        res, calls = self.resize(16, {"memory_gib": 12, "cpus": 4}, asked=True)
+        self.assertEqual(res["resized"]["to"]["memory_gib"], 12)
+
+    def test_running_boxes_wait_for_restart(self):
+        res, calls = self.resize(6, {"memory_gib": 12, "cpus": 4}, boxes=["fxbox-a-T-1"])
+        self.assertEqual((calls, res["boxes_running"]), ([], ["fxbox-a-T-1"]))
+        self.assertIn("--restart", res["size_note"])
+        res, calls = self.resize(6, {"memory_gib": 12, "cpus": 4}, restart=True, boxes=["fxbox-a-T-1"])
+        self.assertEqual(res["boxes_stopped"], ["fxbox-a-T-1"])
+
+
+# --------------------------------------------------------------------------
 # 4. a package tests its own part; its heavy commands take their own place, and the package is counted at rest
 
 class SplitCase(BoxCase):

@@ -419,7 +419,9 @@ class Factory:
         self.save_job()
 
     def env(self, **extra):
-        e = dict(os.environ)
+        # This machine's own Jira login stays out: with its JIRA_EMAIL beside the fake token below, fx called the
+        # tests' example Jira site for real (sending that email), and the tests that expect no Jira failed.
+        e = {k: v for k, v in os.environ.items() if not k.startswith(("JIRA_", "ATLASSIAN_"))}
         e.update(SECRET_ENV)
         e.update(PATH=self.bin + os.pathsep + "/usr/bin:/bin", STUB_LOG=self.log, FX_TEST_OUT=self.out,
                  GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com", GIT_COMMITTER_NAME="t",
@@ -2009,7 +2011,7 @@ class ScriptTest(unittest.TestCase):
             self.assertEqual(json.load(f)["version"], v)
         with open(os.path.join(ROOT, "plugins", "auto-factory", "skills", "code", "shared", "VERSION")) as f:
             self.assertEqual(f.read().strip(), v)  # the two skills ship together
-        self.assertEqual(v, "3.11.2")
+        self.assertEqual(v, "3.12.0")
 
     def test_three_commands(self):
         """/auto-factory:code and /auto-factory:review (no auto test here): a plugin skill's command is

@@ -116,13 +116,17 @@ them to create a separate repository for the factory (for example
     the factory repository for another job; another program answered on the job's
     port; or part of the checks was stopped from outside (a container of this job that
     another tool stopped, a process that was killed: what fx saw is in the
-    `outside-stop.json` it names in `kept`). The round does not count and no builder is
+    `outside-stop.json` it names in `kept`); or the machine was too small for it (the
+    sandbox VM killed processes for memory, or every failed test is a browser that
+    crashed: `machine-short.json`; tell the user the `fx sandbox install --memory`
+    command fx names). The round does not count and no builder is
     needed: never spawn one for it. Tell the user what fx said. `next: gate` → run
     `fx gate <job>` again once; `next: pr` → nothing was pushed, run the same `fx pr`
     again once; `next: stop` → stop and wait for the user; `next: login` → **Scanner
     login** below, then the gate again. A stop from outside is put
-    aside once for a commit: when it happens again on the same commit the result counts,
-    and fx says so in its `Problems`.
+    aside once for a commit (a machine too small: once for a commit and a size of the VM):
+    when it happens again on the same commit the result counts, and fx says so in its
+    `Problems`.
   - `next: limits` (exit code 3, from `fx new` or the gate): a limit of the app cannot be
     set through the environment, or the limits were never worked out. No job starts and
     no builder is sent: **/auto-factory:code limits**. Never work around it.

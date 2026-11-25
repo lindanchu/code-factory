@@ -43,7 +43,8 @@ project's host (GitHub or GitLab) and whether UI checks are on.
 7. **The sandbox** for colleagues' merge requests and for jobs (/auto-factory:review runs nothing
    of a merge request without it, and a job stops before its setup): `python3 ${CLAUDE_SKILL_DIR}/fx
    sandbox status`. Not `ok` → tell the user in plain words: a Linux VM of its own (`fx-sandbox`,
-   Lima; about 6 GB of memory while it runs, more with several jobs at once, 60 GB of disk, the
+   Lima; half of this machine's memory and CPUs while it runs (at least 6 GB: `size_wanted` in the
+   output; `fx sandbox install --memory <GiB>` sets another), 60 GB of disk, the
    first set-up takes 10 to 20 minutes) where each review and each job runs in a box that sees none
    of this machine's files or keys and reaches only the package registries, and only while it
    installs. Ask
@@ -61,6 +62,8 @@ project's host (GitHub or GitLab) and whether UI checks are on.
    - The new `kvm` group reaches only terminals opened after it: `fx sandbox install` says so when
      this one cannot use `/dev/kvm`. Have the user run `fx sandbox install` in a new terminal, or
      on WSL restart it (`wsl --shutdown`, which also ends this session) and run it yourself.
+   - `ok` with a `size_note`: the VM is smaller than its share; tell the user, and with their yes run
+     `fx sandbox install` (it restarts the VM; `--restart` when it says jobs' boxes run).
    - After the machine (or WSL) restarts, the VM is stopped: a review or a job starts it again when
      it needs it (about a minute), from a terminal that can use `/dev/kvm`; one that cannot says so
      and stops before anything runs.

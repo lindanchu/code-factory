@@ -7,6 +7,7 @@ images:
   arch: "x86_64"
 - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
   arch: "aarch64"
+# cpus and memory: fx sandbox install writes a share of this machine here (or what --memory/--cpus said).
 cpus: 4
 memory: "6GiB"
 disk: "60GiB"

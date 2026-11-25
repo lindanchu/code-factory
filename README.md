@@ -634,6 +634,11 @@ enforces itself, not one a setting has to remember:
   install`). It mounts nothing of this machine and has its own Docker, never this machine's. It is set
   up once per machine; after the machine (or WSL) restarts, the next review or job starts it again (a job
   keeps its box and what it installed).
+  - Its size: half of this machine's memory and CPUs, never less than 6 GiB and 4 CPUs, and always 4 GiB
+    left to the machine. `fx sandbox install --memory <GiB> --cpus <n>` (or `reset`) sets your own,
+    kept on this machine for every later install and reset. `fx sandbox install` gives a VM smaller than
+    that its size (it restarts the VM: with jobs' boxes running, only with `--restart`; they start again
+    at their next command) and never shrinks one unasked. `fx sandbox status` shows both sizes.
   - macOS: `brew install lima`.
   - Linux and Windows (in WSL2, which has the nested virtualization it needs on Windows 11): QEMU
     (`sudo apt-get install -y qemu-system-x86 qemu-utils`), Lima from its
@@ -1226,8 +1231,23 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
 - Run `/auto-factory:code init` once more: it adds the rules that send the agents' project commands
   through `fx run --job`.
 - The VM's memory: one box per job at once (and per candidate or package). Its 6 GB held three small web
-  jobs at once with room to spare (above); for heavy builds several at a time, raise `memory` in
-  `fx-sandbox.yaml` before `fx sandbox install`, or with `limactl edit fx-sandbox`.
+  jobs at once with room to spare (above); since 3.12 it takes a share of the machine, and
+  `fx sandbox install --memory <GiB>` sets it (below).
+
+### Upgrading to 3.12.0: a sandbox VM sized to the machine, rounds the machine was too small for
+
+- The sandbox VM was 6 GiB and 4 CPUs on every machine. A web job's browser tests (several Playwright workers,
+  full-page screenshots) beside its app, database and cache ran it out of memory: Chromium was killed and as many
+  tests as workers failed with `Target crashed`, on other pages each run. It now gets half of the machine's memory
+  and CPUs (at least 6 GiB and 4), or what `fx sandbox install|reset --memory <GiB> --cpus <n>` says, kept for every
+  later install and reset. Run `fx sandbox install` once: a VM smaller than its share is given it (with jobs'
+  boxes running, `fx sandbox install --restart`).
+- A gate whose checks script or e2e failed while the VM's kernel killed processes for memory, or whose failed
+  tests are all browsers that crashed, says nothing about the code: the round does not count, no builder is sent
+  (`void: true`, `next: stop`), and fx names the VM's memory and the `fx sandbox install --memory` that gives it
+  more. A run the VM killed processes in is not run a second time as flaky. Once for a commit and a size of the
+  VM: failing so again on the same ones counts. What was seen is kept in `machine-short.json` in the round's
+  folder; `fx checks` says it too (`machine_short`). A container over its own memory limit is not counted.
 
 ### Upgrading to 3.11.2: a job checks its own limits
 

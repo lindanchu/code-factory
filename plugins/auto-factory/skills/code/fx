@@ -4694,6 +4694,9 @@ def gate_round_repos(ctx, job, a, place):
                 mine.append("part of the checks was stopped from outside again (%s). A round on this commit was already "
                             "put aside for that, so this one counts: if the code is not at fault, find out what stops "
                             "this job's containers (round-%d/outside-stop.json)" % (cr["outside"]["why"], rn))
+            short = gate_machine_short(ctx, job, rn, rdir, place, cr, heads[n], repo=n)
+            if short:
+                mine.append(short)
         info["state"] = "fail" if mine else "not changed" if n in idle else "pass"
         problems += [label(n) + m for m in mine]
         if mine:
@@ -4774,6 +4777,7 @@ def gate_round_repos(ctx, job, a, place):
         env["BASE_URL"] = urls[n].rstrip("/")
         log = "e2e-%s.log" % n
         timeout = int(rc_.c("e2e_timeout_sec", 1800) or 1800)
+        t0, before = time.time(), len(problems)
         try:
             progress("%s: e2e" % n)
             p = proj_run(rc_, views[n], app_fill(rc_.c("e2e"), views[n], db), views[n]["worktree"], env, timeout)
@@ -4784,6 +4788,10 @@ def gate_round_repos(ctx, job, a, place):
             problems.append("%se2e tests timed out after %ss" % (label(n), timeout))
         per[n]["e2e_log"] = log
         write_atomic(os.path.join(rdir, log), per[n]["e2e_out"])
+        if len(problems) > before:
+            short = e2e_machine_short(rc_, job, views[n], rn, rdir, place, per[n]["e2e_out"], t0, heads[n], repo=n)
+            if short:
+                problems.append(label(n) + short)
     if not problems and ui_wanted:
         if ui_name not in urls and not mobile_conf(repo_ctx(ctx, ui_name)):
             job["skipped_checks"].append("UI checks skipped: no app.up command to run the app of %s "
@@ -5175,6 +5183,9 @@ def gate_round_one(ctx, job, a, place):
             problems.append("part of the checks was stopped from outside again (%s). A round on this commit was already put "
                             "aside for that, so this one counts: if the code is not at fault, find out what stops this "
                             "job's containers (round-%d/outside-stop.json)" % (cr["outside"]["why"], rn))
+        short = gate_machine_short(ctx, job, rn, rdir, place, cr, head)
+        if short:
+            problems.append(short)
 
     problems += limits_gate(ctx, job, rn, rdir, place)
     if not problems and logic_ready(ctx):
@@ -5227,6 +5238,7 @@ def gate_round_one(ctx, job, a, place):
     if not problems and app_url_ and ctx.c("e2e"):
         env, db = app_env(ctx, job)
         env["BASE_URL"] = app_url_.rstrip("/")
+        t0, before = time.time(), len(problems)
         try:
             progress("e2e")
             p = proj_run(ctx, job, app_fill(ctx.c("e2e"), job, db), wt, env, int(ctx.c("e2e_timeout_sec", 1800)))
@@ -5236,6 +5248,10 @@ def gate_round_one(ctx, job, a, place):
         except subprocess.TimeoutExpired:
             problems.append("e2e tests timed out after %ss" % ctx.c("e2e_timeout_sec", 1800))
         write_atomic(os.path.join(rdir, "e2e.log"), e2e_out)
+        if len(problems) > before:
+            short = e2e_machine_short(ctx, job, job, rn, rdir, place, e2e_out, t0, head)
+            if short:
+                problems.append(short)
     if not problems and ui_wanted:
         if not ctx.c("app.up"):
             job["skipped_checks"].append("UI checks skipped: no app.up command to run the app "
@@ -6268,7 +6284,7 @@ def checks_execute(ctx, job, look, log_path, by, who=None, cand=None, rn=None, p
     who = who or job
     wt, limit = who["worktree"], int(ctx.c("gate_timeout_sec", 1800))
     watch = StopsWatch(place, [wt, ctx.job_dir(job_real_id(job))])
-    t0, started, rc, timed_out = time.time(), now(), None, False
+    t0, started, rc, timed_out, box = time.time(), now(), None, False, None
     watch.start(limit)
     try:
         box = job_box_of(ctx, who)
@@ -6315,11 +6331,14 @@ def checks_execute(ctx, job, look, log_path, by, who=None, cand=None, rn=None, p
     outside = None if ok else outside_stop(watch, rc, timed_out)
     if outside:
         row["outside_stop"] = outside["why"][:400]
+    oom = vm_oom_kills(t0 - 5) if box and not ok else None
+    if oom:
+        row["vm_oom"] = oom
     checks_keep(ctx, job, row)
     script = os.path.relpath(checks_script(ctx, job), settings_root(ctx))
     problem = None if ok else "%s timed out after %ss" % (script, limit) if timed_out else "%s exited with %d" % (script, rc)
     return dict(row, ok=ok, reused=False, output=output, timed_out=timed_out, outside=outside, problem=problem,
-                why_run=look.get("why"))
+                why_run=look.get("why"), in_box=bool(box))
 
 
 def checks_once(ctx, job, log_path, by, who=None, cand=None, rn=None, place=None):
@@ -6385,9 +6404,9 @@ def checks_flaky_again(ctx, job, look, log_path, by, who, cand, rn, place, res):
     gate's checks.md and the pull request); failing again, the failure stands. Not for a run that hit the gate's time
     limit or that something outside stopped (outside_stop handles that), nor on uncommitted changes.
     tests.retry_flaky: false turns it off."""
-    if res.get("ok") or res.get("timed_out") or res.get("outside") or look.get("dirty") \
+    if res.get("ok") or res.get("timed_out") or res.get("outside") or look.get("dirty") or res.get("vm_oom") \
             or ctx.c("tests.retry_flaky", True) is False:
-        return res
+        return res  # vm_oom: the VM ran out of memory, and would again in a run as long (machine_short)
     signs = flaky_signs(res.get("output"))
     if not signs:
         return res
@@ -6406,6 +6425,109 @@ def checks_flaky_again(ctx, job, look, log_path, by, who, cand, rn, place, res):
     return second
 
 
+# --- a run the machine was too small for
+#
+# A web job whose code changed no page failed two rounds and a dry run on its browser tests alone: about 890 passed
+# and exactly 3 failed each time, as many as Playwright's workers, with "Target crashed", on pages that changed every
+# run. The sandbox VM's kernel had killed Chromium for want of memory. fx named it flaky, ran the checks again (50
+# minutes a round), still failed the round and sent a builder. Such a run now says nothing about the code: the round is
+# put aside (gate_void) with the VM's memory named as the cause, once for a commit and a size of the VM.
+
+BROWSER_CRASH_RE = re.compile(r"(?i)page crashed|target crashed|browser has been closed|context or browser has been "
+                              r"closed")
+PW_FAILURE_RE = re.compile(r"(?m)^[ \t]+\d+\) [^\n]* › [^\n]*$")  # a failed test's heading in Playwright's report
+
+
+def browser_crashes_only(output):
+    """How many tests failed in Playwright's report when every one of them is a browser that crashed or closed
+    (BROWSER_CRASH_RE); 0 when none failed there, or one failed in another way."""
+    output = output or ""
+    heads = list(PW_FAILURE_RE.finditer(output))
+    for i, m in enumerate(heads):
+        if not BROWSER_CRASH_RE.search(output[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(output)]):
+            return 0
+    return len(heads)
+
+
+def machine_short(cr):
+    """Why a failed run of the checks says nothing about the code because the machine was short of memory, or None:
+    the sandbox VM's kernel killed processes for memory while it ran (vm_oom), or every test that failed is a browser
+    that crashed. {why, oom, crashed, in_box}."""
+    if cr.get("ok"):
+        return None
+    oom, crashed = cr.get("vm_oom") or [], browser_crashes_only(cr.get("output"))
+    if not oom and not crashed:
+        return None
+    said = []
+    if oom:
+        names = {}
+        for k in oom:
+            names[k["process"]] = names.get(k["process"], 0) + 1
+        said.append("the sandbox VM ran out of memory while the checks ran: its kernel killed %s" % ", ".join(
+            "%s%s" % (n, " (%d times)" % c if c > 1 else "") for n, c in names.items()))
+    if crashed:
+        said.append("every test that failed (%d) is a browser that crashed, which is how a browser short of memory "
+                    "ends" % crashed)
+    return {"why": "; ".join(said), "oom": oom, "crashed": crashed, "in_box": bool(cr.get("in_box"))}
+
+
+def machine_size_words(short):
+    """The machine's memory as the cause, with what to do about it; and the size the VM has (None on this machine)."""
+    if not short["in_box"]:
+        return ("this machine was short of memory: fewer workers in the browser tests, or fewer steps at once "
+                "(machine.*)"), None
+    try:
+        has = sandbox_vm_size(sandbox_vm_row())
+    except (OSError, subprocess.TimeoutExpired):
+        has = None
+    mem = (has or {}).get("memory_gib")
+    want = sandbox_size()
+    more = want["memory_gib"] if mem is None or want["memory_gib"] > mem else int(mem + 4)
+    if want["machine_gib"]:
+        more = min(more, max(int(want["machine_gib"] - 2), 2))
+    return ("the sandbox VM has %s GiB of memory%s: give it more with %s sandbox install --memory %s (it restarts the VM; "
+            "add --restart while jobs' boxes run), or run the browser tests with fewer workers, then run the gate again"
+            % (mem if mem is not None else "?", " (this machine %s GiB)" % want["machine_gib"] if want["machine_gib"]
+               else "", FX_CMD, more)), mem
+
+
+def gate_machine_short(ctx, job, rn, rdir, place, cr, head, repo=None, what=None):
+    """The gate's answer to a run of the checks the machine was too small for (machine_short): the round is put aside
+    (gate_void, next: stop: the person gives the VM more memory) once for a commit and a size of the VM; failing again
+    so on the same commit and size, it counts, and the problem it returns says why. None when the machine was not
+    short."""
+    short = machine_short(cr)
+    if not short:
+        return None
+    advice, mem = machine_size_words(short)
+    first = not any(isinstance(x, dict) and x.get("commit") == head and x.get("memory_gib") == mem
+                    for x in job.get("machine_short") or [])
+    write_atomic(os.path.join(rdir, "machine-short.json"), json.dumps(
+        dict(short, repo=repo, commit=head, round=rn, run=cr.get("id"), memory_gib=mem, the_round_counts=not first),
+        indent=1, ensure_ascii=False) + "\n")
+    of = what or ("the checks of %s" % repo if repo else "the checks")
+    if first:
+        seen = {"commit": head, "memory_gib": mem, "round": rn, "at": now(), "why": short["why"][:300]}
+        gate_void(ctx, job["id"], rn, rdir, place,
+                  "%s failed, but not by anything the code did: %s. %s. What was seen is kept in machine-short.json "
+                  "in the round's folder" % (of, short["why"], advice[:1].upper() + advice[1:]),
+                  also=lambda j: j.setdefault("machine_short", []).append(seen), next_step="stop")
+    return ("%s failed again for want of memory (%s), on a commit and a VM of a size a round was already put aside for, "
+            "so this one counts: if the code does not use more memory than before, %s (round-%d/machine-short.json)"
+            % (of, short["why"], advice, rn))
+
+
+def e2e_machine_short(ctx, job, view, rn, rdir, place, output, t0, head, repo=None):
+    """gate_machine_short for the gate's e2e command (the e2e setting), which failed after starting at t0."""
+    try:
+        box = job_box_of(ctx, view, start=False, setup=False)
+    except FxError:
+        box = None
+    run_ = {"ok": False, "output": output, "in_box": bool(box), "vm_oom": vm_oom_kills(t0 - 5) if box else None}
+    return gate_machine_short(ctx, job, rn, rdir, place, run_, head, repo=repo,
+                              what="the e2e tests of %s" % repo if repo else "the e2e tests")
+
+
 def checks_answer(res):
     """What a step says about its run of the checks script in its JSON answer."""
     row = {"reused": bool(res.get("reused")), "run": res.get("id"), "result": res.get("result"), "commit": res.get("commit"),
@@ -6420,6 +6542,9 @@ def checks_answer(res):
         row["flaky"] = res["flaky"]
         if res.get("ok"):
             row["note"] = res.get("note")
+    short = None if res.get("reused") else machine_short(res)
+    if short:
+        row["machine_short"] = "%s: %s" % (short["why"], machine_size_words(short)[0])
     return row
 
 
@@ -23045,10 +23170,125 @@ class NoSandbox(FxError):
     """The sandbox is not there or not as it must be (not installed, stopped, mounting this machine's folders)."""
 
 
-def sandbox_template():
-    """The VM's Lima template with the Playwright and axe-core versions fx pins, in a temporary file."""
+# The VM's size. It was 6 GiB and 4 CPUs on every machine, and a web job's browser tests (several Playwright workers,
+# full-page screenshots) beside its app, database and cache ran it out of memory on a machine with 24 GB: Chromium was
+# killed, three tests crashed in every run, and the job lost two rounds to it. So it takes a share of the machine,
+# never less than it had, unless the person sets its size (fx sandbox install|reset --memory/--cpus), which is kept on
+# this machine for every later install and reset.
+SANDBOX_MEMORY_GIB = 6   # the least the VM gets, and all it gets on a machine that does not tell its memory
+SANDBOX_CPUS = 4
+SANDBOX_SHARE = 0.5      # of the machine's memory and CPUs
+SANDBOX_HOST_KEEP_GIB = 4  # what the VM's share always leaves to the machine
+
+
+def sandbox_size_path():
+    return os.path.join(state_dir(), "sandbox-size.json")
+
+
+def sandbox_size(memory=None, cpus=None):
+    """The size the sandbox VM is to have: {memory_gib, cpus, by, machine_gib, machine_cpus}. memory and cpus: the
+    person's own (fx sandbox install|reset --memory/--cpus), saved for every later install and reset; without them the
+    size saved before, else a share of this machine."""
+    try:
+        saved = json.loads(read(sandbox_size_path(), "") or "{}")
+    except ValueError:
+        saved = {}
+    saved = saved if isinstance(saved, dict) else {}
+    host_gib, ncpu = meter_host()["total_mb"] / 1024, os.cpu_count() or SANDBOX_CPUS
+    if memory is not None:
+        if memory < 2 or (host_gib > 0 and memory > host_gib - 2):
+            raise FxError("--memory %s: between 2 and %s GiB (this machine has %.1f GiB, and keeps 2 for itself)"
+                          % (memory, max(2, int(host_gib - 2)), host_gib) if host_gib > 0 else
+                          "--memory %s: at least 2 GiB" % memory, code=3)
+    if cpus is not None and not 1 <= cpus <= ncpu:
+        raise FxError("--cpus %s: between 1 and %d, the CPUs of this machine" % (cpus, ncpu), code=3)
+    if memory is not None or cpus is not None:
+        saved = dict(saved, **{k: v for k, v in (("memory_gib", memory), ("cpus", cpus)) if v is not None})
+        os.makedirs(state_dir(), exist_ok=True)
+        write_atomic(sandbox_size_path(), json.dumps(saved) + "\n")
+    share = SANDBOX_MEMORY_GIB if host_gib <= 0 else max(
+        SANDBOX_MEMORY_GIB, min(int(host_gib * SANDBOX_SHARE), int(host_gib - SANDBOX_HOST_KEEP_GIB)))
+    mem = saved.get("memory_gib") if isinstance(saved.get("memory_gib"), (int, float)) else share
+    cpu = saved.get("cpus") if isinstance(saved.get("cpus"), int) else max(min(SANDBOX_CPUS, ncpu),
+                                                                          int(ncpu * SANDBOX_SHARE))
+    return {"memory_gib": int(mem) if float(mem).is_integer() else mem, "cpus": cpu,
+            "by": "you" if "memory_gib" in saved or "cpus" in saved else "a share of this machine",
+            "machine_gib": round(host_gib, 1) if host_gib > 0 else None, "machine_cpus": ncpu}
+
+
+def sandbox_vm_size(row):
+    """The size the VM has, from Lima's row of it: {memory_gib, cpus}; None for what the row does not say."""
+    row = row or {}
+    try:
+        mem = round(float(row.get("memory")) / 1073741824, 1)
+    except (TypeError, ValueError):
+        mem = None
+    return {"memory_gib": int(mem) if mem is not None and mem.is_integer() else mem,
+            "cpus": row.get("cpus") if isinstance(row.get("cpus"), int) else None}
+
+
+def sandbox_resize_needed(has, want, asked):
+    """Whether the VM is to get the size wanted: any other size when the person set one now, otherwise only a VM
+    smaller than it (a VM made bigger by hand is never shrunk unasked)."""
+    if not has or has.get("memory_gib") is None:
+        return False
+    if asked:
+        return has["memory_gib"] != want["memory_gib"] or (has.get("cpus") is not None and has["cpus"] != want["cpus"])
+    return has["memory_gib"] < want["memory_gib"] or (has.get("cpus") is not None and has["cpus"] < want["cpus"])
+
+
+def sandbox_running_boxes():
+    """The boxes running in the VM now (each job at work has one), by name."""
+    p = vm_run(["sudo", "docker", "ps", "--filter", "name=^fxbox-", "--format", "{{.Names}}"], timeout=120)
+    return [n for n in vm_text(p).split() if not n.endswith("-proxy")] if p.returncode == 0 else []
+
+
+def sandbox_resize(size, asked, restart):
+    """fx sandbox install on a VM that is there: give it the size wanted (sandbox_size), which needs it stopped
+    (limactl stop, edit, then started again below). The boxes running in it stop with it, and start again at their
+    job's next command, as after a restart of the machine; so with boxes running it is done only with --restart. What
+    to add to the answer, or None when the size is right (or there is no VM yet: it is made with that size)."""
+    try:
+        row = sandbox_vm_row()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    has = sandbox_vm_size(row)
+    if not row or not sandbox_resize_needed(has, size, asked):
+        return None
+    to = {"memory_gib": size["memory_gib"], "cpus": size["cpus"]}
+    boxes = sandbox_running_boxes() if row.get("status") == "Running" else []
+    if boxes and not restart:
+        return {"size_note": "the VM has %s GiB and %s CPUs and is to get %s GiB and %s CPUs (%s), which restarts it. %d "
+                             "box%s run%s in it now (%s): their commands would stop. Run fx sandbox install --restart "
+                             "when that is all right" % (has["memory_gib"], has["cpus"], to["memory_gib"], to["cpus"],
+                                                         size["by"], len(boxes), "es" if len(boxes) > 1 else "",
+                                                         "" if len(boxes) > 1 else "s", ", ".join(boxes[:5])),
+                "boxes_running": boxes}
+    try:
+        if row.get("status") == "Running":
+            subprocess.run(["limactl", "stop", SANDBOX_VM], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=600)
+        p = subprocess.run(["limactl", "edit", "--tty=false", "--memory", str(to["memory_gib"]), "--cpus",
+                            str(to["cpus"]), SANDBOX_VM], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        p = subprocess.CompletedProcess([], 1, str(e).encode(), b"")
+    if p.returncode != 0:
+        tail = [x for x in (p.stdout or b"").decode("utf-8", "replace").splitlines() if x.strip()][-1:]
+        return {"size_note": "Lima could not change the VM's size (exit %d%s): limactl stop %s, limactl edit %s --memory "
+                             "%s --cpus %s, limactl start %s" % (p.returncode, ": " + tail[0][-200:] if tail else "",
+                                                                 SANDBOX_VM, SANDBOX_VM, to["memory_gib"], to["cpus"],
+                                                                 SANDBOX_VM)}
+    return {"resized": {"from": has, "to": to}, "boxes_stopped": boxes}
+
+
+def sandbox_template(size=None):
+    """The VM's Lima template with the Playwright and axe-core versions fx pins, and the size it is to have
+    (sandbox_size), in a temporary file."""
     text = read(os.path.join(SKILL_DIR, "sandbox", "fx-sandbox.yaml"), "") or ""
     text = text.replace("{PLAYWRIGHT}", PLAYWRIGHT_VERSION).replace("{AXE}", AXE_CORE_VERSION)
+    if size:
+        text = re.sub(r"(?m)^cpus: .*$", "cpus: %d" % size["cpus"], text)
+        text = re.sub(r"(?m)^memory: .*$", 'memory: "%sGiB"' % size["memory_gib"], text)
     path = os.path.join(tempfile.mkdtemp(prefix="fx-sandbox-"), "fx-sandbox.yaml")
     write_atomic(path, text)
     return path
@@ -23087,6 +23327,29 @@ def sandbox_state():
     except (OSError, subprocess.TimeoutExpired) as e:
         return False, "the sandbox VM does not answer: %s" % e
     return True, ""
+
+
+# The VM's kernel ran out of memory and killed a process to go on. Only the whole VM's shortage counts: a container
+# that went over its own memory limit (a cgroup's "Memory cgroup out of memory") is the project's setting, not the VM.
+VM_OOM_RE = re.compile(r"(?<!cgroup )Out of memory: Killed process \d+ \(([^)]*)\)", re.I)
+
+
+def vm_oom_kills(since):
+    """What the sandbox VM's kernel killed for want of memory since the epoch second since: [{at, process}], at most
+    20; None when its log cannot be read."""
+    try:
+        p = vm_run(["sudo", "journalctl", "-k", "--no-pager", "-o", "short-iso", "--since", "@%d" % int(since)],
+                   timeout=60, merge=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if p.returncode != 0:
+        return None
+    found = []
+    for line in vm_text(p).splitlines():
+        m = VM_OOM_RE.search(line)
+        if m:
+            found.append({"at": line.split(" ", 1)[0], "process": m.group(1)})
+    return found[:20]
 
 
 def sandbox_vm_row():
@@ -24061,6 +24324,17 @@ def cmd_sandbox(ctx, a):
                         if rec.get("filter") != now_f})
         res = {"ok": ok, "vm": SANDBOX_VM, "why": why or None, "allow": sandbox_allow(ctx),
                "next": "go on" if ok else "fx sandbox install"}
+        try:
+            row = sandbox_vm_row() if shutil.which("limactl") else None
+        except (OSError, subprocess.TimeoutExpired):
+            row = None
+        if row:
+            res["size"], want = sandbox_vm_size(row), sandbox_size()
+            res["size_wanted"] = want
+            if sandbox_resize_needed(res["size"], want, False):
+                res["size_note"] = ("the VM has %s GiB and %s CPUs; fx sandbox install gives it %s GiB and %s CPUs (%s)"
+                                    % (res["size"]["memory_gib"], res["size"]["cpus"], want["memory_gib"],
+                                       want["cpus"], want["by"]))
         if older:
             res["boxes_with_older_allow"] = older
             res["note"] = ("these jobs' boxes were made with an older sandbox.allow: their next install (fx run --job "
@@ -24076,15 +24350,18 @@ def cmd_sandbox(ctx, a):
         if kvm:
             out({"ok": False, "why": kvm, "install": SANDBOX_INSTALL, "next": "fix that, then fx sandbox install again"})
             sys.exit(3)
+        asked = getattr(a, "memory", None) is not None or getattr(a, "cpus", None) is not None
+        size = sandbox_size(getattr(a, "memory", None), getattr(a, "cpus", None))
         if a.action == "reset":
             subprocess.run(["limactl", "delete", "--force", SANDBOX_VM], stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL)
+        resized = sandbox_resize(size, asked, getattr(a, "restart", False)) if a.action == "install" else None
         ok, why = sandbox_state()
         if not ok:
             names = (subprocess.run(["limactl", "list", "--format", "{{.Name}}"], stdout=subprocess.PIPE,
                                     stderr=subprocess.DEVNULL).stdout or b"").decode().split()
             if SANDBOX_VM not in names:
-                p = subprocess.run(["limactl", "create", "--name", SANDBOX_VM, "--tty=false", sandbox_template()])
+                p = subprocess.run(["limactl", "create", "--name", SANDBOX_VM, "--tty=false", sandbox_template(size)])
                 if p.returncode != 0:
                     raise NoSandbox("limactl create failed (exit %d)" % p.returncode, code=3)
             p = subprocess.run(["limactl", "start", "--tty=false", SANDBOX_VM])
@@ -24092,7 +24369,15 @@ def cmd_sandbox(ctx, a):
                 raise NoSandbox("limactl start failed (exit %d): limactl shell %s, then sudo tail "
                                 "/var/log/cloud-init-output.log" % (p.returncode, SANDBOX_VM), code=3)
             ok, why = sandbox_state()
-        out({"ok": ok, "vm": SANDBOX_VM, "why": why or None, "next": "go on" if ok else "fix what fx said"})
+        try:
+            has = sandbox_vm_size(sandbox_vm_row())
+        except (OSError, subprocess.TimeoutExpired):
+            has = None
+        res = {"ok": ok, "vm": SANDBOX_VM, "why": why or None, "size": has, "size_wanted": size,
+               "next": "go on" if ok else "fix what fx said"}
+        if resized:
+            res.update(resized)
+        out(res)
         if not ok:
             sys.exit(3)
         return
@@ -29162,6 +29447,12 @@ def build_parser():
     s.add_argument("--job", help="host: the job that runs on this machine")
     s.add_argument("--reason", help="host: the person's own words, which go in the pull request")
     s.add_argument("--confirm", help="host: the code fx printed when the sandbox was missing")
+    s.add_argument("--memory", type=float, metavar="GIB", help="install, reset: the VM's memory in GiB, kept for every "
+                   "later install and reset (default: half of this machine's, at least 6)")
+    s.add_argument("--cpus", type=int, help="install, reset: the VM's CPUs, kept likewise (default: half of this "
+                   "machine's, at least 4)")
+    s.add_argument("--restart", action="store_true", help="install: restart the VM for its new size even while jobs' "
+                   "boxes run in it")
     s.set_defaults(fn=cmd_sandbox)
     s = sub.add_parser("permissions", help="the permission table: check, try on a job's app, mark confirmed, fix tasks, "
                                            "apply a merged job's additions")
