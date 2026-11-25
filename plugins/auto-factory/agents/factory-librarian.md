@@ -53,6 +53,11 @@ Read-only commands only.
    (`<repo>/style/controller.md`), with the index when a part's row should say
    something else. A file you stage may be over the limit in your prompt: fx
    splits it at its `##` headings when it is applied.
+   A repository's `e2e-map.json` (which e2e test files each area of the code
+   reaches) gets an updated copy when the commits add, move or remove e2e test
+   files or the code of pages: every test file in the entry of the pages it
+   opens, and new shared code (a layout, a middleware) in `shared`. A test file
+   no entry lists runs in every job, so a missing row costs time, never a test.
 4. Decisions the team recorded (`rules.md`, `definition-of-done.md`, business
    rules in `domain.md`) are never removed or rewritten because of code alone.
    If the code seems to contradict one, leave that rule as it is and raise it

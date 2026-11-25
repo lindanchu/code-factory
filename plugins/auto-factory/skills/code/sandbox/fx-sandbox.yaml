@@ -22,6 +22,8 @@ provision:
     #!/bin/bash
     set -eux -o pipefail
     export DEBIAN_FRONTEND=noninteractive
+    # at every start: the VM's disk without flushes (SANDBOX_NO_FLUSH in fx: nothing here is kept that a crash could cost)
+    findmnt -no OPTIONS / | grep -q nobarrier || mount -o remount,barrier=0 / || true
     test -f /etc/fx-sandbox-ready && exit 0
     apt-get update
     apt-get install -y ca-certificates curl jq iptables

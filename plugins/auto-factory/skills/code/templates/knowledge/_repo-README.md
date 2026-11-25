@@ -12,5 +12,6 @@ The knowledge of the repository {repo}. Citations name it: `{repo}:<path>` or `{
 | api.md | API surface: routes or operations, auth, request and response shape | spec, builder, code, security |
 | ui.md | Design system, components, layouts, accessibility, languages | spec, builder, ux, ui |
 | environment.md | Setup, running the app, test accounts, checks, timings, known flaky tests | builder, reviewers |
+| e2e-map.json | Which e2e test files each area of the code reaches, what every page shares, what reaches no page (only when the repository has e2e tests) | fx (a job's e2e tests) |
 <!-- A file named like a shared one (domain.md, conventions.md, security.md...) may sit here too: what is true only of
      {repo}, next to the shared file, never instead of it. Give it a row here; an agent reads it with the shared one. -->

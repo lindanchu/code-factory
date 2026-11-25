@@ -263,7 +263,29 @@ where the spec asks for them.
    `Install` line of your prompt (`fx run --job <job> --install -- npm install
    <name>`): only that command reaches the package registries, and the lockfile
    it changes comes back to your clone. Any other command has no internet.
-6. **Checks.** Run the repo's checks yourself with the `Checks` line of your
+6. **Checks.** While you work, run only the tests that cover your change: the
+   tests you add or change, and the existing tests of the code you change
+   (`testing.md` says how to run one file or one test), through the `Heavy
+   commands` line. The whole checks script takes as long as the whole suite
+   (on some projects half an hour or more): never run it to learn whether one
+   fix worked.
+   - When a test fails, run that test (or its file) alone, with the test
+     runner's filter, until it passes. Do not run the whole script again for
+     it.
+   - e2e tests: run those of the pages you change. A heavy command gets
+     `FACTORY_E2E_TESTS` (a file listing the e2e tests your change reaches, as
+     the gate will run them) unless it gets `FACTORY_E2E_FULL=1`; never the
+     whole suite by hand.
+   - When the whole script fails, read every failure in its log (the stage
+     that stopped, all of it) before you fix anything, so one more run is not
+     needed to find the next one.
+   - Run the whole script once, at the end, on your last commit. If a whole
+     run failed only on tests that now pass alone, and your fix cannot reach
+     anything else, you may leave the whole run to the gate (it runs the
+     script anyway on a commit with no pass): say so in the report, with the
+     tests you ran and their result.
+
+   Run the repo's checks yourself with the `Checks` line of your
    prompt (`fx checks <job>`), once your work is committed. fx runs the checks
    script in your clone exactly as the gate does, keeps its log in the job
    folder, and remembers the result for the commit it ran on: the gate does
@@ -278,7 +300,8 @@ where the spec asks for them.
      run it in the background and wait for it. A run that is cut off is not
      kept;
    - `checks: FAIL` comes with the last lines of the output (`tail`) and the
-     log's path: fix what fails, commit, run it again;
+     log's path: read every failure in the log, fix them, run the failed tests
+     alone until they pass, then commit and run it again;
    - when the answer has `flaky`, the first run failed in a way that shows the
      machine broke it (a browser crash, a timeout) and fx ran it once more on
      the same commit: its result is the second run's. A pass there is a pass;

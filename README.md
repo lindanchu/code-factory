@@ -1239,6 +1239,46 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
 - The VM's memory: one box per job at once (and per candidate or package). Its 6 GB held three small web
   jobs at once with room to spare (above); since 3.13 you choose it, from what fx measured (below).
 
+### Upgrading to 3.14.0: a job runs the e2e tests its change reaches
+
+- A gate ran the whole end-to-end suite for every job, every round (about 970 browser tests and 28 minutes on one
+  project, for a one-line fix of one static page). fx now chooses the e2e tests a job's change reaches, from a map the
+  factory keeps for each repository, `knowledge/<repo>/e2e-map.json`: every e2e test file (`tests`), what every page
+  goes through (`shared`), what reaches no page (`none`), and each area's code with the tests of its pages (`map`).
+- The checks script and the `e2e` command get `FACTORY_E2E_TESTS` (a file, one test file per line, maybe none), or
+  `FACTORY_E2E_FULL=1`, with `FACTORY_E2E_WHY`, `FACTORY_CHANGED_FILES` and `FACTORY_BASE_REF`. The whole suite runs
+  when the map cannot say: no map or a broken one, a changed file in `shared` or in no entry, or `fx gate <job> --full`
+  and `fx checks <job> --full`. A test file no entry lists, and one the job changed, always run. A script that does not
+  read the new variables runs as before.
+- A job never runs the whole suite by itself: `fx selftest` does, and your CI should on the base branch.
+- `round-<N>/checks.md` says what ran and why. `fx e2e show <job>` shows what a job would run, and `fx e2e check`
+  lists the tests no entry lists and the globs that match nothing.
+- To use it, run `/auto-factory:code init` again on a factory made before. It writes the map and the lines of the
+  checks script that read `FACTORY_E2E_TESTS`.
+
+### Upgrading to 3.14.0: a builder runs the whole checks once
+
+- A builder ran the whole checks script (19 minutes on one project) twice, only to see one test it had fixed. It now
+  runs only the tests its change touches, and a failed test alone until it passes. It reads every failure of a run
+  before it fixes anything, and runs the whole script once, at the end.
+
+### Upgrading to 3.14.0: test databases in the sandbox
+
+- A test database's every write waited for the disk through each layer under it: the box, the VM's disk, this
+  machine's disk, and Hyper-V under WSL. A suite that resets its tables for every test ran several times slower than
+  on the team's own machine. The sandbox VM's disk no longer waits for those flushes. Nothing in the VM needs them:
+  its clones, test databases and images are all made again by a job's setup. After the machine itself crashes, run
+  `fx sandbox reset`.
+  - A VM made before 3.14.0 changes before its next box. `fx sandbox status` shows `disk_flushes`.
+- Init runs the server-side tests in the test runner's parallel mode when the stack has one, with one database per
+  process. It keeps that mode only when selftest gets the same result as a run in one process; otherwise it goes back
+  to one process and writes why in `testing.md`. Init asks you before it adds a package (paratest, pytest-xdist) to
+  the repository.
+- The checks script marks its stages (`echo "::fx-stage <name> $(date +%s)"`). fx keeps each stage's seconds in
+  selftest, the gate and `fx checks`. A stage of a job's run that takes 3 times as long as in selftest (and a minute
+  more) is named in `checks.md`: that is the machine or the sandbox, not the code. Run init again to get the marks
+  into an existing factory's scripts.
+
 ### Upgrading to 3.13.0: the sandbox's size is yours, suggested from what it used
 
 - 3.12.0 gave the VM half of the machine by itself. Now no size is picked for you: run `fx sandbox install` once

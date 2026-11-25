@@ -1188,6 +1188,26 @@ as always, a failure is never taken over, and `fx pr` still runs the checks on w
 pushes when merging the target branch made a new commit. When `checks.reused` is false
 and `not_reused_because` is there, that is what changed since the builder's run.
 
+#### The e2e tests a job runs
+
+A job runs only the e2e tests its change can reach, chosen by fx from the repository's
+map, `knowledge/<repo>/e2e-map.json` (init writes it: **init.md, The e2e map**). The
+checks script and the `e2e` command get `FACTORY_E2E_TESTS` (a file, one test file per
+line, maybe empty), or `FACTORY_E2E_FULL=1` when the map cannot say: no map or a broken
+one, a changed file in the map's `shared` or in no entry, or when asked
+(`fx gate <job> --full`, `fx checks <job> --full`). `FACTORY_E2E_WHY` says which, and
+`round-<N>/checks.md` repeats it. A test file the map does not list yet, and one the job
+changed, always run. A job never runs the whole suite by itself: `fx selftest` does, and
+the team's CI on the base branch. `fx e2e show <job>` shows what a job would run;
+`fx e2e check` lists the tests no entry lists and the globs that match nothing. A pass
+of the checks with one choice is never used for another.
+
+The script marks its stages (`echo "::fx-stage <name> $(date +%s)"`), and fx keeps each
+stage's seconds with the run and with selftest's. A stage of a job's run that took 3
+times as long as in selftest (and a minute more) is named in `checks.md` and in
+`fx checks`'s `slow_note`: the machine or the sandbox, not the code. Tell the user in one
+line when it is there.
+
 Three more things in the gate's output follow from the same idea. Report each in one
 line when it is there:
 

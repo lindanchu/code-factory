@@ -226,6 +226,23 @@ class KvmTest(unittest.TestCase):
             self.assertIn(words, steps)
         self.assertIn("starts the VM again", fx.SANDBOX_INSTALL["after a restart"])
 
+    def test_the_vm_disk_takes_no_flushes(self):
+        """A test database's every fsync went through the box, the VM's disk and this machine's disk (and Hyper-V under
+        WSL): a suite that resets its tables for every test ran several times slower than on the team's machine."""
+        scripts = []
+
+        def vm(argv, **kw):
+            scripts.append(argv[-1])
+            return subprocess.CompletedProcess(argv, 1, b"no Docker here")
+        with mock.patch.object(fx, "vm_run", vm), mock.patch.object(fx, "box_destroy", lambda box: None):
+            with self.assertRaises(fx.NoSandbox):
+                fx.box_create(None, "T-1", 5000, 1)
+        self.assertIn("mount -o remount,barrier=0 /", fx.SANDBOX_NO_FLUSH)
+        self.assertLess(scripts[0].index(fx.SANDBOX_NO_FLUSH), scripts[0].index("docker network create"))  # a VM of
+        # an older fx too, before every box
+        yaml = slurp(os.path.join(fx.SKILL_DIR, "sandbox", "fx-sandbox.yaml"))
+        self.assertLess(yaml.index("barrier=0"), yaml.index("test -f /etc/fx-sandbox-ready && exit 0"))  # each start
+
 
 class NoWayAroundTest(unittest.TestCase):
     def test_every_command_of_a_review_goes_through_the_box(self):

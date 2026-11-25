@@ -158,6 +158,21 @@ class OneChecksRunTest(ChecksCase):
         code, res = self.gate()  # and neither is the gate's own failure
         self.assertEqual((res["gate"], res["checks"]["reused"], self.times_run()), ("PASS", False, 3), res)
 
+    def test_a_builder_runs_the_whole_script_once_and_what_failed_alone(self):
+        """A builder ran the whole suite twice (about 40 minutes) to learn whether one test it fixed passed."""
+        code, res = self.fx("ctx", "T-1", "--agent", "builder")
+        text = prompt_text(res)
+        self.assertIn("Commit first, then run it once, at the end", text)
+        self.assertIn("never the whole script to see one fix", text)
+        self.fail_next()
+        code, res = self.checks()
+        self.assertEqual((code, res["checks"]), (1, "FAIL"), res)
+        self.assertIn("read every failure in the log first", res["next"])
+        self.assertIn("run the failed tests alone (`%s run --job T-1 -- " % fx.FX_CMD, res["next"])
+        builder = slurp(os.path.join(os.path.dirname(os.path.dirname(FX_PATH)), "..", "agents", "factory-builder.md"))
+        self.assertIn("never run it to learn whether one\n   fix worked", builder)
+        self.assertIn("run that test (or its file) alone", builder)
+
     def test_a_later_failure_on_the_same_commit_outvotes_the_pass(self):
         """The same commit, the same inputs, and the newest run failed (a test that fails now and then): the gate finds
         out for itself."""
@@ -1865,3 +1880,139 @@ class BuildersRunHoldsNothingTest(BaselinesCase):
         with mock.patch.object(fx, "baselines_hold", side_effect=lambda ctx: held.append("gate") or real(ctx)):
             self.gate()
         self.assertIn("gate", held)
+
+
+# --------------------------------------------------------------------------
+# the e2e tests a job's change reaches, and the checks script's stages timed
+
+E2E_SCRIPT = r'''echo "::fx-stage unit 1000000000"
+echo "::fx-stage e2e 1000000200"
+echo "full=${FACTORY_E2E_FULL:-} why=${FACTORY_E2E_WHY:-}"
+if [ -n "${FACTORY_E2E_TESTS:-}" ]; then echo "picked:$(tr '\n' ' ' < "$FACTORY_E2E_TESTS")"; fi
+echo "changed:$(tr '\n' ' ' < "$FACTORY_CHANGED_FILES") base:${FACTORY_BASE_REF:-}"
+echo ran >> "$FX_TEST_OUT/checks.ran"
+exit 0
+'''
+E2E_MAP = {"tests": ["e2e/**/*.spec.ts"], "shared": ["src/layout/**"], "none": ["docs/**", "app.py"],
+           "map": [{"paths": ["src/cart/**"], "tests": ["e2e/cart/**"]},
+                   {"paths": ["src/home/**"], "tests": ["e2e/home/*.spec.ts"]}]}
+
+
+class E2eChoiceTest(ChecksCase):
+    """A one-line fix of one static page waited about 28 minutes, every round, for some 970 browser tests of pages it
+    could not reach: a job runs the e2e tests its change reaches, chosen by fx from the factory's map."""
+    script = E2E_SCRIPT
+    base_files = {"README.md": "p\n", "e2e/cart/buy.spec.ts": "t\n", "e2e/home/home.spec.ts": "t\n",
+                  "e2e/new.spec.ts": "t\n", "src/cart/cart.py": "x = 1\n", "src/layout/base.html": "<main/>\n",
+                  "docs/a.md": "a\n"}
+
+    def put_map(self, m=E2E_MAP):
+        path = os.path.join(fx.repo_knowledge_dir(self.f.ctx()), "e2e-map.json")
+        write(path, m if isinstance(m, str) else json.dumps(m))
+
+    def ran(self, *argv):
+        code, res = self.checks(*argv)
+        self.assertEqual((code, res["checks"]), (0, "PASS"), res)
+        return res, slurp(res["log"])
+
+    def test_no_map_runs_the_whole_suite(self):
+        res, log = self.ran()
+        self.assertIn("full=1 why=no e2e map", log)
+        self.assertNotIn("picked:", log)
+        self.assertIn("changed:app.py  base:origin/main", log)
+        self.assertTrue(res["e2e"].startswith("the whole suite: no e2e map"), res)
+
+    def test_a_change_runs_the_tests_of_its_pages_and_those_no_entry_lists(self):
+        self.put_map()
+        self.f.commit({"src/cart/cart.py": "x = 2\n"})
+        res, log = self.ran()
+        self.assertIn("picked:e2e/cart/buy.spec.ts e2e/new.spec.ts ", log)  # new.spec.ts: in no entry yet, so always
+        self.assertIn("full= why=2 of 3 e2e test files", log)
+        self.assertIn("1 the map does not list yet", res["e2e"])
+        code, shown = self.fx("e2e", "show", "T-1")
+        got = list(shown["repos"].values())[0]
+        self.assertEqual((got["full"], got["tests"]), (False, ["e2e/cart/buy.spec.ts", "e2e/new.spec.ts"]), shown)
+        code, res = self.gate()
+        self.assertEqual(res["gate"], "PASS", self.checks_md())
+        self.assertIn("- e2e: 2 of 3 e2e test files", self.checks_md())
+
+    def test_a_test_the_job_changed_runs(self):
+        self.put_map()
+        self.f.commit({"e2e/home/home.spec.ts": "t2\n", "docs/a.md": "b\n"})
+        self.assertIn("picked:e2e/home/home.spec.ts e2e/new.spec.ts ", self.ran()[1])
+
+    def test_what_the_map_cannot_say_runs_the_whole_suite(self):
+        self.put_map()
+        for files, why in (({"src/layout/base.html": "<main id=x/>\n"}, "src/layout/base.html is shared by every page"),
+                           ({"src/orders/o.py": "y = 1\n"}, "src/orders/o.py is in no entry of the e2e map")):
+            with self.subTest(files=files):
+                self.f.commit(files)
+                log = self.ran()[1]
+                self.assertIn("full=1 why=%s" % why, log)
+                sh(["git", "reset", "-q", "--hard", "HEAD~1"], self.f.wt)
+        self.put_map('{"tests": "e2e/**"}')
+        self.assertIn("does not say what fx reads", self.ran()[1])
+
+    def test_only_what_reaches_no_page_runs_only_the_tests_no_entry_lists(self):
+        self.put_map(dict(E2E_MAP, map=E2E_MAP["map"] + [{"paths": ["src/x/**"], "tests": ["e2e/new.spec.ts"]}]))
+        self.f.commit({"docs/a.md": "b\n"})
+        log = self.ran()[1]
+        self.assertIn("full= why=no e2e test: the change reaches no page", log)
+        self.assertIn("picked:\n", log)  # the list is there, and empty
+        self.assertEqual(slurp(fx.e2e_env(*fx.one_app(self.f.ctx(), self.f.job()))["FACTORY_E2E_TESTS"]), "")
+
+    def test_asked_for_the_whole_suite_and_a_pass_of_one_choice_is_not_another(self):
+        self.put_map()
+        self.f.commit({"src/cart/cart.py": "x = 3\n"})
+        self.ran()
+        res, log = self.ran("--full")
+        self.assertEqual((res["reused"], self.times_run()), (False, 2), res)  # the whole suite is not what passed
+        self.assertIn("full=1 why=the whole suite was asked for", log)
+        code, res = self.fx("gate", "T-1", "--full")
+        self.assertEqual((res["gate"], res["checks"]["reused"]), ("PASS", True), res)  # the run with --full, kept
+        self.assertIn("- e2e: the whole suite was asked for", self.checks_md())
+
+    def test_fx_own_runs_get_the_whole_suite(self):
+        env = fx.e2e_env(self.f.ctx(), {"id": "_selftest"})
+        self.assertEqual(env["FACTORY_E2E_FULL"], "1")
+        self.assertIn("fx selftest", env["FACTORY_E2E_WHY"])
+
+    def test_the_map_is_checked_against_the_base_branch(self):
+        self.put_map(dict(E2E_MAP, map=E2E_MAP["map"] + [{"paths": ["src/gone/**"], "tests": ["e2e/cart/**"]}]))
+        code, res = self.fx("e2e", "check")
+        self.assertEqual((code, res["ok"], res["tests"], res["unmapped"]), (1, False, 3, ["e2e/new.spec.ts"]), res)
+        self.assertEqual(res["empty"], ["map[1].paths src/home/**", "map[2].paths src/gone/**"], res)
+        self.assertIn("run in every job", res["unmapped_note"])
+
+    def test_the_stages_are_timed_and_a_slow_one_named(self):
+        res = self.ran()[0]
+        self.assertEqual(res["stages"][0], {"name": "unit", "seconds": 200})
+        self.assertNotIn("slow_stages", res)
+        write(os.path.join(self.f.factory, "baseline.json"), json.dumps(
+            {"steps": {"checks": {"stages": [{"name": "unit", "seconds": 20}, {"name": "lint", "seconds": 5}]}}}))
+        res = self.ran("--again")[0]
+        self.assertEqual(res["slow_stages"], [{"name": "unit", "seconds": 200, "selftest": 20}])
+        self.assertIn("unit took 200s, 20s in fx selftest", res["slow_note"])
+        self.assertIn("not your code", res["slow_note"])
+        code, res = self.gate()
+        self.assertIn("- stages: unit 200s, e2e ", self.checks_md())
+        self.assertIn("slower than in fx selftest, 3x or more (the machine or the sandbox, not the code): unit took 200s",
+                      self.checks_md())
+
+
+class StagesTest(unittest.TestCase):
+    def test_each_stage_ends_where_the_next_starts(self):
+        out = ("x\n::fx-stage lint 1000000100\nok\n::fx-stage unit 1000000130\n::fx-stage odd\n"
+               "::fx-stage e2e 1000000400\r\n  ::fx-stage not-a-mark 1000000500\n")
+        self.assertEqual(fx.checks_stages(out, 1000001000), [
+            {"name": "lint", "seconds": 30}, {"name": "unit", "seconds": None},  # the next mark has no time
+            {"name": "odd", "seconds": None}, {"name": "e2e", "seconds": 600}])
+        self.assertEqual(fx.checks_stages("no stages\n", 5), [])
+
+    def test_slow_is_three_times_and_a_minute_more(self):
+        before = [{"name": "a", "seconds": 10}, {"name": "b", "seconds": 100}, {"name": "c", "seconds": 0}]
+        now_ = [{"name": "a", "seconds": 69}, {"name": "b", "seconds": 299}, {"name": "c", "seconds": 61},
+                {"name": "d", "seconds": 999}, {"name": "a2", "seconds": None}]
+        self.assertEqual(fx.stages_slow(now_, before), [{"name": "c", "seconds": 61, "selftest": 0}])
+        self.assertEqual([s["name"] for s in fx.stages_slow([{"name": "a", "seconds": 70}, {"name": "b", "seconds": 300}],
+                                                            before)], ["a", "b"])

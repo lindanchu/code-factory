@@ -409,6 +409,65 @@ real, non-interactive checks (what its CI runs: install if needed, lint, type
 check, tests, build; it runs in the repository's clone) and delete its
 `FACTORY_TODO` line.
 
+**Tests in parallel.** When the test runner of the stack can run its tests in
+several processes (for example Laravel's `--parallel`, pytest-xdist, RSpec
+with parallel_tests, Go's packages, Jest and Vitest, which do it by
+themselves), the checks script uses it, with one database per process whose
+name starts from `FACTORY_DB` (two jobs never share one). Keep the switch at
+the top of the script (`PARALLEL=1`) so going back is one line. When the
+runner needs a package the repository does not have (paratest for Laravel,
+pytest-xdist), ask the user before adding it: it is a change to the project,
+made as a job. Selftest proves the parallel mode: run it with the switch on, then off, and compare the
+server-side tests in the two logs. Keep parallel only when both runs pass and
+count the same tests. Otherwise go back to one process and write why in the
+repository's `testing.md` (which tests share what), so a later job can fix
+it. Say which mode was kept, and the time of each, in `environment.md`.
+
+**Stages.** The checks script says where each stage starts, on a line of its
+own: `echo "::fx-stage lint $(date +%s)"`, then `unit-tests`, `e2e` and so on (a
+name of letters, digits and `-`). fx keeps each stage's seconds (selftest's in
+`baseline.json`) and names a stage of a job that takes 3 times as long as in
+selftest: the machine or the sandbox, not the code.
+
+**The e2e map.** When a repository has e2e tests (in its checks script or in
+`e2e`), a job runs only those its change can reach. Write
+`knowledge/<repo>/e2e-map.json` from the suite and the code (what each test
+file opens, and which controllers, routes, templates and scripts serve those
+pages):
+
+```json
+{"tests":  ["e2e/**/*.spec.ts"],
+ "shared": ["resources/views/layouts/**", "routes/**", "package.json", "playwright.config.*", "e2e/support/**"],
+ "none":   ["tests/Unit/**", "docs/**", "**/*.md"],
+ "map":    [{"paths": ["app/Http/Controllers/Cart*", "resources/views/cart/**"], "tests": ["e2e/cart/**"]}]}
+```
+
+- `tests`: every e2e test file. `shared`: what every page goes through
+  (layouts, shared CSS and JS, routes, middleware, config, migrations, package
+  manifests, the bundler's and the e2e runner's config, the suite's helpers): a
+  change there runs the whole suite. `none`: what reaches no page (server-side
+  unit tests, docs). `map`: each area's code and the tests of its pages. Globs:
+  `*` stays in one folder, `**` crosses them.
+- A changed file in no entry, or a map fx cannot read, runs the whole suite. A
+  test file no entry lists runs in every job. So when unsure, leave a file out:
+  that costs time, never a missed test.
+- The checks script (and the `e2e` command, when there is one) runs the
+  chosen tests when `FACTORY_E2E_TESTS` is set (a file, one test file per line;
+  when it is empty, no e2e test at all), and the whole suite otherwise:
+
+  ```bash
+  if [ -n "${FACTORY_E2E_TESTS:-}" ]; then
+    mapfile -t picked < "$FACTORY_E2E_TESTS"
+    [ ${#picked[@]} -eq 0 ] || npx playwright test "${picked[@]}"
+  else
+    npx playwright test
+  fi
+  ```
+- Run `python3 ${CLAUDE_SKILL_DIR}/fx e2e check` (`--repo <name>`) until it lists no test that no entry
+  lists and no glob that matches nothing. Tell the user that a job never runs the whole suite: selftest
+  does, and their CI should run it on the base branch (or on a schedule); write that in the
+  repository's `testing.md`.
+
 **Network in the job's box.** A job's commands run in a box of their own (fx
 sandbox). Only the install steps reach the network, through a proxy that lets
 through the package registries, the operating systems' package mirrors and

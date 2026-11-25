@@ -3702,8 +3702,11 @@ def cmd_ctx(ctx, a):
                          "commit it ran on: the gate does not run the script again on a commit that passed here. %s. Exit "
                          "code 75 with `next: wait` means run the same command again" % (
                              FX_CMD, job["id"], which,
-                             "Commit first, then run it once: a run on uncommitted changes shows the result but is not kept"
-                             if agent == "builder" else "It answers at once when the script already passed on this commit"))
+                             "Commit first, then run it once, at the end: a run on uncommitted changes shows the result but "
+                             "is not kept. While you work, and after a failure, run only the tests that cover the change or "
+                             "that failed (the runner's filter for a file or a test name) as a heavy command, never the whole "
+                             "script to see one fix" if agent == "builder"
+                             else "It answers at once when the script already passed on this commit"))
             if len(job_names(job, "change")) > 1:
                 lines.append("Several repositories change: run it once for each, with `--repo <name>` (%s), each in that "
                              "repository's clone" % ", ".join(job_names(job, "change")))
@@ -4782,6 +4785,7 @@ def gate_round_repos(ctx, job, a, place):
         if problems or n not in urls or not rc_.c("e2e") or n in idle:
             continue
         env, db = app_env(rc_, views[n])
+        env.update(e2e_env(rc_, views[n]))  # the e2e tests the change can reach
         env["BASE_URL"] = urls[n].rstrip("/")
         log = "e2e-%s.log" % n
         timeout = int(rc_.c("e2e_timeout_sec", 1800) or 1800)
@@ -4909,6 +4913,7 @@ def gate_round_repos(ctx, job, a, place):
             part += ["Not changed: no commits beyond %s, so its checks and scans are skipped and it gets no pull "
                      "request (`fx repos %s --drop %s` takes it out of the job)." % (views[n]["base_ref"], job["id"], n),
                      ""]
+        part += checks_run_md(info["cr"])
         if info["checks_out"]:
             part += ["## %s output (last 150 lines, full log in %s)" % (info["script"], info["log"]), "", "```",
                      "\n".join(info["checks_out"].splitlines()[-150:]), "```", ""]
@@ -5248,6 +5253,7 @@ def gate_round_one(ctx, job, a, place):
             problems.append("ui/seed.sh failed (round-%d/seed.log)" % rn)
     if not problems and app_url_ and ctx.c("e2e"):
         env, db = app_env(ctx, job)
+        env.update(e2e_env(*one_app(ctx, job)))  # the e2e tests the change can reach
         env["BASE_URL"] = app_url_.rstrip("/")
         t0, before = time.time(), len(problems)
         try:
@@ -5348,6 +5354,7 @@ def gate_round_one(ctx, job, a, place):
                ""] + ["- " + f for f in scanner_files] + [""]
     if sec is not None and sec.get("notes"):
         md += ["## Security notes", ""] + ["- " + n for n in sec["notes"]] + [""]
+    md += checks_run_md(cr)
     if checks_out:
         md += ["## checks.sh output (last 150 lines, full log in checks.log)", "", "```", tail, "```", ""]
     elif cr is not None and cr["reused"]:
@@ -5938,12 +5945,152 @@ def pr_body(ctx, job, repo=None, links=None):
     return "\n".join(parts) + "\n"
 
 
+def e2e_words(env):
+    """The e2e choice of an environment in a line: what ran, and why."""
+    why = env.get("FACTORY_E2E_WHY") or ""
+    return why if not env.get("FACTORY_E2E_FULL") or why.startswith("the whole suite") else "the whole suite: " + why
+
+
 def checks_env(ctx, job):
     """A checks script gets the job's id, its repository's port and its own database name, so parallel runs never share
-    test data, and where this job reads the folders a lane protects (lane_env)."""
+    test data, where this job reads the folders a lane protects (lane_env), and the e2e tests its change can reach
+    (e2e_env)."""
     ctx, job = one_app(ctx, job)
     return project_env(ctx, FACTORY_JOB=job["id"], FACTORY_PORT=str(job["port"]), FACTORY_DB=app_db(ctx, job),
-                       **dict(baselines_env(ctx, job["worktree"]), **dict(lane_env(ctx, job), **clone_env(job))))
+                       **dict(baselines_env(ctx, job["worktree"]), **dict(lane_env(ctx, job), **dict(
+                           clone_env(job), **e2e_env(ctx, job)))))
+
+
+# --------------------------------------------------------------------------
+# the e2e tests a job's change can reach
+#
+# The checks script ran the whole end-to-end suite for every job: a one-line fix of one static page waited about 28
+# minutes for some 970 browser tests of pages it could not reach, and again every round. Playwright's own --only-changed
+# follows only the scripts a test imports, never a server's templates, controllers or routes. So fx chooses, from a map
+# the factory keeps for each repository (knowledge/<repo>/e2e-map.json, written by init from the suite and the code):
+#
+#   {"tests":  ["e2e/**/*.spec.ts"],                     every e2e test file of the repository
+#    "shared": ["resources/views/layouts/**", ...],      a change here can reach every page: the whole suite
+#    "none":   ["tests/Unit/**", "docs/**"],             a change here reaches no page: no e2e test for it
+#    "map":    [{"paths": ["app/Cart/**"], "tests": ["e2e/cart/**"]}, ...]}
+#
+# The whole suite runs whenever the map cannot say: no map or a broken one, a changed file in "shared" or in no entry
+# at all, or when asked (fx gate --full, fx checks --full). A test file the map does not list yet runs every time, so a
+# new test is never left out of a job; a test file the job changed runs too. The script gets FACTORY_E2E_TESTS (a file:
+# one test file per line, maybe none) or FACTORY_E2E_FULL=1, FACTORY_E2E_WHY either way, and FACTORY_CHANGED_FILES (a
+# file: the job's changed paths against FACTORY_BASE_REF). Without FACTORY_E2E_TESTS a script runs the whole suite, as
+# one written before this did. The whole suite itself runs in fx selftest, and in the team's CI on the base branch.
+
+E2E_MAP_NAME = "e2e-map.json"
+
+
+def e2e_match(path, globs):
+    """A path against the map's globs: * and ? stay inside one folder, ** crosses them (path_glob)."""
+    return any(path_glob(path, g.strip()[2:] if g.strip().startswith("./") else g.strip()) for g in globs)
+
+
+def e2e_map(ctx):
+    """(map, problem): the repository's e2e map as read and checked, or None with why it cannot be used."""
+    path = os.path.join(repo_knowledge_dir(ctx, ctx.scope), E2E_MAP_NAME)
+    rel = os.path.relpath(path, ctx.factory)
+    if not os.path.isfile(path):
+        return None, "no e2e map (%s)" % rel
+    try:
+        m = json.loads(read(path) or "")
+    except ValueError as e:
+        return None, "%s is not valid JSON (%s)" % (rel, e)
+    globs = lambda v: isinstance(v, list) and all(isinstance(x, str) and x.strip() for x in v)
+    if not isinstance(m, dict) or not m.get("tests") or not globs(m.get("tests")) or \
+            not all(globs(m.get(k, [])) for k in ("shared", "none")) or not isinstance(m.get("map", []), list) or \
+            not all(isinstance(e, dict) and e.get("paths") and globs(e["paths"]) and e.get("tests") and globs(e["tests"])
+                    for e in m.get("map", [])):
+        return None, ("%s does not say what fx reads: \"tests\" (globs), \"shared\" and \"none\" (globs), \"map\" "
+                      "(entries of \"paths\" and \"tests\" globs)" % rel)
+    return m, None
+
+
+def e2e_changed(ctx, wt, base_ref):
+    """The paths a clone changed against its base: commits since the merge base, what is not committed yet, and new
+    files git does not know. Never fx's own copies (copy_into_worktree, .env) or what the checks make (artifact_paths).
+    None when git cannot say (no base)."""
+    mb = git(["merge-base", base_ref, "HEAD"], wt, check=False).stdout.strip() if base_ref else ""
+    if not mb:
+        return None
+    files = [f for f in plain_git(wt, "diff", "--no-renames", "--name-only", "-z", mb).split("\0")
+             if f and not is_local_file(ctx, f, ctx.scope)]
+    return sorted(set(files + worktree_dirt(ctx, wt, ctx.scope)[1]))
+
+
+def e2e_test_files(wt, m):
+    """Every e2e test file of the clone, by the map's "tests"."""
+    have = [f for f in git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], wt, check=False).stdout.split("\0")
+            if f]
+    return sorted(f for f in set(have) if e2e_match(f, m["tests"]) and os.path.isfile(os.path.join(wt, f)))
+
+
+def e2e_select(ctx, job, full=False):
+    """What a job's change asks of the e2e suite: {full, why, tests, changed, base, unmapped}. ctx and job: one
+    repository's (one_app). full: asked for the whole suite."""
+    base = job.get("base_ref") or ""
+    changed = e2e_changed(ctx, job["worktree"], base) if job.get("worktree") and os.path.isdir(job["worktree"]) else None
+    res = {"full": True, "why": None, "tests": [], "changed": changed or [], "base": base, "unmapped": []}
+    if full:
+        return dict(res, why="the whole suite was asked for")
+    m, problem = e2e_map(ctx)
+    if problem:
+        return dict(res, why=problem)
+    if changed is None:
+        return dict(res, why="the change against the base branch (%s) is not known" % (base or "none"))
+    every = e2e_test_files(job["worktree"], m)
+    if not every:
+        return dict(res, why="the e2e map's \"tests\" match no file of the repository")
+    entries = m.get("map", [])
+    mapped = {t for t in every if any(e2e_match(t, e["tests"]) for e in entries)}
+    res["unmapped"] = [t for t in every if t not in mapped]
+    chosen = set(res["unmapped"])
+    for f in changed:
+        if e2e_match(f, m["tests"]):
+            if f in every:
+                chosen.add(f)
+            continue
+        if e2e_match(f, m.get("shared", [])):
+            return dict(res, why="%s is shared by every page (the map's \"shared\")" % f)
+        hit = [e for e in entries if e2e_match(f, e["paths"])]
+        if hit:
+            chosen.update(t for t in every for e in hit if e2e_match(t, e["tests"]))
+        elif not e2e_match(f, m.get("none", [])):
+            return dict(res, why="%s is in no entry of the e2e map" % f)
+    picked = sorted(chosen)
+    why = ("%d of %d e2e test files: what the change reaches%s" % (
+        len(picked), len(every), ", with %d the map does not list yet" % len(res["unmapped"]) if res["unmapped"] else "")
+           if picked else "no e2e test: the change reaches no page")
+    return dict(res, full=False, why=why, tests=picked)
+
+
+def e2e_env(ctx, job, full=False):
+    """The e2e selection as the checks script and the e2e command read it, its lists written in the job's folder (the
+    box gets them at the same path: BOX_ENV_FILES). A job of fx's own (selftest, an audit) gets the whole suite."""
+    if not job.get("worktree") or str(job.get("id", "")).startswith("_"):
+        return {"FACTORY_E2E_FULL": "1", "FACTORY_E2E_WHY": "the whole suite: no job's change to choose by (%s)"
+                % ("fx selftest" if job.get("id") == "_selftest" else "fx's own run")}
+    try:
+        sel = e2e_select(ctx, job, full or scan_full_asked())
+        d = os.path.join(ctx.job_dir(job_real_id(job)), "e2e")
+        os.makedirs(d, exist_ok=True)
+        tag = re.sub(r"[^A-Za-z0-9_.-]+", "-", "%s-%s" % (job["id"], job.get("repo") or ctx.scope or "repo"))
+        env = {"FACTORY_E2E_WHY": sel["why"], "FACTORY_BASE_REF": sel["base"]}
+        changed = os.path.join(d, tag + "-changed.txt")
+        write_atomic(changed, "".join(f + "\n" for f in sel["changed"]))
+        env["FACTORY_CHANGED_FILES"] = changed
+        if sel["full"]:
+            env["FACTORY_E2E_FULL"] = "1"
+        else:
+            tests = os.path.join(d, tag + "-tests.txt")
+            write_atomic(tests, "".join(t + "\n" for t in sel["tests"]))
+            env["FACTORY_E2E_TESTS"] = tests
+        return env
+    except (OSError, subprocess.SubprocessError, FxError, KeyError) as e:  # choosing never stops the checks: all of them
+        return {"FACTORY_E2E_FULL": "1", "FACTORY_E2E_WHY": "the whole suite: the change could not be read (%s)" % e}
 
 
 # --------------------------------------------------------------------------
@@ -6108,6 +6255,120 @@ def factory_scan(ctx, words=()):
     return marks, named
 
 
+def e2e_map_check(rctx, root):
+    """What is wrong or missing in a repository's e2e map against a checkout (root): {ok, problem, tests, unmapped,
+    empty}. empty: the globs of an entry that match no file there (a renamed folder: that entry chooses nothing)."""
+    m, problem = e2e_map(rctx)
+    if problem:
+        return {"ok": False, "problem": problem}
+    every = e2e_test_files(root, m)
+    have = [f for f in git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], root, check=False).stdout.split("\0")
+            if f]
+    empty = []
+    for i, e in enumerate(m.get("map", [])):
+        empty += ["map[%d].paths %s" % (i, g) for g in e["paths"] if not any(e2e_match(f, [g]) for f in have)]
+        empty += ["map[%d].tests %s" % (i, g) for g in e["tests"] if not any(e2e_match(t, [g]) for t in every)]
+    mapped = {t for t in every if any(e2e_match(t, e["tests"]) for e in m.get("map", []))}
+    unmapped = [t for t in every if t not in mapped]
+    return {"ok": bool(every) and not empty, "problem": None if every else "the map's \"tests\" match no file",
+            "tests": len(every), "entries": len(m.get("map", [])), "unmapped": unmapped, "empty": empty}
+
+
+def cmd_e2e(ctx, a):
+    """fx e2e check [--repo]: the repository's e2e map against its base branch. fx e2e show <job>: the e2e tests the
+    job's change reaches, as its checks script gets them."""
+    if a.action == "show":
+        if not a.job:
+            raise FxError("give the job: fx e2e show <job>", code=3)
+        job = ctx.load(a.job)
+        names = job_names(job, "change") if is_whole_job(job) else [None]
+        res = {"ok": True, "job": job["id"], "repos": {}}
+        for n in names:
+            rctx, view = one_app(ctx, job, n)
+            sel = e2e_select(rctx, view, a.full or scan_full_asked())
+            res["repos"][n or rctx.scope or "repo"] = dict({k: sel[k] for k in ("full", "why", "tests", "base")},
+                                                           changed=len(sel["changed"]), unmapped=len(sel["unmapped"]))
+        out(res)
+        return
+    name = code_repo(ctx, getattr(a, "repo_name", None))
+    rctx = repo_ctx(ctx, name) if name else ctx
+    root = source_root(ctx, argparse.Namespace(source=None, repo_name=name))
+    res = dict(e2e_map_check(rctx, root), repo=name, read=root)
+    if res.get("unmapped"):
+        res["unmapped_note"] = ("these run in every job until an entry of the map lists them: add each to the entry of "
+                                "the pages it tests")
+    res["next"] = "go on" if res["ok"] and not res.get("unmapped") else "fix the map, then fx e2e check again"
+    out(res)
+    if not res["ok"]:
+        sys.exit(1)
+
+
+# --------------------------------------------------------------------------
+# the stages of a checks script, timed
+#
+# fx knew only how long a whole checks script took, so a suite whose database tests ran several times slower in the
+# sandbox looked like a slow suite and nothing more. A script says where each stage starts with a line of its own:
+#
+#   echo "::fx-stage unit-tests $(date +%s)"
+#
+# fx reads them from the output (each stage ends where the next starts, the last where the script ended), keeps their
+# seconds with the run and with fx selftest's (baseline.json), and names a stage of a job's run that took at least
+# STAGE_SLOW_TIMES as long as selftest's, and STAGE_SLOW_MIN_SEC more: the machine or the sandbox, not the code.
+
+STAGE_RE = re.compile(r"(?m)^::fx-stage[ \t]+([A-Za-z0-9_.:/-]{1,60})(?:[ \t]+(\d{9,11}))?[ \t]*\r?$")
+STAGE_SLOW_TIMES = 3
+STAGE_SLOW_MIN_SEC = 60
+
+
+def checks_stages(output, ended):
+    """[{name, seconds}] from the ::fx-stage lines of a script's output; ended: the epoch second the script ended. A
+    line without its time is named with no seconds."""
+    marks = [(m.group(1), int(m.group(2)) if m.group(2) else None) for m in STAGE_RE.finditer(output or "")]
+    stages = []
+    for i, (name, at) in enumerate(marks):
+        end = marks[i + 1][1] if i + 1 < len(marks) else int(ended)
+        stages.append({"name": name, "seconds": max(0, end - at) if at is not None and end is not None else None})
+    return stages
+
+
+def stages_slow(stages, before):
+    """The stages that took at least STAGE_SLOW_TIMES as long as the same stage did before (fx selftest's), and
+    STAGE_SLOW_MIN_SEC more: [{name, seconds, selftest}]."""
+    was = {s_.get("name"): s_.get("seconds") for s_ in before or [] if isinstance(s_, dict)}
+    slow = []
+    for s_ in stages or []:
+        b, now_ = was.get(s_["name"]), s_.get("seconds")
+        if isinstance(b, (int, float)) and isinstance(now_, (int, float)) and b >= 0 and \
+                now_ >= STAGE_SLOW_TIMES * b and now_ - b >= STAGE_SLOW_MIN_SEC:
+            slow.append({"name": s_["name"], "seconds": now_, "selftest": b})
+    return slow
+
+
+def stages_words(stages):
+    return ", ".join("%s %s" % (s_["name"], "%ds" % s_["seconds"] if s_.get("seconds") is not None else "?")
+                     for s_ in stages or [])
+
+
+def slow_words(slow):
+    return "; ".join("%s took %ds, %ds in fx selftest" % (s_["name"], s_["seconds"], s_["selftest"]) for s_ in slow or [])
+
+
+def checks_run_md(cr, title="What the checks script ran"):
+    """checks.md's lines on a run (or the pass it used again): the e2e tests chosen, the stages' seconds and the slow
+    ones."""
+    if not cr:
+        return []
+    lines = []
+    if cr.get("e2e"):
+        lines.append("- e2e: %s" % cr["e2e"])
+    if cr.get("stages"):
+        lines.append("- stages: %s" % stages_words(cr["stages"]))
+    if cr.get("slow_stages"):
+        lines.append("- slower than in fx selftest, %dx or more (the machine or the sandbox, not the code): %s" % (
+            STAGE_SLOW_TIMES, slow_words(cr["slow_stages"])))
+    return ["## " + title, ""] + lines + [""] if lines else []
+
+
 def checks_fingerprint(ctx, job, who=None):
     """Everything the checks script could read besides the commit, as {sum, parts}: one hash over all of it, and a short
     one for each part, so that a difference can be named. Taken from what is there now, never from what git remembers:
@@ -6161,6 +6422,9 @@ def checks_fingerprint(ctx, job, who=None):
     env = {k: v for k, v in checks_env(ctx, who).items() if env_read(k)}
     if env.get("FACTORY_DIR") == settings_root(ctx):
         env["FACTORY_DIR"] = "(the factory as committed)"  # a folder per commit: what it holds counts above, not its name
+    for k in BOX_ENV_FILES[1:]:  # the e2e tests chosen and the paths changed: by what the lists say, not where they are
+        if env.get(k):
+            env[k] = "(list %s)" % hashlib.sha256((read(env[k], "") or "").encode("utf-8", "surrogateescape")).hexdigest()[:16]
     full["env"] = digest(sorted(env.items()))
     marks = {k: hashlib.sha256(v.encode("utf-8", "surrogateescape")).hexdigest()[:8] for k, v in env.items()
              if not ENV_SECRET_LOOKING.search(k)}
@@ -6307,14 +6571,14 @@ def checks_execute(ctx, job, look, log_path, by, who=None, cand=None, rn=None, p
     wt, limit = who["worktree"], int(ctx.c("gate_timeout_sec", 1800))
     watch = StopsWatch(place, [wt, ctx.job_dir(job_real_id(job))])
     t0, started, rc, timed_out, box, p = time.time(), now(), None, False, None, None
+    ran_env = checks_env(ctx, who)
     watch.start(limit)
     try:
         box = job_box_of(ctx, who)
         if box:  # in the job's box: what it changes in the clone comes back, and the checks below see it
-            p = box_job_exec(ctx, who, box, "bash %s" % shlex.quote(checks_script(ctx, job)), wt, checks_env(ctx, who),
-                             limit)
+            p = box_job_exec(ctx, who, box, "bash %s" % shlex.quote(checks_script(ctx, job)), wt, ran_env, limit)
         else:
-            p = run(["bash", checks_script(ctx, job)], cwd=wt, check=False, env=checks_env(ctx, who), timeout=limit,
+            p = run(["bash", checks_script(ctx, job)], cwd=wt, check=False, env=ran_env, timeout=limit,
                     group=True, on_start=watch.attach)
         output, rc = p.stdout or "", p.returncode
     except subprocess.TimeoutExpired as e:
@@ -6327,6 +6591,8 @@ def checks_execute(ctx, job, look, log_path, by, who=None, cand=None, rn=None, p
     write_atomic(log_path, output)
     ok = rc == 0 and not timed_out
     why_not = None
+    stages = checks_stages(output, time.time())
+    slow = stages_slow(stages, ((baseline_of(ctx).get("steps") or {}).get("checks") or {}).get("stages"))
     if ok:  # a pass counts later only when fx saw one commit and one set of inputs from its start to its end
         after = checks_fingerprint(ctx, job, who)
         if look["dirty"] or checks_dirt(ctx, wt):
@@ -6348,6 +6614,12 @@ def checks_execute(ctx, job, look, log_path, by, who=None, cand=None, rn=None, p
         row["dirty"] = True  # a run on uncommitted changes says nothing about the commit, whichever way it went
     if why_not:
         row["not_reusable"] = why_not
+    if ran_env.get("FACTORY_E2E_WHY"):
+        row["e2e"] = e2e_words(ran_env)
+    if stages:
+        row["stages"] = stages
+    if slow:
+        row["slow_stages"] = slow
     if place is not None and place.waited >= WAIT_NOTED_SEC:
         row["waited_sec"] = round(place.waited)
     outside = None if ok else outside_stop(watch, rc, timed_out)
@@ -6636,6 +6908,8 @@ def cmd_checks(ctx, a):
     """Run the job's checks script in its clone, as the gate does, and keep the result for the commit it ran on. This
     is how a builder checks its work: the gate then finds the pass and does not run the script a second time on the
     same commit. Asked again on a commit that already passed, it answers at once."""
+    if getattr(a, "full", False):
+        os.environ["FX_SCAN_FULL"] = "1"  # e2e_env: the whole e2e suite
     job = ctx.load(a.job)
     if a.wp:
         raise checks_script_refusal(job, wp=a.wp)
@@ -6699,6 +6973,12 @@ def cmd_checks(ctx, a):
             raise place_refusal(e, "the checks of %s" % job["id"])
     res.update(ok=done["ok"], checks=done["result"], run=done["id"], commit=done["commit"], seconds=done["seconds"],
                log=log, reused=False)
+    for k in ("e2e", "stages", "slow_stages"):
+        if done.get(k):
+            res[k] = done[k]
+    if done.get("slow_stages"):
+        res["slow_note"] = ("slower than in fx selftest, %dx or more: %s. That is the machine or the sandbox, not your code: "
+                            "say so in your report" % (STAGE_SLOW_TIMES, slow_words(done["slow_stages"])))
     if done.get("flaky"):
         res["flaky"] = done["flaky"]
     if place.waited >= WAIT_NOTED_SEC:
@@ -6723,7 +7003,9 @@ def cmd_checks(ctx, a):
         res["next"] = ("read the log, fix what fails, commit, and run this again: this commit was stopped from outside "
                        "before as well (%s), so it is taken for a failure now, as the gate does" % before[-1].get("id"))
     else:
-        res["next"] = "read the log, fix what fails, commit, and run this again"
+        res["next"] = ("read every failure in the log first, fix what fails, run the failed tests alone (`%s run --job %s -- "
+                       "<the runner with a filter for them>`) until they pass, then commit and run this again, once"
+                       % (FX_CMD, shlex.quote(job["id"])))
     out(res)
     sys.exit(1)
 
@@ -20320,6 +20602,10 @@ def doctor_checks(ctx, issue=None, session=True, live=False):
     for n, rctx, of in per_repo:
         add("app control%s (optional)" % of, True, rctx.c("app.up") or "app.up not set: agents start the app themselves")
         add("e2e in the gate%s (optional)" % of, True, rctx.c("e2e") or "not set")
+        m_, why_ = e2e_map(rctx)
+        add("e2e map%s (advice)" % of, True, "%d entries: a job runs the e2e tests its change reaches; fx e2e check lists the "
+            "tests no entry lists" % len(m_.get("map", [])) if m_ else
+            "%s: every job runs the whole e2e suite (init.md, The e2e map)" % why_)
     gv = re.search(r"(\d+)\.(\d+)", run(["git", "--version"]).stdout or "")
     gver = (int(gv.group(1)), int(gv.group(2))) if gv else (0, 0)
     add("git >= 2.38", gver >= (2, 38), "%d.%d (the approver's merge-tree needs 2.38)" % gver)
@@ -23859,6 +24145,13 @@ SANDBOX_VM = "fx-sandbox"
 SANDBOX_READY = "/etc/fx-sandbox-ready"
 SANDBOX_BASE = "fx-box"  # the box image the VM builds: Ubuntu with systemd and Docker, Node, Playwright and Chromium
 SANDBOX_PORT0 = 20000  # a box's own ports, forwarded to the app's 127.0.0.1:<port> inside it
+# The VM's disk without flushes. A box's test database writes to a volume of the box's Docker, on the VM's disk, which is
+# a file on this machine, and every fsync went on through each of those layers to this machine's disk (through Hyper-V
+# as well under WSL): a suite that resets its tables for every test ran several times slower than on the team's own
+# machine. Nothing in the VM is kept that a crash could cost: clones, test databases and images, all made again by a
+# job's setup, and `fx sandbox reset` makes the VM anew. Applied by the VM's start-up script (a new VM) and before
+# every box (a VM made by an older fx).
+SANDBOX_NO_FLUSH = "findmnt -no OPTIONS / | grep -q nobarrier || mount -o remount,barrier=0 / || true"
 SANDBOX_ALLOW = ["registry.npmjs.org", "registry.yarnpkg.com", "repo.packagist.org", "packagist.org",
                  "codeload.github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org",
                  "repo.maven.apache.org", "repo1.maven.org", "registry-1.docker.io", "auth.docker.io",
@@ -24495,6 +24788,7 @@ def box_create(ctx, job_id, port, nports, image=None):
     conf = ("Port 8888\nListen 0.0.0.0\nTimeout 600\nFilterDefaultDeny Yes\nFilterExtended Yes\n"
             "Filter \"/etc/tinyproxy/filter\"\nConnectPort 443\nConnectPort 80\nLogLevel Connect\n")
     script = r"""set -e
+{no_flush}
 d=/opt/fx-boxes/{name}; mkdir -p $d
 printf %s {conf} > $d/fx.conf
 printf %s {filt} > $d/filter
@@ -24514,7 +24808,7 @@ docker run -d --runtime=sysbox-runc --name {name} --hostname box --network {net}
 echo "subnet=$sub"
 echo "proxy=$pip"
 """.format(name=name, net=net, proxy=proxy, pub=pub, image=shlex.quote(image), conf=shlex.quote(conf),
-           filt=shlex.quote(sandbox_filter(sandbox_allow(ctx))))
+           filt=shlex.quote(sandbox_filter(sandbox_allow(ctx))), no_flush=SANDBOX_NO_FLUSH)
     p = vm_run(["sudo", "bash", "-c", script], timeout=600)
     box = {"name": name, "net": net, "proxy": proxy, "port": port, "nports": nports, "online": True, "image": image,
            "filter": hashlib.sha256(sandbox_filter(sandbox_allow(ctx)).encode()).hexdigest()[:12]}
@@ -24670,7 +24964,7 @@ class BoxRun:
         self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
 
 
-BOX_ENV_FILES = ("FACTORY_LIMITS_ENV",)  # files fx writes in the job's folder (jobs/, which a box never gets whole)
+BOX_ENV_FILES = ("FACTORY_LIMITS_ENV", "FACTORY_CHANGED_FILES", "FACTORY_E2E_TESTS")  # files fx writes in the job's folder (jobs/, which a box never gets whole)
 _BOX_FROZEN = set()  # (box, frozen copy) this fx already put
 
 
@@ -25428,6 +25722,13 @@ def cmd_sandbox(ctx, a):
                 res["size_note"] = ("%s; fx suggests %s GiB and %s CPUs (%s): ask the person, then fx sandbox install "
                                     "--memory <GiB> --cpus <n>" % (offer["change"], offer["suggest"]["memory_gib"],
                                                                     offer["suggest"]["cpus"], offer["suggest"]["why"]))
+        if ok and not os.environ.get("FACTORY_FAKE_MACHINE"):
+            try:
+                opts = vm_text(vm_run(["findmnt", "-no", "OPTIONS", "/"], timeout=60)).strip()
+            except (OSError, subprocess.TimeoutExpired):
+                opts = ""
+            if opts:
+                res["disk_flushes"] = "off" if "nobarrier" in opts.split(",") else "on (turned off before the next box)"
         if older:
             res["boxes_with_older_allow"] = older
             res["note"] = ("these jobs' boxes were made with an older sandbox.allow: their next install (fx run --job "
@@ -30250,7 +30551,7 @@ def selftest_repo(ctx, a, n, port, logdir, clone_of, bl_cfg, bl_pre, first):
         progress(name if len(ctx.repos) <= 1 else "%s: %s" % (n, name))
         log = os.path.join(logdir, "%s.log" % name)
         env = project_env(rctx, FACTORY_JOB="_selftest", FACTORY_PORT=str(job_port(ctx, job, n)),
-                          **dict(baselines_env(rctx, wt), **extra_env))
+                          **dict(baselines_env(rctx, wt), **dict(extra_env, **e2e_env(rctx, {"id": "_selftest"}))))
         try:
             p, secs = timed(lambda: run(login_shell(rctx, cmd, env), cwd=wt, check=False, env=env, timeout=timeout,
                                         group=True))
@@ -30258,6 +30559,9 @@ def selftest_repo(ctx, a, n, port, logdir, clone_of, bl_cfg, bl_pre, first):
             tail = "\n".join((p.stdout or "").splitlines()[-25:])
             res["steps"][name] = {"ok": p.returncode == 0, "exit": p.returncode, "seconds": secs, "log": log,
                                   "tail": tail}
+            stages = checks_stages(p.stdout, time.time()) if name == "checks" else []
+            if stages:  # what a job's run of the script is held against (stages_slow)
+                res["steps"][name]["stages"] = stages
         except subprocess.TimeoutExpired:
             res["steps"][name] = {"ok": False, "exit": None, "seconds": timeout, "log": log,
                                   "tail": "timed out after %ss" % timeout}
@@ -30656,8 +30960,8 @@ def build_parser():
                    help="run the whole gate (checks, app, e2e, UI check, scanners) and count nothing: the round is put "
                         "aside, the job stays where it was (try the factory's scripts before they cost a round)")
     s.add_argument("--full", action="store_true",
-                   help="call the whole permission table and let ZAP scan the whole app, whatever the job changed "
-                        "(by default a gate scans what the job's change can reach)")
+                   help="call the whole permission table, let ZAP scan the whole app and run the whole e2e suite, "
+                        "whatever the job changed (by default a gate scans and tests what the job's change can reach)")
     s.set_defaults(fn=cmd_gate)
     s = sub.add_parser("checks", help="run the job's checks script in its clone and keep the result for the commit: the "
                                       "gate does not run it again on a commit that passed")
@@ -30665,10 +30969,17 @@ def build_parser():
     s.add_argument("--candidate", type=int, help="best-of-N: in this candidate's clone")
     s.add_argument("--wp", help="a package of a split build tests its own files: fx says so and runs nothing")
     s.add_argument("--again", action="store_true", help="run it though it already passed on this commit")
+    s.add_argument("--full", action="store_true", help="the whole e2e suite, whatever the job changed (FACTORY_E2E_FULL)")
     s.add_argument("--wait", type=float, metavar="SEC", help="how long to wait for room before answering `next: wait`")
     s.add_argument("--repo", dest="repo_name", metavar="NAME", help="a job of several repositories: this repository's "
                    "checks script, in its clone")
     s.set_defaults(fn=cmd_checks)
+    s = sub.add_parser("e2e", help="the e2e map: check it against the base branch, or show what a job's change runs")
+    s.add_argument("action", choices=["check", "show"])
+    s.add_argument("job", nargs="?", help="show: the job")
+    s.add_argument("--repo", dest="repo_name", metavar="NAME", help="check: this repository's map")
+    s.add_argument("--full", action="store_true", help="show: as fx gate --full would (the whole suite)")
+    s.set_defaults(fn=cmd_e2e)
     s = sub.add_parser("reuse", help="how a pass of the checks script is used again; change it for this factory")
     s.add_argument("--on", action="store_true", help="use a pass again for the same commit and the same inputs (the default)")
     s.add_argument("--off", action="store_true", help="every gate and every fx pr runs the checks script and every scan itself")
