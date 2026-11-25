@@ -8,6 +8,7 @@ import http.server
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -1331,6 +1332,219 @@ class BaselineTest(CoverageCase):
                                               fx.SEV_RANK["medium"]))
 
 
+class ZapScopeTest(CoverageCase):
+    """ZAP scans what the job's change can reach; fx gate --full scans it all (#7)."""
+
+    SPEC = {"openapi": "3.0.0", "servers": [{"url": "http://127.0.0.1:5100/api"}],
+            "paths": {"/projects/{project}": {"parameters": [], "get": {"x": 1}, "put": {"x": 2}},
+                      "/me": {"get": {"x": 3}}}}
+
+    def test_docker_desktop_reaches_the_app_through_host_docker_internal(self):
+        """Its host network is its own VM's: an app of WSL's on 127.0.0.1 is reached through host.docker.internal."""
+        def run(cmd, **k):
+            out = "Docker Desktop\n" if cmd[:2] == ["docker", "info"] else ""
+            return subprocess.CompletedProcess(cmd, 0, out, "")
+        with mock.patch.object(fx, "run", run), mock.patch.object(fx.sys, "platform", "linux"):
+            flags, target, note = fx.zap_network("http://127.0.0.1:5100/")
+        self.assertEqual((flags, target, note), (["--add-host", "host.docker.internal:host-gateway"],
+                                                 "http://host.docker.internal:5100/", None))
+
+    def test_the_description_is_cut_to_the_routes(self):
+        cut, kept, total = fx.openapi_cut(self.SPEC, {"GET /api/projects/{id}", "POST /api/other"})
+        self.assertEqual((kept, total), (1, 3))
+        self.assertEqual(sorted(cut["paths"]), ["/projects/{project}"])
+        self.assertEqual(sorted(cut["paths"]["/projects/{project}"]), ["get", "parameters"])
+        self.assertEqual(fx.openapi_cut(self.SPEC, {"GET /me"})[1], 1)  # without the base path too
+
+    def reach(self, **r):
+        return mock.patch.object(fx, "change_reach", return_value=dict({"kind": "affected", "why": "w", "code": []}, **r))
+
+    def test_what_the_scope_says(self):
+        ctx, job = self.f.ctx(), self.f.job()
+        perm = {"routes_reached": ["GET /me"], "routes_total": 40}
+        with self.reach():
+            self.assertEqual(fx.zap_scope(ctx, job, job, perm)["kind"], "skip")
+        with self.reach(kind="full"):
+            self.assertEqual(fx.zap_scope(ctx, job, job, perm)["kind"], "full")
+        with self.reach(code=["app/x.php"]):
+            sc = fx.zap_scope(ctx, job, job, perm)
+            self.assertEqual((sc["kind"], sc["web_routes"], sc["api_routes"], sc["total"]),
+                             ("affected", ["GET /me"], {"GET /me"}, 40))
+            self.assertEqual(sc["starts"], ["/me"])
+            self.assertEqual(fx.zap_scope(ctx, job, job, None)["kind"], "full")  # the whole table was called
+            sc = fx.zap_scope(ctx, job, job, {"routes_reached": [], "routes_total": 40})
+            self.assertEqual(sc["kind"], "skip")
+            self.assertIn("reaches no route", sc["skip"])
+        self.set_security(zap_scope="full")
+        with self.reach():
+            self.assertEqual(fx.zap_scope(self.f.ctx(), job, job, perm)["kind"], "full")
+
+    def test_the_web_plan_attacks_only_the_routes_it_reaches(self):
+        self.set_security(zap_mode="full", zap_exclude=[".*/dang-xuat"])
+        scope = {"web_routes": ["GET /tai-khoan", "POST /dang-nhap", "GET /quan-tri/nguoi-dung/{user}"],
+                 "starts": ["/tai-khoan", "/dang-nhap", "/quan-tri/nguoi-dung/7"]}
+        plan = json.loads(fx.zap_web_plan(self.f.ctx(), "http://host.docker.internal:5100/", scope, "zap.json"))
+        app, affected = plan["env"]["contexts"]
+        self.assertEqual(app["includePaths"], ["http://host\\.docker\\.internal:5100/.*"])
+        types = [j["type"] for j in plan["jobs"]]
+        self.assertEqual(types, ["spider", "requestor", "activeScan", "passiveScan-wait", "report"])
+        self.set_security(zap_mode="full", zap_exclude=[".*/dang-xuat"], zap_ajax_minutes=2)
+        plan = json.loads(fx.zap_web_plan(self.f.ctx(), "http://host.docker.internal:5100/", scope, "zap.json"))
+        types = [j["type"] for j in plan["jobs"]]
+        self.assertEqual(types, ["spider", "requestor", "spiderAjax", "activeScan", "passiveScan-wait", "report"])
+        jobs = {j["type"]: j for j in plan["jobs"]}
+        self.assertEqual(jobs["spider"]["parameters"]["context"], "fx-app")  # the classic spider: the whole app
+        self.assertEqual(jobs["spiderAjax"]["parameters"]["context"], "fx-affected")
+        self.assertEqual(jobs["activeScan"]["parameters"]["context"], "fx-affected")
+        self.assertEqual(affected["excludePaths"], [".*/dang-xuat"])
+        self.assertEqual(jobs["activeScan"]["parameters"]["maxScanDurationInMins"], fx.ZAP_AFFECTED_MINUTES)
+        self.assertEqual(jobs["activeScan"]["policyDefinition"]["defaultStrength"], "low")
+        self.assertEqual(app["structure"], affected["structure"])  # ZAP files a URL in both by the first one's
+        rx = [re.compile(r) for r in affected["includePaths"]]
+        hit = lambda u: any(r.fullmatch(u) for r in rx)
+        base = "http://host.docker.internal:5100"
+        self.assertTrue(hit(base + "/tai-khoan") and hit(base + "/tai-khoan?tab=1") and hit(base + "/dang-nhap"))
+        self.assertTrue(hit(base + "/quan-tri/nguoi-dung/42"))
+        self.assertFalse(hit(base + "/tai-khoan/xoa") or hit(base + "/bao-cao") or hit(base + "/quan-tri/nguoi-dung"))
+        self.set_security(zap_mode="baseline")
+        plan = json.loads(fx.zap_web_plan(self.f.ctx(), base + "/", scope, "zap.json"))
+        self.assertNotIn("activeScan", [j["type"] for j in plan["jobs"]])  # baseline only watches
+
+    def test_a_route_with_a_parameter_is_one_node(self):
+        base = "http://h:1"
+        ddn = fx.zap_ddn(base, ["POST /quan-tri/nguoi-dung/{user}/khoa", "POST /quan-tri/nguoi-dung/{user}",
+                                "GET /tai-khoan", "GET /{slug}"],
+                         ["GET /quan-tri/nguoi-dung/tao-moi", "GET /quan-tri/nguoi-dung", "GET /bao-cao/{id}"])
+        self.assertEqual(len(ddn), 1)  # one per place, none at the root, none for a route the change does not reach
+        rx = re.compile(ddn[0]["regex"])
+        m = rx.search(base + "/quan-tri/nguoi-dung/42/khoa?x=1")
+        self.assertEqual((m.group(1), m.group(2), m.group(3)), ("quan-tri/nguoi-dung/", "42", "/khoa"))
+        self.assertEqual(rx.search(base + "/quan-tri/nguoi-dung/7").group(3), "")
+        self.assertIsNone(rx.search(base + "/quan-tri/nguoi-dung/tao-moi"))  # a page of its own keeps its node
+        self.assertIsNotNone(rx.search(base + "/quan-tri/nguoi-dung/tao-moi-2"))
+        self.assertTrue(re.fullmatch(r"[A-Za-z0-9_]+", ddn[0]["name"]))
+        self.assertEqual(fx.zap_ddn(base, ["GET /me", "POST /dang-nhap"]), [])
+
+    def test_the_attack_of_a_cut_scan_is_short(self):
+        self.set_security(zap_mode="full", zap_minutes=30)
+        self.assertEqual(fx.zap_affected_minutes(self.f.ctx()), fx.ZAP_AFFECTED_MINUTES)
+        self.set_security(zap_mode="full", zap_minutes=30, zap_affected_minutes=7)
+        self.assertEqual(fx.zap_affected_minutes(self.f.ctx()), 7)
+        self.set_security(zap_mode="full", zap_minutes=2)
+        self.assertEqual(fx.zap_affected_minutes(self.f.ctx()), 2)  # never longer than a whole scan
+
+    def test_only_pages_are_where_the_scan_begins(self):
+        tech = {"requests": {"GET /du-an/{project}": {"own": {"project": 5}}}}
+        self.assertEqual(fx.zap_start_paths(["POST /dang-xuat", "GET /tai-khoan", "GET /du-an/{project}",
+                                             "GET /bao-cao/{id}"], tech), ["/du-an/5", "/tai-khoan"])
+
+    def test_zap_that_does_not_end_after_its_plan_is_stopped(self):
+        pidf = os.path.join(self.tmp, "zap.pid")
+        cmd = ["sh", "-c", "echo $$ > %s; echo 'Job report finished'; echo 'Automation plan succeeded!'; exec sleep 60"
+               % pidf]
+        stopped = []
+
+        def stop(argv, timeout=20, env=None):
+            stopped.append(argv)
+            os.kill(int(open(pidf).read()), 9)
+            return ""
+        t0 = time.time()
+        with mock.patch.object(fx, "ZAP_EXIT_GRACE", 1), mock.patch.object(fx, "try_out", side_effect=stop):
+            r = fx.zap_plan_run(cmd, "fx-zap-x", None, 120)
+        self.assertLess(time.time() - t0, 20)
+        self.assertEqual(stopped[0][:2], ["docker", "stop"])
+        self.assertIn("fx-zap-x", stopped[0])
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("Automation plan succeeded!", r.stdout)
+        self.assertIn("its container was stopped", r.stdout)
+        r = fx.zap_plan_run(["sh", "-c", "echo hi; exit 3"], "fx-zap-y", None, 60)  # one that ends is left alone
+        self.assertEqual((r.returncode, r.stdout), (3, "hi\n"))
+        with self.assertRaises(subprocess.TimeoutExpired):
+            fx.zap_plan_run(["sleep", "30"], "fx-zap-z", None, 1)
+
+    def test_a_cut_scan_is_not_reused_for_a_full_one(self):
+        ctx, job = self.f.ctx(), self.f.job()
+        cut = {"kind": "affected", "web_routes": ["GET /me"], "api_routes": {"GET /me"}}
+        other = dict(cut, web_routes=["GET /me", "POST /me"], api_routes={"GET /me", "POST /me"})
+        full = {"kind": "full", "why": "fx gate --full"}
+        mark = lambda sc: fx.zap_scan_mark(ctx, job, sc)
+        self.assertNotEqual(mark(cut), mark(full))
+        self.assertNotEqual(mark(cut), mark(other))
+        self.assertEqual(mark(cut), mark(dict(cut)))
+        self.assertEqual(mark(full), mark({"kind": "full", "why": "another reason"}))
+        self.assertEqual(mark(None), fx.zap_scan_mark(ctx, job))
+
+    def test_the_browser_crawl_can_be_turned_off(self):
+        scope = {"web_routes": ["GET /tai-khoan"], "starts": ["/tai-khoan"]}
+        self.set_security(zap_mode="full", zap_ajax_minutes=0)
+        plan = json.loads(fx.zap_web_plan(self.f.ctx(), "http://h:1/", scope, "zap.json"))
+        self.assertNotIn("spiderAjax", [j["type"] for j in plan["jobs"]])
+        self.set_security(zap_mode="full", zap_ajax_minutes=2)
+        plan = json.loads(fx.zap_web_plan(self.f.ctx(), "http://h:1/", scope, "zap.json"))
+        self.assertEqual([j for j in plan["jobs"] if j["type"] == "spiderAjax"][0]["parameters"]["maxDuration"], 2)
+
+    def test_the_web_scan_runs_the_plan_with_init(self):
+        self.set_security(zap_mode="full")
+        rdir = os.path.join(self.tmp, "zap-web")
+        notes = []
+        fx.scan_zap(self.f.ctx(), self.f.job(), "http://127.0.0.1:5100/", rdir, notes=notes,
+                    web={"web_routes": ["GET /me"], "starts": ["/me"], "total": 40})
+        run_ = [c["argv"] for c in self.f.calls("docker") if "run" in c["argv"][:1]][-1]
+        self.assertIn("--init", run_)
+        self.assertIn("/zap/wrk/zap-plan.yaml", run_)
+        self.assertNotIn("-J", run_)  # the plan names its report
+        self.assertTrue(os.path.exists(os.path.join(rdir, "zap-plan.yaml")))
+        self.assertTrue(any("attacked 1 of 40 routes" in n for n in notes), notes)
+
+    def test_gate_full_makes_the_reach_full(self):
+        with mock.patch.dict(os.environ, {"FX_SCAN_FULL": "1"}):
+            self.assertEqual(fx.change_reach(self.f.ctx(), self.f.job())["kind"], "full")
+
+    def test_a_change_that_reaches_no_code_is_not_scanned_and_misses_nothing(self):
+        self.set_security(required=["zap"])
+        called = []
+        with mock.patch.object(fx, "scan_headers", lambda c, j, u: ([], None)), \
+                mock.patch.object(fx, "scan_zap", lambda *a, **k: called.append(1) or ([], None)), \
+                mock.patch.object(fx, "docker_running", return_value=True):
+            res = fx.run_security(self.f.ctx(), self.f.job(), self.tmp, "http://127.0.0.1:5100/",
+                                  scope={"skip": "the job changes no code the app runs (only tests)"})
+        self.assertEqual(called, [])
+        self.assertIn("zap", res["ran"])
+        self.assertFalse([r for r in res["required_failed"] if r.startswith("zap")], res["required_failed"])
+        self.assertTrue(any("zap: not run: the job changes no code" in n for n in res["notes"]), res["notes"])
+
+    def test_the_api_scan_reads_the_cut_description(self):
+        self.set_security(zap_openapi="/openapi.json")
+        spec = json.dumps(self.SPEC).encode()
+
+        class Spec:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return spec
+        rdir = os.path.join(self.tmp, "zap")
+        with mock.patch.object(fx.urllib.request, "urlopen", lambda url, timeout=None: Spec()):
+            found, err = fx.scan_zap(self.f.ctx(), self.f.job(), "http://127.0.0.1:5100/", rdir, notes=[],
+                                     api_routes={"GET /api/projects/{id}"})
+        self.assertIsNone(err)
+        self.assertEqual(sorted(load_json(os.path.join(rdir, "openapi-scope.json"))["paths"]), ["/projects/{project}"])
+        api = [c["argv"] for c in self.f.calls("docker") if "zap-api-scan.py" in " ".join(c["argv"])]
+        self.assertTrue(api and "/zap/wrk/openapi-scope.json" in api[0], api)
+        notes = []
+        with mock.patch.object(fx.urllib.request, "urlopen", lambda url, timeout=None: Spec()):
+            fx.scan_zap(self.f.ctx(), self.f.job(), "http://127.0.0.1:5100/", rdir, notes=notes,
+                        api_routes={"GET /reports"})
+        self.assertTrue(any("API scan covers every route" in n for n in notes), notes)  # fx could not map them
+        notes = []
+        with mock.patch.object(fx.urllib.request, "urlopen", lambda url, timeout=None: Spec()):
+            fx.scan_zap(self.f.ctx(), self.f.job(), "http://127.0.0.1:5100/", rdir, notes=notes, api_routes=set())
+        self.assertTrue(any("API scan did not run: the job's change reaches no route" in n for n in notes), notes)
+
+
 class NewPageSameOldFindingTest(CoverageCase):
     cfg = {"app": {"up": "true"}, "security": {"required": [], "scanners": {"headers": False}}}
     CSRF = {"rule": "zap-10202", "message": "Absence of Anti-CSRF Tokens", "severity": "medium"}
@@ -1503,18 +1717,26 @@ class SameLibraryInAnotherBundleTest(CoverageCase):
 class LoginAddedAfterTheBaselineTest(CoverageCase):
     cfg = {"app": {"up": "true"}, "security": {"required": [], "scanners": {"headers": False}}}
 
-    def test_a_job_that_only_changes_docs_is_not_blocked(self):
+    def gate_after_a_login_was_added(self, change):
         write(os.path.join(self.f.factory, "baseline.json"),
               json.dumps({"security": {"zap": []}, "security_scan": {"zap": fx.scan_signature(self.f.ctx(), "zap")}}))
         cfg = load_json(os.path.join(self.f.factory, "factory.json"))
         cfg["security"]["zap_auth"] = {"command": "echo x"}
         write(os.path.join(self.f.factory, "factory.json"), json.dumps(cfg))
-        self.f.commit({"docs.md": "docs\n"})
+        self.f.commit(change)
         old = {"tool": "zap", "severity": "medium", "rule": "zap-10202", "location": "http://h/account",
                "message": "Absence of Anti-CSRF Tokens", "paths": ["/account"]}
         with mock.patch.object(fx, "app_start", return_value={"url": "http://127.0.0.1:5100/"}), \
                 mock.patch.object(fx, "app_stop"), mock.patch.object(fx, "scan_zap", lambda *a, **k: ([old], None)):
-            code, res = self.gate()
+            return self.gate()[1]
+
+    def test_a_job_that_only_changes_docs_is_not_blocked(self):
+        res = self.gate_after_a_login_was_added({"docs.md": "docs\n"})
+        self.assertEqual(res["gate"], "PASS", self.checks_md())
+        self.assertTrue(any("zap: not run: the job changes no code" in n for n in res["notes"]), res["notes"])
+
+    def test_old_findings_the_new_login_shows_do_not_block_a_change_of_code(self):
+        res = self.gate_after_a_login_was_added({"page.py": "x = 2\n"})
         self.assertEqual(res["gate"], "PASS", self.checks_md())
         self.assertTrue(any("run fx selftest" in n for n in res["notes"]), res["notes"])
 

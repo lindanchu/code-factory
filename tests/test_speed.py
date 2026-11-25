@@ -949,7 +949,7 @@ class MachineShortTest(ChecksCase):
         self.assertEqual((code, res["gate"], res["rounds_left"]), (0, "FAIL", 2), res)
         self.assertNotIn("machine_short", self.f.job())
 
-    def test_the_vm_out_of_memory_is_not_run_again_and_names_its_size(self):
+    def test_the_vm_out_of_memory_is_not_run_again_and_asks_for_a_size(self):
         self.report(pw_failure(1, "Error: page.goto: net::ERR_CONNECTION_REFUSED"))  # not a crash: the app was killed
         kills = [{"at": "2026-11-24T10:01:02", "process": "chrome-headless"},
                  {"at": "2026-11-24T10:02:00", "process": "chrome-headless"}]
@@ -957,18 +957,19 @@ class MachineShortTest(ChecksCase):
             for p in self.in_a_vm(kills):
                 st.enter_context(p)
             code, res = self.gate()
-            self.assertEqual((code, res.get("void"), res.get("next")), (3, True, "stop"), res)
+            self.assertEqual((code, res.get("void"), res.get("next")), (3, True, "ask-size"), res)
             self.assertEqual(self.times_run(), 1)  # no second run in a VM short of memory
             self.assertIn("its kernel killed chrome-headless (2 times)", res["error"])
-            self.assertIn("The sandbox VM has 6 GiB of memory (this machine 24.0 GiB)", res["error"])
-            self.assertIn("sandbox install --memory 12", res["error"])
+            self.assertIn("The sandbox VM has 6 GiB of memory (this machine 24.0 GiB); fx suggests 9 GiB", res["error"])
+            self.assertIn("1 ran out of memory (at 6 GiB)", res["error"])
+            self.assertIn("Ask the person how much the VM may have", res["error"])
             self.assertEqual(self.f.job()["machine_short"][0]["memory_gib"], 6)
         with contextlib.ExitStack() as st:  # the person gave it more: the same commit is put aside once more
             for p in self.in_a_vm(kills, mem_gib=12):
                 st.enter_context(p)
             code, res = self.gate()
             self.assertEqual((code, res.get("void")), (3, True), res)
-            self.assertIn("--memory 16", res["error"])
+            self.assertIn("fx suggests 18 GiB", res["error"])  # it ran out at 12 as well
 
     def test_the_kernel_log_reads_only_the_vms_own_shortage(self):
         with mock.patch.object(fx, "vm_run", return_value=subprocess.CompletedProcess([], 0, OOM_LOG.encode(), b"")):
@@ -978,32 +979,209 @@ class MachineShortTest(ChecksCase):
             self.assertIsNone(fx.vm_oom_kills(time.time()))
 
 
+class Issue8Test(FxTestCase):
+    """#8: the stack's own services stay out of the box's proxy, a failed service's output reaches setup.log, and a
+    second freeze of the same factory commit does not copy a file onto itself."""
+
+    def test_the_stacks_services_are_left_out_of_the_proxy(self):
+        write(os.path.join(self.f.factory, "stack", "docker", "compose.yml"),
+              "services:\n  app:\n    image: x\n    hostname: web-app\n  minio:\n    image: m\n"
+              "  minio-init:\n    image: mc\n    container_name: fx-mc\n    environment:\n      A: 1\n"
+              "volumes:\n  data: {}\n")
+        write(os.path.join(self.f.wt, "docker-compose.yml"), "version: '3'\nservices:\n    db:\n        image: pg\n")
+        names = fx.compose_service_names([self.f.factory, self.f.wt])
+        self.assertEqual(names, {"app", "web-app", "minio", "minio-init", "fx-mc", "db"})
+        box = {"no_proxy": ",".join(sorted(names)), "online": True, "proxy_ip": "10.0.0.3"}
+        env = fx.box_env(box, {})
+        self.assertIn("minio,minio-init", env["NO_PROXY"])
+        self.assertTrue(env["NO_PROXY"].startswith("localhost,127.0.0.1,::1,host.docker.internal"))
+        self.assertIn("minio-init", fx.box_client_proxy_line("10.0.0.3", fx.box_no_proxy(box)))
+
+    def test_a_failed_service_is_named_and_its_lines_kept(self):
+        died = "==== at-t-1-minio-init-1 exited 1\nmc: <ERROR> 403 Filtered\n"
+        calls = []
+
+        def vm_run(argv, **k):
+            calls.append(argv[-1].splitlines()[0])
+            out = died if "fx-box-died-collect" in argv[-1] else ""
+            return subprocess.CompletedProcess(argv, 0, out.encode(), b"")
+        box = {"name": "fxbox-x"}
+        with mock.patch.object(fx, "vm_run", vm_run), mock.patch.object(fx, "box_sync_in", return_value=None), \
+                mock.patch.object(fx, "box_sync_out"), mock.patch.object(fx, "box_open"), \
+                mock.patch.object(fx, "box_cut"), mock.patch.object(fx, "job_box_keep"), \
+                mock.patch.object(fx, "box_exec", return_value=fx.BoxRun(1, "compose failed\n")):
+            r = fx.box_job_exec(self.f.ctx(), {"id": "T-1"}, box, "bash setup.sh", "/x", {}, 60, online=True)
+        self.assertEqual(calls, ["# fx-box-died-watch", "# fx-box-died-collect"])
+        self.assertIn("mc: <ERROR> 403 Filtered", r.stdout)
+        self.assertEqual(fx.died_words(r), " at-t-1-minio-init-1 exited 1 (their last lines are at the end of the log)")
+
+    def test_a_second_freeze_of_the_same_commit(self):
+        if not os.path.isdir(os.path.join(self.f.factory, ".git")):
+            sh(["git", "init", "-q"], self.f.factory)
+        ctx = self.f.ctx()
+        write(os.path.join(self.f.factory, "qa", "ui-qa", "baselines.lock.json"), "{}\n")
+        sh(["git", "add", "-A"], self.f.factory)
+        sh(["git", "commit", "-qm", "qa"], self.f.factory)
+        head = sh(["git", "rev-parse", "HEAD"], self.f.factory).strip()
+        with mock.patch.object(fx, "baselines_config", return_value={"repo": "factory",
+                                                                     "manifest": "qa/ui-qa/baselines.lock.json"}), \
+                mock.patch.object(fx, "lane_folders", return_value=[("qa", "qa")]), \
+                mock.patch.dict(os.environ, {"FACTORY_NO_FREEZE": ""}):
+            fx.factory_freeze(ctx, head)
+            snap = ctx._frozen
+            self.assertTrue(os.path.islink(os.path.join(snap, "qa")))
+            fx.factory_freeze(self.f.ctx(), head)  # raised SameFileError before
+        self.assertEqual(ctx._frozen, snap)
+
+
 class SandboxSizeTest(FxTestCase):
-    def machine(self, gib, cpus=8):
-        return [mock.patch.object(fx, "meter_host", return_value={"total_mb": gib * 1024.0}),
-                mock.patch.object(fx.os, "cpu_count", return_value=cpus)]
+    """The VM's size: the person's answer the first time, then what fx measured suggests (#6)."""
 
-    def size(self, gib, ncpu=8, **kw):
-        with contextlib.ExitStack() as st:
-            for p in self.machine(gib, ncpu):
-                st.enter_context(p)
-            return fx.sandbox_size(**kw)
+    def on(self, gib, ncpu=8):
+        st = contextlib.ExitStack()
+        st.enter_context(mock.patch.object(fx, "meter_host", return_value={"total_mb": gib * 1024.0}))
+        st.enter_context(mock.patch.object(fx.os, "cpu_count", return_value=ncpu))
+        self.addCleanup(st.close)
 
-    def test_a_share_of_the_machine_never_less_than_before(self):
-        self.assertEqual((self.size(24)["memory_gib"], self.size(24)["cpus"]), (12, 4))
-        self.assertEqual(self.size(64, 16)["memory_gib"], 32)
-        self.assertEqual((self.size(8)["memory_gib"], self.size(8, 2)["cpus"]), (6, 2))
-        self.assertEqual(self.size(0)["memory_gib"], 6)  # a machine that does not say
+    def used(self, *rows):
+        for r in rows:
+            fx.sandbox_usage_add(dict({"at": fx.now(), "ts": time.time(), "what": "bash checks.sh", "vm_gib": 6,
+                                       "peak_load": 2.0, "vm_cpus": 4, "oom": 0}, **r))
 
-    def test_the_persons_size_is_kept(self):
-        self.assertEqual(self.size(24, memory=16)["by"], "you")
-        got = self.size(24)
-        self.assertEqual((got["memory_gib"], got["cpus"], got["by"]), (16, 4, "you"))  # cpus: still the share
-        self.assertEqual(self.size(24, cpus=6)["memory_gib"], 16)
+    def test_before_anything_was_measured_it_suggests_half_and_asks(self):
+        self.on(24)
+        offer = fx.sandbox_size_offer()
+        self.assertEqual((offer["suggest"]["memory_gib"], offer["suggest"]["cpus"]), (12, 4))
+        self.assertIn("nothing was measured", offer["suggest"]["why"])
+        self.assertEqual(offer["change"], "no size was chosen for the VM on this machine yet")
+        self.assertEqual(offer["options"][0]["memory_gib"], 12)
+        self.assertEqual(offer["most_gib"], 20)  # it always leaves the machine 4 GiB
+        self.on(8)  # the machine keeps its 4 GiB: less than the 6 the VM had, and said so
+        sug = fx.sandbox_size_offer()["suggest"]
+        self.assertEqual(sug["memory_gib"], 4)
+        self.assertIn("at most 4 GiB", sug["why"])
+
+    def test_the_first_install_asks_and_makes_no_vm(self):
+        self.on(24)
+        with mock.patch.object(fx, "sandbox_kvm", return_value=""):
+            code, res = self.fx("sandbox", "install")
+        self.assertEqual((code, res["next"], res["suggest"]["memory_gib"]), (2, "ask-size", 12), res)
+        self.assertFalse([c for c in self.f.calls("limactl") if c["argv"][:1] in (["create"], ["start"])])
+        with mock.patch.object(fx, "sandbox_kvm", return_value=""):
+            code, res = self.fx("sandbox", "install", "--memory", "10", "--cpus", "4")
+        self.assertEqual((code, res["ok"], res["size_chosen"]["memory_gib"]), (0, True, 10), res)
+        with mock.patch.object(fx, "sandbox_kvm", return_value=""):  # kept: no question the next time
+            code, res = self.fx("sandbox", "reset")
+        self.assertEqual((code, res["size_chosen"]["memory_gib"], res["size_chosen"]["cpus"]), (0, 10, 4), res)
+
+    def test_the_answer_is_checked_and_kept(self):
+        self.on(24)
+        self.assertEqual(fx.sandbox_choose(memory=16)["cpus"], 4)  # what was not said: the suggestion
+        self.assertEqual((fx.sandbox_chosen()["memory_gib"], fx.sandbox_chosen()["cpus"]), (16, 4))
+        self.assertEqual(fx.sandbox_choose(cpus=6)["memory_gib"], 16)  # what was said before stays
         with self.assertRaises(fx.FxError):
-            self.size(24, memory=23)
+            fx.sandbox_choose(memory=23)
         with self.assertRaises(fx.FxError):
-            self.size(24, cpus=9)
+            fx.sandbox_choose(cpus=9)
+
+    def test_it_suggests_what_was_measured_and_a_quarter_more(self):
+        self.on(24)
+        fx.sandbox_choose(memory=6, cpus=4)
+        self.used({"peak_gib": 5.1}, {"peak_gib": 7.2})
+        offer = fx.sandbox_size_offer({"memory_gib": 6, "cpus": 4})
+        self.assertEqual(offer["suggest"]["memory_gib"], 9)  # 7.2 and a quarter
+        self.assertIn("over 2 commands measured", offer["suggest"]["why"])
+        self.assertIn("needs more than the VM has", offer["change"])
+        self.assertEqual([o["memory_gib"] for o in offer["options"]], [9, 6, 14])
+
+    def test_a_vm_that_ran_out_of_memory_gets_half_again(self):
+        self.on(24)
+        fx.sandbox_choose(memory=6, cpus=4)
+        self.used({"peak_gib": 5.9, "oom": 3}, {"peak_gib": 4.0})
+        offer = fx.sandbox_size_offer({"memory_gib": 6, "cpus": 4})
+        self.assertEqual(offer["suggest"]["memory_gib"], 9)
+        self.assertIn("1 ran out of memory (at 6 GiB)", offer["suggest"]["why"])
+
+    def test_a_vm_much_bigger_than_it_needs_may_give_memory_back(self):
+        self.on(32)
+        fx.sandbox_choose(memory=16, cpus=4)
+        self.used(*[{"peak_gib": 3.0, "vm_gib": 16}] * 20)
+        offer = fx.sandbox_size_offer({"memory_gib": 16, "cpus": 4})
+        self.assertEqual(offer["suggest"]["memory_gib"], 6)
+        self.assertIn("could have the rest back", offer["change"])
+        self.assertIsNone(fx.sandbox_size_offer({"memory_gib": 9, "cpus": 4})["change"])  # not that much bigger
+
+    def test_a_machine_too_small_for_it_says_so(self):
+        self.on(10)
+        fx.sandbox_choose(memory=6, cpus=4)
+        self.used({"peak_gib": 7.9, "oom": 1})
+        sug = fx.sandbox_size_offer({"memory_gib": 6, "cpus": 4})["suggest"]
+        self.assertEqual(sug["memory_gib"], 6)
+        self.assertIn("at most 6 GiB", sug["why"])
+
+    def test_what_runs_outside_the_vm_is_left_to_the_machine(self):
+        """A mobile app's phones and build run on this machine itself: the VM's suggestion leaves them what they used."""
+        self.on(24)
+        fx.cost_learn("shop", "gate", {"host_mb": 8192.0, "docker_mb": 0.0, "cpu": 1.0}, 600)
+        fx.sandbox_choose(memory=6, cpus=4)
+        self.used({"peak_gib": 12.0})
+        offer = fx.sandbox_size_offer({"memory_gib": 6, "cpus": 4})
+        self.assertEqual((offer["outside_the_vm_gib"], offer["machine_keeps_gib"], offer["most_gib"]), (8.0, 12, 12))
+        self.assertEqual(offer["suggest"]["memory_gib"], 12)
+        self.assertIn("virtual phones or an app's build, used up to 8.0 GiB", offer["suggest"]["why"])
+
+    def test_a_busy_vm_gets_more_cpus(self):
+        self.on(24, ncpu=12)
+        fx.sandbox_choose(memory=8, cpus=4)
+        self.used({"peak_gib": 4.0, "peak_load": 7.5})
+        self.assertEqual(fx.sandbox_size_offer({"memory_gib": 8, "cpus": 4})["suggest"]["cpus"], 8)
+
+    def test_the_watch_keeps_the_peak_of_the_whole_vm(self):
+        w = fx.VmWatch({"name": "fxbox-a-T-1"}, fx.command_label("bash /home/me/shop-factory/checks.sh --all"))
+        for line in ("6000000 4000000 1.5 4\n", "6000000 900000 3.25 4\n", "garbage\n", "6000000 2000000 2.0 4\n"):
+            w.take(line)
+        with mock.patch.object(fx, "vm_oom_kills", return_value=[{"at": "t", "process": "chrome"}]) as kills:
+            got = w.stop(1)
+        kills.assert_called_once()
+        self.assertEqual((got["peak_gib"], got["vm_gib"], got["peak_load"], got["oom"], got["what"]),
+                         (4.86, 6, 3.25, 1, "bash checks.sh --all"))  # no folder of the project in the history
+        self.assertEqual(fx.sandbox_usage()[-1]["peak_gib"], 4.86)
+        self.assertIsNone(fx.VmWatch({"name": "b"}, "x").stop(0))  # a command too short to be measured
+
+    def test_the_watch_ends_limactl_and_what_it_started(self):
+        """limactl shell runs ssh as a child: ending limactl alone left it holding the pipe for 10 s, and the loop on."""
+        bin_ = os.path.join(self.tmp, "watchbin")
+        os.makedirs(bin_)
+        marker = os.path.join(self.tmp, "child-alive")
+        write(os.path.join(bin_, "limactl"), "#!/bin/sh\n# like limactl: the command runs in a child it waits for\n"
+              "sh -c 'trap \"\" TERM; while :; do echo \"6000000 1000000 1.0 4\"; touch %s; sleep 0.2; done' \n"
+              % marker)
+        os.chmod(os.path.join(bin_, "limactl"), 0o755)
+        with mock.patch.dict(os.environ, {"PATH": bin_ + os.pathsep + os.environ["PATH"], "FACTORY_VM_WATCH": "1",
+                                          "FACTORY_VM_WATCH_AFTER": "0"}):
+            w = fx.VmWatch({"name": "b"}, "x").start()
+            deadline = time.time() + 10
+            while not w.samples and time.time() < deadline:
+                time.sleep(0.1)
+            t0 = time.time()
+            got = w.stop(0)
+        self.assertLess(time.time() - t0, 6)
+        self.assertEqual(got["peak_gib"], 4.77)
+        os.remove(marker)
+        time.sleep(0.6)
+        self.assertFalse(os.path.exists(marker))  # the loop ended with it
+        with mock.patch.dict(os.environ, {"FACTORY_VM_WATCH": "0", "FACTORY_FAKE_MACHINE": ""}):
+            self.assertIsNone(fx.VmWatch({"name": "b"}, "x").start().thread)  # turned off
+
+    def test_a_size_kept_by_3_12_and_a_vm_grown_by_hand(self):
+        self.on(24)
+        write(fx.sandbox_size_path(), json.dumps({"memory_gib": 14}))  # 3.12.0 kept only what was passed
+        self.assertEqual((fx.sandbox_chosen()["memory_gib"], fx.sandbox_chosen()["cpus"]), (14, 4))
+        self.assertEqual(fx.sandbox_choose(cpus=6)["memory_gib"], 14)
+        res, calls = self.resize(20, {"memory_gib": 14, "cpus": 4}, asked=False)  # grown by hand: left as it is
+        self.assertEqual((res, calls), (None, []))
+        res, calls = self.resize(6, {"memory_gib": 14, "cpus": 4}, asked=False)  # smaller than chosen: grown
+        self.assertEqual(res["resized"]["to"]["memory_gib"], 14)
 
     def test_the_template_gets_the_size(self):
         text = slurp(fx.sandbox_template({"memory_gib": 12, "cpus": 6}))
@@ -1011,7 +1189,7 @@ class SandboxSizeTest(FxTestCase):
         self.assertIn("\ncpus: 6\n", text)
         self.assertNotIn("6GiB", text)
 
-    def resize(self, has_gib, want, asked=False, restart=False, boxes=()):
+    def resize(self, has_gib, want, restart=False, boxes=(), asked=True):
         calls = []
 
         def run(argv, *a, **k):
@@ -1021,20 +1199,19 @@ class SandboxSizeTest(FxTestCase):
                                                                    "cpus": 4}), \
                 mock.patch.object(fx, "sandbox_running_boxes", return_value=list(boxes)), \
                 mock.patch.object(fx.subprocess, "run", run):
-            return fx.sandbox_resize(dict(want, by="you"), asked, restart), calls
+            return fx.sandbox_resize(want, restart, asked), calls
 
-    def test_install_grows_a_small_vm_and_never_shrinks_one_unasked(self):
+    def test_install_gives_the_vm_the_chosen_size(self):
         res, calls = self.resize(6, {"memory_gib": 12, "cpus": 4})
         self.assertEqual(res["resized"]["to"], {"memory_gib": 12, "cpus": 4})
         self.assertEqual([c[:2] for c in calls], [["limactl", "stop"], ["limactl", "edit"]])
-        self.assertIn("--memory", calls[1])
-        self.assertEqual(self.resize(16, {"memory_gib": 12, "cpus": 4}), (None, []))
-        res, calls = self.resize(16, {"memory_gib": 12, "cpus": 4}, asked=True)
+        self.assertEqual(self.resize(12, {"memory_gib": 12, "cpus": 4}), (None, []))
+        res, calls = self.resize(16, {"memory_gib": 12, "cpus": 4})  # smaller too, since the person said so
         self.assertEqual(res["resized"]["to"]["memory_gib"], 12)
 
     def test_running_boxes_wait_for_restart(self):
         res, calls = self.resize(6, {"memory_gib": 12, "cpus": 4}, boxes=["fxbox-a-T-1"])
-        self.assertEqual((calls, res["boxes_running"]), ([], ["fxbox-a-T-1"]))
+        self.assertEqual((calls, res["boxes_running"], res["next"]), ([], ["fxbox-a-T-1"], "ask-restart"))
         self.assertIn("--restart", res["size_note"])
         res, calls = self.resize(6, {"memory_gib": 12, "cpus": 4}, restart=True, boxes=["fxbox-a-T-1"])
         self.assertEqual(res["boxes_stopped"], ["fxbox-a-T-1"])

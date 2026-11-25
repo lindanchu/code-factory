@@ -220,7 +220,7 @@ such limit is read by the code from an environment variable, and the job's test 
 
 **A route the wrong user can call.** The permission table says, for every route of the app, which kind of user may
 call it: not logged in, each role, an API key, and whether only on its own data. In every gate fx logs in as each of
-them on the job's own test stack and calls every route, reads and writes:
+them on the job's own test stack and calls the routes the job's change can reach, reads and writes:
 
 - A refused call must look like a refusal and leave the data as it was (fx compares a fingerprint of the database
   before and after); a refused id must answer exactly like an id that exists nowhere, so nobody learns what exists;
@@ -234,6 +234,15 @@ them on the job's own test stack and calls every route, reads and writes:
   route it adds without a row waits for its rows, which come from the ticket or from you, never from the builder.
   What the base branch already gets wrong stops no job but one that touches that route: you hear of it at once and
   its fix task runs first.
+- Which rows a gate calls: the rows the job changes or adds, the routes the base branch did not have, and the routes
+  whose handler is a file the job changed or a file that uses one (followed by name, two steps; a config file by the
+  keys it changed, such as `config('mail.from.address')`; a class also by the project's own interfaces it implements,
+  which a provider binds and a controller asks for). A change to a layer every route goes through, or to code
+  such a layer uses (middleware, auth, policies, route files, providers, sessions, the dependencies; your own list in
+  `permissions.full_paths`), calls the whole table, and so does `permissions.scope: "full"` or `FX_PERM_FULL=1`. The rows not called neither pass nor fail; `permissions.md`, the gate and the pull request say
+  which were called and why. `fx selftest` and `fx permissions try <job>` always call the whole table. Reads are
+  called for several users at once (`permissions.parallel`), writes one at a time. An answer 429 (too many calls)
+  is called again after waiting, and if it stays it is noted as not checked, never as a wrong permission.
 - No job starts until the table is confirmed and run on the base branch. It costs no tokens, a few minutes of each
   gate. Nothing turns this off.
 
@@ -634,20 +643,17 @@ enforces itself, not one a setting has to remember:
   install`). It mounts nothing of this machine and has its own Docker, never this machine's. It is set
   up once per machine; after the machine (or WSL) restarts, the next review or job starts it again (a job
   keeps its box and what it installed).
-  - Its size: half of this machine's memory and CPUs, never less than 6 GiB and 4 CPUs, and always 4 GiB
-    left to the machine. `fx sandbox install --memory <GiB> --cpus <n>` (or `reset`) sets your own,
-    kept on this machine for every later install and reset. `fx sandbox install` gives a VM smaller than
-    that its size (it restarts the VM: with jobs' boxes running, only with `--restart`; they start again
-    at their next command) and never shrinks one unasked. `fx sandbox status` shows both sizes.
-  - macOS: `brew install lima`.
-  - Linux and Windows (in WSL2, which has the nested virtualization it needs on Windows 11): QEMU
-    (`sudo apt-get install -y qemu-system-x86 qemu-utils`), Lima from its
-    [releases](https://github.com/lima-vm/lima/releases) (`sudo tar -C /usr/local -xzf
-    lima-<version>-Linux-x86_64.tar.gz`), and `sudo usermod -aG kvm $USER`, then a new terminal (WSL:
-    `wsl --shutdown` first). No `/dev/kvm` in WSL: `nestedVirtualization=true` under `[wsl2]` in
-    `%UserProfile%\.wslconfig`. Tried on Windows 11 with Lima 2.3.0: set up in about five minutes, and
-    the app's ports in the VM reach both WSL's and Windows' `127.0.0.1`, so a desktop app's real build
-    on Windows calls the API in its box.
+  - Its size is yours to say. The first `fx sandbox install` asks (`next: ask-size`) how much memory
+    and how many CPUs it may have, with what fx suggests; your answer (`fx sandbox install --memory
+    <GiB> --cpus <n>`) is kept on this machine for every later install and reset. From then on fx
+    measures what the whole VM uses while each command of a box runs (any that runs over 15 seconds),
+    and suggests a size from that history: the most it used and a quarter more, half again a size that
+    ran out of memory, more CPUs when its load stayed above them, and less when it never used half.
+    It leaves this machine what the factory's own steps there were measured to use (a mobile app's
+    build and virtual phones) and at least 4 GiB. The suggestion is put to you when a gate ran out
+    of memory, in `fx sandbox status` and in `fx doctor`; `fx sandbox size` shows it with the
+    history. The VM's size changes only on your answer (it restarts the VM: with jobs' boxes
+    running, only with `--restart`).
 - Inside it, each review is its own box (a Sysbox container) with its own files, Docker (so a compose
   stack works as it does here), database, volumes and network, deleted when the review ends. Boxes do
   not see each other and share no writable cache. The clone and the factory's scripts are copied in at
@@ -1231,22 +1237,78 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
 - Run `/auto-factory:code init` once more: it adds the rules that send the agents' project commands
   through `fx run --job`.
 - The VM's memory: one box per job at once (and per candidate or package). Its 6 GB held three small web
-  jobs at once with room to spare (above); since 3.12 it takes a share of the machine, and
-  `fx sandbox install --memory <GiB>` sets it (below).
+  jobs at once with room to spare (above); since 3.13 you choose it, from what fx measured (below).
 
-### Upgrading to 3.12.0: a sandbox VM sized to the machine, rounds the machine was too small for
+### Upgrading to 3.13.0: the sandbox's size is yours, suggested from what it used
+
+- 3.12.0 gave the VM half of the machine by itself. Now no size is picked for you: run `fx sandbox install` once
+  (or `/auto-factory:code install`); it asks how much memory and how many CPUs the VM may have (`next: ask-size`),
+  with fx's suggestion, and keeps your answer. fx then measures what the VM uses and suggests a new size when it
+  needs more (or could give some back): when a gate ran out of memory (`next: ask-size`), in `fx sandbox status`
+  and in `fx doctor`. `fx sandbox size` shows the suggestion and the history (`sandbox-usage.jsonl` in fx's state
+  folder); `FACTORY_VM_WATCH=0` turns the measuring off. A mobile app's phones and build and a desktop app's real
+  Windows build run outside the VM; the suggestion leaves this machine what they were measured to use.
+
+### Upgrading to 3.13.0: a gate's permission scan calls what the job can reach
+
+- A gate called every cell of the permission table in every round (461 on one project, over an hour). It now calls
+  only the rows the job's change can reach, and the whole table when the change touches a layer every route goes
+  through (above). The scope is in `permissions.md`, `permissions.json`, the gate's summary and the pull request.
+  `fx permissions try <job>` (on the job's running app) and `fx selftest` (on the base branch) call it all, whenever
+  you choose; `fx audit-scan --base <branch>` runs ZAP over a whole branch.
+- With `app.limits_env: "file"`, fx looked for `$FACTORY_LIMITS_ENV` in every file of the factory folder before each
+  command of the app, ignored test output included (2.7 GB of screenshots on one project): it reads only the files
+  git has, once per command of fx while they are unchanged.
+- The reads of the table are called for several users at once (`permissions.parallel`, 4 by default); a 429 is
+  called again after waiting, then noted as not checked.
+- ZAP from WSL with Docker Desktop reaches the job's app through `host.docker.internal`: it fell back to the host
+  network there, which is Docker Desktop's own VM, and scanned nothing.
+- ZAP did the same: the whole app in every round (about 31 minutes a gate on one project, for a job that changed only
+  a config file). Now it scans what the job's change reaches, the routes the permission scan found:
+  - the web scan runs an Automation Framework plan (`zap/zap-plan.yaml`): the classic spider over the whole app, the
+    passive rules on all it saw, and the attack (`zap_mode: full`) only inside those routes, from their pages (their
+    ids from the permission table's requests). A route with a parameter is one target, not one per row the crawl
+    found (`/users/{user}/lock` was 300 targets with 300 users); the attack runs at low strength and stops after
+    `security.zap_affected_minutes` (6 by default). A browser crawl of those routes is off
+    (`security.zap_ajax_minutes`: give a single-page app 2 or 3). A ZAP that has not ended 30 seconds after its
+    plan said it was over is stopped (it once waited half an hour with its report written);
+  - the API scan reads the OpenAPI description cut down to them (`zap/openapi-scope.json`); when none of them is in
+    it as fx reads it, the whole description;
+  - no route reached (only tests, documents, images, or code no route uses): no ZAP, and the base branch's scan
+    stands;
+  - a change to a layer every route goes through, no permission table, or `fx gate --full`: the whole app, as before.
+  `security.md` and the pull request say which, why and how many routes of how many. Measured on a copy of that
+  project, a change to the five account limits of its config file: 16 of 80 routes, and the web scan took 7 minutes
+  (a minute of spider, an attack that ended by itself after 5½ minutes) where it took about 31.
+  The scan is logged in, so it cannot attack the pages only a guest sees (the login form, a forgotten password):
+  the app sends a logged-in user away from them. That was so before, in the whole-app scan too.
+- When you want everything anyway: `fx gate <job> --full` (that round calls the whole table and ZAP scans the whole
+  app), `permissions.scope: "full"` and `security.zap_scope: "full"` (every round), or `fx permissions try <job>`
+  and `fx audit-scan` whenever you choose. A round that scanned only some routes is never taken for a whole-app scan
+  of the same commit: `--full` scans again.
+
+### Upgrading to 3.13.0: a job's stack and its box's proxy
+
+- While a job's box installs (setup), its containers had the box's proxy, which let through only the registries, so
+  a service calling another one by name (`http://minio:9000`) got `403 Filtered`. The services of the compose files of
+  the job's clones and of the factory (their names, `container_name` and `hostname`) and `host.docker.internal` are now
+  in `NO_PROXY`/`noProxy`.
+- A setup that fails says which containers ended with an error, and `setup.log` ends with their last lines and exit
+  codes, kept as they died, before compose removed them.
+- A second gate, `fx checks` or `fx pr` on a factory commit already frozen no longer stops on `SameFileError` (the
+  reference images' list copied onto itself through a lane's link).
+
+### Upgrading to 3.12.0: rounds the machine was too small for
 
 - The sandbox VM was 6 GiB and 4 CPUs on every machine. A web job's browser tests (several Playwright workers,
   full-page screenshots) beside its app, database and cache ran it out of memory: Chromium was killed and as many
-  tests as workers failed with `Target crashed`, on other pages each run. It now gets half of the machine's memory
-  and CPUs (at least 6 GiB and 4), or what `fx sandbox install|reset --memory <GiB> --cpus <n>` says, kept for every
-  later install and reset. Run `fx sandbox install` once: a VM smaller than its share is given it (with jobs'
-  boxes running, `fx sandbox install --restart`).
+  tests as workers failed with `Target crashed`, on other pages each run. 3.12.0 gave it half of the machine; since
+  3.13.0 you choose its size (above).
 - A gate whose checks script or e2e failed while the VM's kernel killed processes for memory, or whose failed
   tests are all browsers that crashed, says nothing about the code: the round does not count, no builder is sent
-  (`void: true`, `next: stop`), and fx names the VM's memory and the `fx sandbox install --memory` that gives it
-  more. A run the VM killed processes in is not run a second time as flaky. Once for a commit and a size of the
-  VM: failing so again on the same ones counts. What was seen is kept in `machine-short.json` in the round's
+  (`void: true`, `next: ask-size` since 3.13.0), and fx names the VM's memory and the size it suggests. A run the
+  VM killed processes in is not run a second time as flaky. Once for a commit and a size of the VM: failing so again
+  on the same ones counts. What was seen is kept in `machine-short.json` in the round's
   folder; `fx checks` says it too (`machine_short`). A container over its own memory limit is not counted.
 
 ### Upgrading to 3.11.2: a job checks its own limits

@@ -8,6 +8,7 @@ import http.server
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -376,6 +377,7 @@ class GateJudgeTest(unittest.TestCase):
                    mock.patch.object(fx, "perm_matrix", return_value=dict(
                        {"cells": [], "calls": 0, "seconds": 0, "unrowed": [], "stale": [], "mismatches": []}, **res)),
                    mock.patch.object(fx, "changed_files", return_value=[("M", [p]) for p in changed]),
+                   mock.patch.object(fx, "perm_scope", return_value=None),  # the scope's own tests: ScopeTest
                    mock.patch.object(fx, "write_atomic")]
         for p in patches:
             p.start()
@@ -418,6 +420,14 @@ class GateJudgeTest(unittest.TestCase):
         o = self.judge({"mismatches": [self.BAD], "routes": self.ROUTES},
                        {"mismatches": [self.BAD], "routes": self.ROUTES}, staged_rows=staged)
         self.assertEqual(len(o["void"]), 1)
+
+    def test_cells_the_app_limited_put_the_round_aside(self):
+        cell = {"route": "GET /me", "who": "viewer", "data": "any", "want": "allow", "ok": None,
+                "why": "the app answered 429 (too many calls) even after waiting"}
+        o = self.judge({"unchecked": [cell], "cells": [cell], "routes": self.ROUTES},
+                       {"mismatches": [], "routes": self.ROUTES})
+        self.assertEqual(len(o["void"]), 1)
+        self.assertIn("never judged", o["void"][0])
 
     def test_before_the_table_was_run_on_the_base_it_is_skipped(self):
         with mock.patch.object(fx, "perm_state", return_value={"confirmed": True}), \
@@ -497,6 +507,221 @@ class NoJobBeforeTheTableTest(BoxCase):
         got = json.loads(slurp(os.path.join(f, "stack", "permissions.json")))
         self.assertEqual(set(got["requests"]), {"GET /a", "POST /b"})
         self.assertFalse(os.path.exists(os.path.join(jd, "permissions.json")))
+
+
+class ScopeTest(MatrixCase):
+    """A job's round calls only the rows its change can reach (#7)."""
+
+    ACTIONS = {"GET /me": "App\\Http\\Controllers\\MeController@show",
+               "GET /projects/{id}": "App\\Http\\Controllers\\ProjectController@show",
+               "POST /admin/projects": "App\\Http\\Controllers\\Admin\\ProjectAdminController@store"}
+
+    def setUp(self):
+        super().setUp()
+        self.wt = os.path.join(self.tmp, "clone")
+        files = {"app/Http/Controllers/MeController.php": "class MeController { config('services.mail.from'); }\n",
+                 "app/Http/Controllers/ProjectController.php": "class ProjectController { InvoiceService $s; }\n",
+                 "app/Http/Controllers/Admin/ProjectAdminController.php": "class ProjectAdminController {}\n",
+                 "app/Services/InvoiceService.php": "class InvoiceService {}\n",
+                 "app/Http/Middleware/Authenticate.php": "class Authenticate { TokenService $t; }\n",
+                 "app/Services/TokenService.php": "class TokenService {}\n",
+                 "config/services.php": "<?php return ['mail' => ['from' => 'a@b', 'name' => 'x'], 'sms' => 1];\n",
+                 "config/app.php": "<?php return ['timezone' => 'UTC', 'locale' => 'en'];\n",
+                 "tests/Feature/MeTest.php": "MeController\n", "docs/api.md": "ProjectController\n"}
+        for rel, text in files.items():
+            write(os.path.join(self.wt, rel), text)
+        for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                    ["git", "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-qm", "x"]):
+            subprocess.run(cmd, cwd=self.wt, check=True)
+        self.base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, stdout=subprocess.PIPE,
+                                   text=True).stdout.strip()
+        self.view = {"id": "T-1", "worktree": self.wt, "base_ref": self.base}
+        self.jobfile = os.path.join(self.tmp, "permissions.json")
+        for p in (mock.patch.object(fx, "perm_job_file", return_value=self.jobfile),
+                  mock.patch.object(fx, "baseline_of", return_value={"permissions": {"routes": self.ACTIONS}})):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def scope(self, *changed, routes=None, staged=None, **conf):
+        class Ctx:
+            def c(self, key, default=None):
+                return conf.get(key, default)
+        with mock.patch.object(fx, "changed_files", return_value=[("M", [p]) for p in changed]):
+            fn = fx.perm_scope(Ctx(), self.view, self.view, staged or ROWS, ROWS)
+        sc = fn(routes or self.ACTIONS)
+        return sc["kind"], sorted(sc["only"]) if sc["only"] is not None else None, sc["why"]
+
+    def test_a_controller_and_what_uses_a_changed_class(self):
+        self.assertEqual(self.scope("app/Http/Controllers/MeController.php")[:2], ("affected", ["GET /me"]))
+        kind, only, why = self.scope("app/Services/InvoiceService.php")  # ProjectController uses it
+        self.assertEqual((kind, only), ("affected", ["GET /projects/{id}"]))
+        self.assertIn("1 changed file of the code, and 1 that uses them", why)
+
+    def test_tests_and_documents_reach_no_row(self):
+        kind, only, why = self.scope("tests/Feature/MeTest.php", "docs/api.md", "README.md")
+        self.assertEqual((kind, only), ("affected", []))
+        self.assertIn("only tests, documents and the like", why)
+
+    def test_a_layer_every_route_goes_through_calls_the_whole_table(self):
+        for path in ("app/Http/Middleware/Authenticate.php", "routes/web.php", "composer.lock",
+                     "app/Providers/AuthServiceProvider.php", "config/auth.php"):
+            kind, only, why = self.scope(path)
+            self.assertEqual((kind, only), ("full", None), path)
+            self.assertIn(path, why)
+        self.assertEqual(self.scope("app/Services/InvoiceService.php", **{"permissions.scope": "full"})[0], "full")
+        with mock.patch.dict(os.environ, {"FX_PERM_FULL": "1"}):
+            self.assertEqual(self.scope("docs/api.md")[0], "full")
+        self.assertEqual(self.scope("app/x.php", **{"permissions.full_paths": ["app/x.php"]})[0], "full")
+
+    def commit(self, rel, text):
+        write(os.path.join(self.wt, rel), text)
+        for cmd in (["git", "add", "-A"], ["git", "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-qm", "c"]):
+            subprocess.run(cmd, cwd=self.wt, check=True)
+
+    def test_a_config_file_is_followed_by_its_keys(self):
+        self.commit("config/services.php", "<?php return ['mail' => ['from' => 'c@d', 'name' => 'x'], 'sms' => 1];\n")
+        self.assertEqual(self.scope("config/services.php")[:2], ("affected", ["GET /me"]))  # config('services.mail.from')
+        self.commit("config/app.php", "<?php return ['timezone' => 'Asia/Ho_Chi_Minh', 'locale' => 'en'];\n")
+        kind, only, why = self.scope("config/app.php")  # nothing of the project reads app.timezone: the framework does
+        self.assertEqual((kind, only), ("full", None))
+        self.assertIn("nothing of the project reads what the job changed in config/app.php", why)
+
+    def test_what_a_shared_layer_uses_reaches_every_route(self):
+        kind, only, why = self.scope("app/Services/TokenService.php")
+        self.assertEqual((kind, only), ("full", None))
+        self.assertIn("reaches app/Http/Middleware/Authenticate.php", why)
+
+    def test_code_that_looks_like_a_test_or_a_document_is_code(self):
+        for path in ("app/Models/Contest.php", "app/Http/Controllers/Docs/PageController.php",
+                     "app/Services/Spec/Builder.php", "public/logo.svg", "app/Latest.php"):
+            self.assertFalse(fx.perm_ignored(path), path)
+        for path in ("tests/Feature/MeTest.php", "app/Models/ContestTest.php", "docs/api.md", "web/src/a.spec.ts",
+                     "packages/x/tests/helper.php", "e2e/login.ts", "README.md", "public/logo.png"):
+            self.assertTrue(fx.perm_ignored(path), path)
+
+    def test_an_entry_point_or_a_server_setting_calls_the_whole_table(self):
+        for path in ("src/main.ts", "public/.htaccess", "next.config.js", "docker/nginx/default.conf",
+                     "src/app.module.ts", "routes/web.php", "app/Providers/AppServiceProvider.php"):
+            self.assertEqual(self.scope(path)[0], "full", path)
+
+    def test_a_route_file_that_names_a_class_is_not_followed(self):
+        self.commit("routes/api.php", "Route::get('me', [MeController::class, 'show']);\n"
+                                      "Route::get('projects/{id}', [ProjectController::class, 'show']);\n")
+        self.commit("app/Providers/AppServiceProvider.php", "bind(InvoiceService::class);\n")
+        self.assertEqual(self.scope("app/Http/Controllers/MeController.php")[:2], ("affected", ["GET /me"]))
+        self.assertEqual(self.scope("app/Services/InvoiceService.php")[:2], ("affected", ["GET /projects/{id}"]))
+
+    def test_handlers_of_other_stacks(self):
+        routes = {"GET /posts/{id}": "blog.views.detail", "GET /projects/{id}": "projects#show",
+                  "GET /users/{id}": "UsersController.findOne", "GET /me": "auth_views.me"}
+        p = mock.patch.object(fx, "baseline_of", return_value={"permissions": {"routes": routes}})  # none of them new
+        p.start()
+        self.addCleanup(p.stop)
+        self.commit("blog/views.py", "def detail(): pass\n")
+        self.commit("app/controllers/projects_controller.rb", "def show; end\n")
+        self.assertEqual(self.scope("blog/views.py", routes=routes)[1], ["GET /posts/{id}"])
+        self.assertEqual(self.scope("app/controllers/projects_controller.rb", routes=routes)[1], ["GET /projects/{id}"])
+        kind, only, why = self.scope("app/Http/Controllers/MeController.php", routes={k: "" for k in routes})
+        self.assertEqual((kind, only), ("full", None))  # no handler named: fx cannot tell
+        self.assertIn("names no handler", why)
+
+    def test_short_names_are_followed_and_a_one_letter_one_calls_the_whole_table(self):
+        self.commit("app/db.php", "<?php\n")
+        self.commit("app/Http/Controllers/MeController.php", "class MeController { db::get(); }\n")
+        self.assertEqual(self.scope("app/db.php")[:2], ("affected", ["GET /me"]))
+        self.assertEqual(self.scope("app/x.php")[0], "full")
+
+    def test_a_service_bound_to_an_interface_is_followed_through_it(self):
+        """A provider binds LoginServiceInterface to LoginService and the controller asks for the interface; a login
+        service is no layer every route goes through."""
+        self.commit("app/Contracts/LoginServiceInterface.php", "interface LoginServiceInterface {}\n")
+        self.commit("app/Services/LoginService.php", "class LoginService implements LoginServiceInterface, ShouldQueue"
+                                                     " { LoginThrottle $t; }\n")
+        self.commit("app/Support/LoginThrottle.php", "class LoginThrottle {}\n")
+        self.commit("app/Providers/AppServiceProvider.php", "bind(LoginServiceInterface::class, LoginService::class);\n")
+        self.commit("app/Http/Controllers/MeController.php", "class MeController { LoginServiceInterface $l; }\n")
+        kind, only, why = self.scope("app/Support/LoginThrottle.php")
+        self.assertEqual((kind, only), ("affected", ["GET /me"]))
+        self.assertEqual(fx.project_interfaces(self.wt, ["app/Services/LoginService.php"]), {"LoginServiceInterface"})
+
+    def test_a_handler_is_its_class_not_its_namespace(self):
+        self.assertEqual(fx.handler_names("Modules\\Account\\Http\\Controllers\\ProjectAdminController@store"),
+                         {"ProjectAdminController", "ProjectAdmin"})
+        self.assertEqual(fx.handler_names("App\\Http\\Controllers\\MeController"), {"MeController", "Me"})
+        self.assertEqual(fx.handler_names("app.api.endpoints.users.read_user"), {"users"})
+
+    def test_rows_it_changes_new_routes_and_its_own_requests(self):
+        staged = dict(ROWS, **{"GET /me": {"module": "auth", "cells": {"guest": "no", "viewer": "no", "admin": "yes"}}})
+        self.assertEqual(self.scope(staged=staged)[1], ["GET /me"])
+        routes = dict(self.ACTIONS, **{"GET /reports": "App\\Http\\Controllers\\ReportController@index"})
+        self.assertEqual(self.scope(routes=routes)[1], ["GET /reports"])  # not on the base branch
+        write(self.jobfile, json.dumps({"requests": {"POST /admin/projects": {"body": {"name": "y"}}}}))
+        self.assertEqual(self.scope()[1], ["POST /admin/projects"])
+        write(self.jobfile, json.dumps({"who": {"auditor": {}}, "requests": {}}))
+        self.assertEqual(self.scope()[0], "full")
+
+    def test_an_app_that_limits_the_calls_is_not_a_wrong_permission(self):
+        real = fx.perm_http
+        tries = []
+
+        def limited(url, method, headers, body=None, kind="form"):
+            if url.endswith("/me"):
+                tries.append(url)
+                return {"status": 429, "location": "", "body": "slow down", "error": None}
+            return real(url, method, headers, body, kind)
+        with mock.patch.object(fx, "perm_http", limited), mock.patch.object(fx, "PERM_LIMITED_WAITS", (0, 0)):
+            res = self.run_matrix()
+        self.assertEqual(res["mismatches"], [])
+        me = [c for c in res["unchecked"] if c["route"] == "GET /me"]
+        self.assertEqual(len(me), 3)  # guest, viewer, admin: none of them judged
+        self.assertIn("429", me[0]["why"])
+        self.assertEqual(len(tries), 3 * 3)  # each called again twice after waiting
+
+    def test_only_the_scope_is_called_and_the_rest_neither_passes_nor_fails(self):
+        res = fx.perm_matrix(self.ctx, self.job, self.url, self.tech(), ROWS,
+                             scope=lambda routes: {"kind": "affected", "why": "w", "only": {"GET /me"}})
+        self.assertEqual({c["route"] for c in res["cells"]}, {"GET /me"})
+        self.assertEqual((res["scope"]["rows"], res["scope"]["of"], res["scope"]["routes"]), (1, 3, ["GET /me"]))
+        self.assertIn("Scope: the rows this job's change can reach, 1 of 3", fx.perm_markdown(res))
+        res = fx.perm_matrix(self.ctx, self.job, self.url, self.tech(snapshot="false"), ROWS,
+                             scope=lambda routes: {"kind": "affected", "why": "w", "only": set()})
+        self.assertEqual((res["cells"], res["calls"]), ([], 0))  # nothing to call: not even the snapshot ran
+
+
+class LimitsLoadedTest(unittest.TestCase):
+    """limits_file_loaded reads what git has, once per process (#7)."""
+
+    def setUp(self):
+        self.f = os.path.realpath(tempfile.mkdtemp(prefix="fx-lim-"))
+        self.addCleanup(shutil.rmtree, self.f, True)
+        write(os.path.join(self.f, ".gitignore"), "qa/test-results/\n")
+        write(os.path.join(self.f, "qa", "test-results", "trace.txt"), "FACTORY_LIMITS_ENV\n")  # output, not a script
+        write(os.path.join(self.f, "stack", "up.sh"), "docker compose up\n")
+        subprocess.run(["git", "init", "-q"], cwd=self.f, check=True)
+        fx._LIMITS_LOADED.clear()
+        f = self.f
+
+        class Ctx:
+            factory = f
+
+            def c(self, key, default=None):
+                return default
+        self.ctx = Ctx()
+
+    def test_ignored_output_is_not_read_and_the_answer_is_kept(self):
+        real, reads = fx.read, []
+
+        def read(path, *a, **k):
+            reads.append(os.path.relpath(path, self.f))
+            return real(path, *a, **k)
+        with mock.patch.object(fx, "read", read):
+            self.assertFalse(fx.limits_file_loaded(self.ctx))
+            self.assertNotIn("qa/test-results/trace.txt", reads)
+            n = len(reads)
+            self.assertFalse(fx.limits_file_loaded(self.ctx))
+            self.assertEqual(len(reads), n)  # the second command reads nothing
+        write(os.path.join(self.f, "stack", "up.sh"), 'docker run --env-file "$FACTORY_LIMITS_ENV" app\n')
+        self.assertTrue(fx.limits_file_loaded(self.ctx))  # a script that changed is read again
 
 
 class GateMarkdownTest(unittest.TestCase):

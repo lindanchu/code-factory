@@ -72,6 +72,21 @@ them to create a separate repository for the factory (for example
   be quicker. A mobile app's build and a desktop app's real Windows build still run on this
   machine (their API in the box); the pull request says so.
 
+- **The sandbox's size.** How much of this machine the sandbox VM may have is the user's
+  to say, never yours. When `fx sandbox install` or `reset` answers exit code 2 with
+  `next: ask-size` (the first time on a machine), a gate answers `void: true` with `next:
+  ask-size` (the VM ran out of memory), or `fx sandbox status` or `fx doctor` has a
+  `size_note`: run `fx sandbox size` and ask with AskUserQuestion how much memory and how
+  many CPUs the VM may have. Options: its `options`, the first marked (Recommended) with its
+  `suggest.why` (what the VM was measured to use), and say the machine's size
+  (`machine`), the most it can give (`most_gib`) and that the user may type their own.
+  Then `fx sandbox install --memory <GiB> --cpus <n>` with their answer. Its `next:
+  ask-restart`: jobs' boxes run in the VM and the new size restarts it; ask whether now
+  (their running commands stop, and start again at their next command: then add
+  `--restart`) or later. A web's and a desktop app's browsers run in the VM; a mobile app's
+  phones and build, and a desktop app's real Windows build, run on this machine (or on
+  Windows), and fx leaves them what they were measured to use.
+
 - fx is the script next to this file. Run it exactly as
   `python3 ${CLAUDE_SKILL_DIR}/fx <command> ...` from the factory repository
   (your session's working directory); the path is already absolute. Where this file
@@ -118,12 +133,12 @@ them to create a separate repository for the factory (for example
     another tool stopped, a process that was killed: what fx saw is in the
     `outside-stop.json` it names in `kept`); or the machine was too small for it (the
     sandbox VM killed processes for memory, or every failed test is a browser that
-    crashed: `machine-short.json`; tell the user the `fx sandbox install --memory`
-    command fx names). The round does not count and no builder is
+    crashed: `machine-short.json`). The round does not count and no builder is
     needed: never spawn one for it. Tell the user what fx said. `next: gate` → run
     `fx gate <job>` again once; `next: pr` → nothing was pushed, run the same `fx pr`
     again once; `next: stop` → stop and wait for the user; `next: login` → **Scanner
-    login** below, then the gate again. A stop from outside is put
+    login** below, then the gate again; `next: ask-size` → **The sandbox's size** below,
+    then the gate again. A stop from outside is put
     aside once for a commit (a machine too small: once for a commit and a size of the VM):
     when it happens again on the same commit the result counts, and fx says so in its
     `Problems`.
@@ -469,7 +484,9 @@ goes on from its gate once the fixes are merged.
 ### `/auto-factory:code permissions`
 
 The permission table says, for every route of the app, which kind of user may call it (not logged in, each role, an
-API key) and on whose data. The gate calls every cell on the job's own test stack, reads and writes, and checks that
+API key) and on whose data. The gate calls the cells of the rows the job's change can reach (every row when it
+touches a layer every route goes through; `permissions.scope`), on the job's own test stack, reads and writes, and
+checks that
 a refusal looks like one and leaves the data unchanged, that an allowed write changes it, and that a refused id
 answers like one that exists nowhere. `fx selftest` runs it on the base branch, so the gate tells what the job brings
 from what was already there. Until the table is worked out, confirmed by the user and run on the base branch, no job
@@ -1070,7 +1087,9 @@ aside, the job stays where it was): use it when the factory's scripts (checks, `
 cost a round. A gate that fails because the job's box has no network (`void: true`, `next: stop`) is the factory's
 script to fix (fetch at setup, another repository through `repos[].needs`), never a builder's.
 
-`python3 ${CLAUDE_SKILL_DIR}/fx gate <job>` starts a round. For each changed repository, in merge
+`python3 ${CLAUDE_SKILL_DIR}/fx gate <job>` starts a round (`--full`: the whole permission table and ZAP over the
+whole app, whatever the job changed; only when the user asks for it, since by default a gate scans what the change can
+reach). For each changed repository, in merge
 order, stopping at the first failure: all work committed; no protected or frozen
 file touched; its checks script from the factory repository (`checks/<repo>.sh`, or
 `checks.sh` in an older one-repository factory, and every helper file under

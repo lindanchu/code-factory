@@ -15,6 +15,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -722,7 +723,11 @@ class SkillNoteTest(ProjectCase):
             write(path, GH_STUB % {"python": sys.executable})
             os.chmod(path, 0o755)
             return True, "installed with brew"
-        with mock.patch.object(fx, "install_one", install):
+        real = shutil.which  # a gh this machine has in /usr/bin is not the test's: only the test's folder counts
+
+        def which(name, *a, **k):
+            return real(name, path=self.bin) if name == "gh" else real(name, *a, **k)
+        with mock.patch.object(fx, "install_one", install), mock.patch.object(fx.shutil, "which", which):
             res = self.ok(*self.note_args())
         self.assertTrue(res["posted"], res)
         self.assertTrue(any("installed gh" in n for n in res["notes"]))

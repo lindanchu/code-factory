@@ -3304,9 +3304,14 @@ def factory_freeze(ctx, at, job=None):
         keep.append(bcfg["manifest"])  # the reference images' list as recorded here, pushed or not yet committed
     for name in keep:
         src, dst = os.path.join(ctx.factory, name), os.path.join(snap, name)
-        if os.path.exists(src):
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
+        if not os.path.exists(src):
+            continue
+        # A copy made before has a lane's folder (qa/) as a link back to the factory: the file there is the source
+        # itself, and copying it onto itself raised SameFileError in every later gate on that commit.
+        if os.path.realpath(dst) == os.path.realpath(src) or (os.path.exists(dst) and os.path.samefile(src, dst)):
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
     for _, path in lane_folders(ctx):  # a lane's folder: its holder's work in progress lives there, read as it is
         dst = os.path.join(snap, path)
         if os.path.isdir(os.path.join(ctx.factory, path)) and not os.path.islink(dst):
@@ -4401,8 +4406,9 @@ def cmd_setup(ctx, a):
                                   code=3)
                 write_atomic(log, p.stdout or "")
                 if p.returncode != 0:
-                    raise FxError("setup%s failed (exit %d); see %s.%s" % (" of %s" % n if several else "", p.returncode,
-                                                                          log, net_failure_words(ctx, p.stdout)), code=3)
+                    raise FxError("setup%s failed (exit %d);%s see %s.%s" % (
+                        " of %s" % n if several else "", p.returncode, died_words(p), log,
+                        net_failure_words(ctx, p.stdout)), code=3)
             hint("setup of %s done in %d s" % (n, time.time() - t_setup))
             logs[n] = log
             job = ctx.load(job["id"])  # as it is now: the step may have waited, and its start and end went on the board
@@ -4529,6 +4535,8 @@ def gate_void(ctx, job_id, rn, rdir, place, why, also=None, next_step=None):
 
 
 def cmd_gate(ctx, a):
+    if getattr(a, "full", False):
+        os.environ["FX_SCAN_FULL"] = "1"  # scan_full_asked: the whole permission table and the whole app for ZAP
     job = ctx.load(a.job)
     if job["stage"] != "build":
         raise FxError("gate runs after a build; job is in stage %s" % job["stage"])
@@ -4814,7 +4822,9 @@ def gate_round_repos(ctx, job, a, place):
             if n in idle:
                 continue
             try:
-                secs[n] = run_security(rctxs[n], views[n], sec_dir(n), urls.get(n), stack=job)
+                secs[n] = run_security(rctxs[n], views[n], sec_dir(n), urls.get(n), stack=job,
+                                       scope=zap_scope(rctxs[n], job, views[n], perm_outs.get(n))
+                                       if urls.get(n) else None)
             except ScannerLogin as e:
                 gate_void(ctx, job["id"], rn, rdir, place, "%s%s" % (label(n), e), next_step="login")
             for f_ in secs[n]["findings"]:
@@ -4822,6 +4832,7 @@ def gate_round_repos(ctx, job, a, place):
         sec = security_merge(secs, True)
         write_atomic(os.path.join(rdir, "security.md"), security_markdown_repos(secs, True))
         job["security_skipped"] = sec["skipped"]
+        job["zap_scoped"] = {n: r.get("zap_scoped") for n, r in secs.items() if r.get("zap_scoped")}
         job["security_missed"] = sec["missed"]
         flags = sorted(set(flags) | set(sec["flags"]))
         if sec["required_failed"]:
@@ -5271,10 +5282,13 @@ def gate_round_one(ctx, job, a, place):
         # Always: a factory.json without security.scanners means the template's defaults (all on). Every scanner runs.
         # Only ZAP may judge again what it found last round instead of scanning again, and only where zap_stored says so.
         try:
-            sec = run_security(ctx, job, rdir, app_url_, zap_from=zap_stored(ctx, job, rn, head), stack=job)
+            scope_ = zap_scope(ctx, job, job, perm_outs.get("")) if app_url_ else None
+            sec = run_security(ctx, job, rdir, app_url_, zap_from=zap_stored(ctx, job, rn, head, scope_), stack=job,
+                               scope=scope_)
         except ScannerLogin as e:
             gate_void(ctx, job["id"], rn, rdir, place, str(e), next_step="login")
         write_atomic(os.path.join(rdir, "security.md"), security_markdown(sec))
+        job["zap_scoped"] = {"-": sec["zap_scoped"]} if sec.get("zap_scoped") else {}
         job["security_skipped"] = sec["skipped"]
         job["security_missed"] = sec["missed"]
         flags = sorted(set(flags) | set(sec["flags"]))
@@ -5891,6 +5905,14 @@ def pr_body(ctx, job, repo=None, links=None):
     for fl in job.get("flaky") or []:
         checks.append("- flaky: %s failed once and passed on a second run of the same commit, round %s (%s)"
                       % (fl.get("script"), fl.get("round"), ", ".join(fl.get("signs") or [])))
+    for n, zs in sorted((job.get("zap_scoped") or {}).items()):
+        if (not repo or n in ("-", repo)) and isinstance(zs, dict):
+            checks.append("- ZAP%s: %s" % ("" if n == "-" else " of %s" % n, zap_scope_words(zs)))
+    for n, sc in sorted((job.get("perm_scope") or {}).items()):
+        if (not repo or n in ("-", repo)) and isinstance(sc, dict) and sc.get("kind") == "affected":
+            checks.append("- permission table%s: only the rows this change can reach were called, %s of %s (%s); the "
+                          "others were not" % ("" if n == "-" else " of %s" % n, sc.get("rows"), sc.get("of"),
+                                               sc.get("why")))
     checks += ["- not isolated: %s" % x for x in job_isolation_notes(ctx, job)]
     if checks:
         parts += ["## Automated checks", ""] + checks + [""]
@@ -6284,7 +6306,7 @@ def checks_execute(ctx, job, look, log_path, by, who=None, cand=None, rn=None, p
     who = who or job
     wt, limit = who["worktree"], int(ctx.c("gate_timeout_sec", 1800))
     watch = StopsWatch(place, [wt, ctx.job_dir(job_real_id(job))])
-    t0, started, rc, timed_out, box = time.time(), now(), None, False, None
+    t0, started, rc, timed_out, box, p = time.time(), now(), None, False, None, None
     watch.start(limit)
     try:
         box = job_box_of(ctx, who)
@@ -6331,7 +6353,8 @@ def checks_execute(ctx, job, look, log_path, by, who=None, cand=None, rn=None, p
     outside = None if ok else outside_stop(watch, rc, timed_out)
     if outside:
         row["outside_stop"] = outside["why"][:400]
-    oom = vm_oom_kills(t0 - 5) if box and not ok else None
+    seen = getattr(p, "vm", None)  # what VmWatch saw: it read the VM's log already for a command that failed
+    oom = None if not box or ok else seen["oom_kills"] if seen else vm_oom_kills(t0 - 5)
     if oom:
         row["vm_oom"] = oom
     checks_keep(ctx, job, row)
@@ -6472,34 +6495,40 @@ def machine_short(cr):
 
 
 def machine_size_words(short):
-    """The machine's memory as the cause, with what to do about it; and the size the VM has (None on this machine)."""
+    """The machine's memory as the cause, with what to do about it; the size the VM has (None on this machine); and
+    whether the person is to be asked for a new size (next: ask-size)."""
     if not short["in_box"]:
         return ("this machine was short of memory: fewer workers in the browser tests, or fewer steps at once "
-                "(machine.*)"), None
+                "(machine.*)"), None, False
     try:
         has = sandbox_vm_size(sandbox_vm_row())
     except (OSError, subprocess.TimeoutExpired):
         has = None
     mem = (has or {}).get("memory_gib")
-    want = sandbox_size()
-    more = want["memory_gib"] if mem is None or want["memory_gib"] > mem else int(mem + 4)
-    if want["machine_gib"]:
-        more = min(more, max(int(want["machine_gib"] - 2), 2))
-    return ("the sandbox VM has %s GiB of memory%s: give it more with %s sandbox install --memory %s (it restarts the VM; "
-            "add --restart while jobs' boxes run), or run the browser tests with fewer workers, then run the gate again"
-            % (mem if mem is not None else "?", " (this machine %s GiB)" % want["machine_gib"] if want["machine_gib"]
-               else "", FX_CMD, more)), mem
+    if short["oom"] and mem and not any(r.get("oom") and r.get("vm_gib") == mem and float(r.get("ts") or 0) > time.time()
+                                        - 3600 for r in sandbox_usage(1)):
+        sandbox_usage_add({"at": now(), "ts": time.time(), "what": "the gate", "vm_gib": mem, "oom": len(short["oom"])})
+    offer = sandbox_size_offer(has)
+    sug, m = offer["suggest"], offer["machine"]
+    head = "the sandbox VM has %s GiB of memory%s" % (mem if mem is not None else "?", " (this machine %s GiB)" %
+                                                      m["memory_gib"] if m["memory_gib"] else "")
+    if mem is None or sug["memory_gib"] > mem:
+        return ("%s; fx suggests %s GiB (%s). Ask the person how much the VM may have (%s sandbox size), then %s sandbox "
+                "install --memory <their answer> (it restarts the VM; --restart while jobs' boxes run), and the gate "
+                "again" % (head, sug["memory_gib"], sug["why"], FX_CMD, FX_CMD)), mem, True
+    return ("%s, more than what was measured needs (%s): run the browser tests with fewer workers, or fewer jobs at once, "
+            "then the gate again" % (head, sug["why"])), mem, False
 
 
 def gate_machine_short(ctx, job, rn, rdir, place, cr, head, repo=None, what=None):
     """The gate's answer to a run of the checks the machine was too small for (machine_short): the round is put aside
-    (gate_void, next: stop: the person gives the VM more memory) once for a commit and a size of the VM; failing again
+    (gate_void, next: ask-size: the person says how much memory the VM may have, or stop) once for a commit and a size of the VM; failing again
     so on the same commit and size, it counts, and the problem it returns says why. None when the machine was not
     short."""
     short = machine_short(cr)
     if not short:
         return None
-    advice, mem = machine_size_words(short)
+    advice, mem, ask = machine_size_words(short)
     first = not any(isinstance(x, dict) and x.get("commit") == head and x.get("memory_gib") == mem
                     for x in job.get("machine_short") or [])
     write_atomic(os.path.join(rdir, "machine-short.json"), json.dumps(
@@ -6511,7 +6540,8 @@ def gate_machine_short(ctx, job, rn, rdir, place, cr, head, repo=None, what=None
         gate_void(ctx, job["id"], rn, rdir, place,
                   "%s failed, but not by anything the code did: %s. %s. What was seen is kept in machine-short.json "
                   "in the round's folder" % (of, short["why"], advice[:1].upper() + advice[1:]),
-                  also=lambda j: j.setdefault("machine_short", []).append(seen), next_step="stop")
+                  also=lambda j: j.setdefault("machine_short", []).append(seen),
+                  next_step="ask-size" if ask else "stop")
     return ("%s failed again for want of memory (%s), on a commit and a VM of a size a round was already put aside for, "
             "so this one counts: if the code does not use more memory than before, %s (round-%d/machine-short.json)"
             % (of, short["why"], advice, rn))
@@ -9324,7 +9354,7 @@ def limits_rows(ldir, over=None):
     return mods
 
 
-def limits_check(ctx, ldir=None, code=None, over=None):
+def limits_check(ctx, ldir=None, code=None, over=None, env_only=False):
     """Whether the limits hold: worked out (logic/limits.json), every module's table has the Env and Test value
     columns, no limit is MISSING, every Env names a variable with a test value, and (with code) the code cited for
     it reads that variable. Returns {ok, checked, unchecked, missing, problems, env}."""
@@ -9406,7 +9436,7 @@ def limits_check(ctx, ldir=None, code=None, over=None):
         problems.append("app.limits_env in factory.json says how the app gets the test values: \"process\" (it "
                         "runs as a process of fx and inherits them) or \"file\" (it runs in containers: the stack loads "
                         "the file $FACTORY_LIMITS_ENV names)")
-    elif env and ctx.c("app.limits_env") == "file" and not limits_file_loaded(ctx):
+    elif env and ctx.c("app.limits_env") == "file" and not env_only and not limits_file_loaded(ctx):
         problems.append("app.limits_env is \"file\" but nothing in the factory repository loads $FACTORY_LIMITS_ENV: "
                         "have the script app.up runs pass it to the app, such as `--env-file \"$FACTORY_LIMITS_ENV\"` "
                         "for docker, or `set -a; . \"$FACTORY_LIMITS_ENV\"; set +a` before the app starts")
@@ -9414,23 +9444,45 @@ def limits_check(ctx, ldir=None, code=None, over=None):
             "unchecked": unchecked, "missing": missing, "problems": problems, "env": env, "warnings": warnings}
 
 
+LIMITS_LOADED_SKIP = ("jobs", "knowledge", "logic", ".git", "local", "node_modules", ".claude")
+_LIMITS_LOADED = {}  # (factory, the candidate files as they are) -> the answer, for this fx process
+
+
 def limits_file_loaded(ctx):
     """Whether the app's start loads $FACTORY_LIMITS_ENV: an app.* command of factory.json, or a script of the factory
-    repository. factory.json itself and the Markdown files only describe it, so they do not count."""
+    repository. factory.json itself and the Markdown files only describe it, so they do not count. Only the files git
+    has or would add are read (git ls-files: a test run's output that .gitignore leaves out is no script; it read 2.7 GB
+    of screenshots before every command of a permission scan), and the answer is kept for this fx process while those
+    files are unchanged: the gate asks before every command its app runs."""
     app = ctx.c("app", {}) or {}
     if isinstance(app, dict) and any("FACTORY_LIMITS_ENV" in str(v) for k, v in app.items() if not k.startswith("_")):
         return True
-    for folder, dirs, files in os.walk(ctx.factory):
-        rel = os.path.relpath(folder, ctx.factory)
-        if rel.split(os.sep)[0] in ("jobs", "knowledge", "logic", ".git", "local", "node_modules", ".claude"):
-            dirs[:] = []
-            continue
-        for f in files:
-            if (rel == "." and f == "factory.json") or f.endswith(".md"):
+    p = run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=ctx.factory, check=False)
+    if p.returncode == 0:
+        rels = [r for r in (p.stdout or "").split("\0") if r]
+    else:  # not a git repository: every file but the folders that never hold the app's scripts
+        rels = []
+        for folder, dirs, files in os.walk(ctx.factory):
+            rel = os.path.relpath(folder, ctx.factory)
+            if rel.split(os.sep)[0] in LIMITS_LOADED_SKIP:
+                dirs[:] = []
                 continue
-            if "FACTORY_LIMITS_ENV" in (read(os.path.join(folder, f), "") or ""):
-                return True
-    return False
+            rels += [os.path.normpath(os.path.join(rel, f)) for f in files]
+    marks = []
+    for rel in sorted(rels):
+        if rel.split("/")[0].split(os.sep)[0] in LIMITS_LOADED_SKIP or rel == "factory.json" or rel.endswith(".md"):
+            continue
+        try:
+            st = os.stat(os.path.join(ctx.factory, rel))
+        except OSError:
+            continue
+        marks.append((rel, st.st_mtime_ns, st.st_size))
+    key = (os.path.realpath(ctx.factory), tuple(marks))
+    if key not in _LIMITS_LOADED:
+        _LIMITS_LOADED.clear()  # one factory's answer at a time is all a process needs
+        _LIMITS_LOADED[key] = any(size <= 4 * 1048576 and "FACTORY_LIMITS_ENV" in (
+            read(os.path.join(ctx.factory, rel), "") or "") for rel, _m, size in marks)
+    return _LIMITS_LOADED[key]
 
 
 def limits_words(res):
@@ -9451,7 +9503,7 @@ def limits_env(ctx, job):
     """The test values the job's app runs with: the factory's tables with the job's own staged logic over them."""
     if not logic_ready(ctx):
         return {}
-    return limits_check(ctx, over=os.path.join(ctx.job_dir(job_real_id(job)), "logic"))["env"]
+    return limits_check(ctx, over=os.path.join(ctx.job_dir(job_real_id(job)), "logic"), env_only=True)["env"]
 
 
 def logic_ready(ctx):
@@ -9486,6 +9538,8 @@ PERM_COMMANDS = {"routes": "prints every route of the app (for example `php arti
                                 "left out)"}
 
 
+PERM_PARALLEL = 4  # users whose reads are called at once (permissions.parallel; 1: one call at a time)
+PERM_LIMITED_WAITS = (2, 10, 30)  # seconds waited before calling again after a 429 without a Retry-After
 PERM_RECIPE = 2  # how fx calls the permission table (2: everyone logs in before the snapshot); a kept selftest result
 # made another way stops counting
 
@@ -9804,6 +9858,7 @@ def perm_http(url, method, headers, body=None, kind="form"):
         return {"status": None, "error": str(e), "location": "", "cookies": [], "body": ""}
     return {"status": status, "location": (hdrs.get("Location") if hdrs else "") or "",
             "cookies": (hdrs.get_all("Set-Cookie") if hdrs else None) or [],
+            "retry_after": (hdrs.get("Retry-After") if hdrs else "") or "",
             "body": (raw or b"")[:200000].decode("utf-8", "replace")}
 
 
@@ -9932,10 +9987,12 @@ def perm_plan(tech, rows, routes):
     return plan, sorted(set(lacks)), reqs
 
 
-def perm_matrix(rctx, job, url, tech, rows):
+def perm_matrix(rctx, job, url, tech, rows, scope=None):
     """Every cell of the table, called on the app running at url. Reads first, then the writes that must be refused
     (the data must stay as it was), then the allowed writes (the data must change; the snapshot is put back after
-    each). {routes, cells, mismatches, unrowed, stale, calls, seconds}. Raises PermsSetup."""
+    each). scope (perm_scope): only the rows it names are called, the rest neither pass nor fail; a route with no row
+    and a row with no route are found in the whole table all the same. {routes, cells, mismatches, unrowed, stale,
+    calls, seconds, scope}. Raises PermsSetup."""
     t0 = time.time()
     routes = perm_routes_parse(perm_cmd(rctx, job, tech["routes"], "routes"))
     if not routes:
@@ -9945,13 +10002,25 @@ def perm_matrix(rctx, job, url, tech, rows):
     out_scope = {k: v for k, v in out_scope.items() if v}
     unrowed = sorted(k for k in routes if k not in rows and k not in outside and k not in out_scope)
     stale = sorted(k for k in rows if k not in routes)
+    sc = scope(routes) if scope else {"kind": "full", "why": "the whole table", "only": None}
+    reached = sorted(k for k in sc["only"] if k in routes) if sc["only"] is not None else None
+    rowed = sorted(k for k in rows if k in routes)
+    if sc["only"] is not None:
+        rows = {k: v for k, v in rows.items() if k in sc["only"]}
+    called = sorted(k for k in rows if k in routes)
+    sc = dict(sc, only=None, rows=len(called), of=len(rowed), routes=called[:200], reached=reached)
     plan, lacks, reqs = perm_plan(tech, rows, routes)
     if lacks:
         raise PermsSetup("the technical part lacks:\n- " + "\n- ".join(lacks[:30]))
+    if not plan:  # nothing of the table to call: no seed, no logins, no snapshot
+        return {"routes": routes, "cells": [], "mismatches": [], "unchecked": [], "unrowed": unrowed, "stale": stale,
+                "calls": 0, "seconds": int(time.time() - t0), "scope": sc,
+                "out_of_scope": {k: out_scope[k] for k in sorted(out_scope)}}
     whos = tech["who"]
     if tech.get("seed"):
         perm_cmd(rctx, job, tech["seed"], "seed", 900)
     sessions, missing, cells, mismatches, unchecked, count = {}, {}, [], [], [], [0]
+    count_lock = threading.Lock()
     # Everyone logs in before the snapshot: putting the database back then keeps their sessions and keys (a key made
     # after it would be gone), so after a restore a login is only proved again, by one call, not made anew.
     for who in sorted({p[1] for p in plan}):
@@ -9996,9 +10065,17 @@ def perm_matrix(rctx, job, url, tech, rows):
         query = dict(req.get("query") or {}, **{k: v for k, v in vals.items() if k not in names})
         if query:
             path += "?" + urllib.parse.urlencode(query, doseq=True)
-        count[0] += 1
-        r = perm_http(urllib.parse.urljoin(url.rstrip("/") + "/", path.lstrip("/")), method, h, body,
-                      req.get("type") or "form")
+        for wait in PERM_LIMITED_WAITS + (None,):
+            with count_lock:
+                count[0] += 1
+            r = perm_http(urllib.parse.urljoin(url.rstrip("/") + "/", path.lstrip("/")), method, h, body,
+                          req.get("type") or "form")
+            if r["status"] != 429 or wait is None:
+                break
+            said = str(r.get("retry_after") or "").strip()
+            # The app limits how fast it is called: that is no answer about who may call it. Its own Retry-After (in
+            # seconds, at most a minute: Laravel's throttle answers 429 up to 60 s) when it says one.
+            time.sleep(min(60, int(said)) if said.isdigit() else wait)
         if r["status"] is None:
             raise PermsSetup("the app stopped answering (%s as %s: %s)" % (key, who, r["error"]))
         return r
@@ -10037,18 +10114,29 @@ def perm_matrix(rctx, job, url, tech, rows):
             progress("permissions", len(cells), len(plan))
 
     def unreached(key, r):
-        """A 501 is the web server's (it does not know the method): the call never reached the app."""
+        """A 501 is the web server's (it does not know the method): the call never reached the app. A 429 after every
+        wait is the app's limit on how fast it is called, which says nothing about who may call it."""
+        if r["status"] == 429:
+            return ("the app answered 429 (too many calls) even after waiting: raise its rate limits on the test "
+                    "stack, or set permissions.parallel to 1")
         return r["status"] == 501 and "the test stack's web server does not implement %s (501): the call never " \
                                       "reached the app" % key.split(" ", 1)[0]
 
     progress("permissions", 0, len(plan))
     reads = [p for p in plan if p[0].split(" ", 1)[0] in PERM_READ]
     writes = sorted((p for p in plan if p[0].split(" ", 1)[0] not in PERM_READ), key=lambda p: p[3] == "allow")
-    for key, who, vn, want, vals in reads:
+    lock = threading.Lock()
+    keep_ = keep
+
+    def keep(*a):  # noqa: F811 - the reads of several users at once keep their cells one at a time
+        with lock:
+            keep_(*a)
+
+    def read_one(key, who, vn, want, vals):
         r = call(key, who, vals)
         if unreached(key, r):
             keep(key, who, vn, want, None, unreached(key, r))
-            continue
+            return
         if want == "allow":
             ok, why = allowed(key, who, r)
         else:
@@ -10057,6 +10145,9 @@ def perm_matrix(rctx, job, url, tech, rows):
                 if (key, who) not in missing:
                     missing[(key, who)] = call(key, who, (reqs.get(key) or {}).get("missing") or {})
                 m_ = missing[(key, who)]
+                if unreached(key, m_):
+                    keep(key, who, vn, want, None, unreached(key, m_))
+                    return
                 # Both answers without the values of both calls: a value sent once ("2") is also text of the other page.
                 sent = [str(v) for v in list(vals.values()) + list(((reqs.get(key) or {}).get("missing") or {}).values())]
                 sent = {str(i): v for i, v in enumerate(sent)}
@@ -10064,6 +10155,21 @@ def perm_matrix(rctx, job, url, tech, rows):
                     ok, why = False, ("its refusal is not the answer for an id that exists nowhere (%s and %s): it "
                                       "tells that the data exists" % (r["status"], m_["status"]))
         keep(key, who, vn, want, ok, why)
+
+    # Reads change nothing, so each user's are called beside the others' (permissions.parallel users at once, each
+    # with its own session); the writes stay one at a time: each is judged by the data's fingerprint and put back.
+    by_who = {}
+    for p_ in reads:
+        by_who.setdefault(p_[1], []).append(p_)
+    n_par = max(1, int(rctx.c("permissions.parallel", PERM_PARALLEL) or 1))
+    if n_par == 1 or len(by_who) == 1:
+        for p_ in reads:
+            read_one(*p_)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(n_par, len(by_who))) as pool:
+            for f_ in [pool.submit(lambda ps: [read_one(*x) for x in ps], ps) for ps in by_who.values()]:
+                f_.result()  # a PermsSetup of any of them stops the table, as it does one at a time
+    cells.sort(key=lambda c: (c["route"], c["who"], c["data"]))
     fp["now"] = None  # a read that wrote something is not put on the first write
     for key, who, vn, want, vals in writes:
         prepared = prepare(key, who)
@@ -10086,7 +10192,7 @@ def perm_matrix(rctx, job, url, tech, rows):
         keep(key, who, vn, want, ok, why)
     restore()
     return {"routes": routes, "cells": cells, "mismatches": mismatches, "unchecked": unchecked, "unrowed": unrowed,
-            "stale": stale, "calls": count[0], "seconds": int(time.time() - t0),
+            "stale": stale, "calls": count[0], "seconds": int(time.time() - t0), "scope": sc,
             "out_of_scope": {k: out_scope[k] for k in sorted(out_scope)}}
 
 
@@ -10099,6 +10205,14 @@ def perm_markdown(res, title="Permission table"):
     md = ["# %s" % title, "", "%d cell(s) called (%d calls, %ds): %d as the table says, %d not, %d not checked." % (
         len(res["cells"]), res["calls"], res["seconds"], ok, len(res["mismatches"]), len(res.get("unchecked") or [])),
         ""]
+    sc = res.get("scope") or {}
+    if sc.get("kind") == "affected":
+        md += ["Scope: the rows this job's change can reach, %d of %d (%s). The other rows were not called: they "
+               "neither pass nor fail. fx permissions try <job> calls them all." % (sc["rows"], sc["of"], sc["why"]),
+               ""] + (["Called: " + ", ".join("`%s`" % r for r in sc.get("routes") or []), ""] if sc.get("routes")
+                      else [])
+    elif sc:
+        md += ["Scope: the whole table, %d rows (%s)." % (sc.get("rows", 0), sc.get("why", "")), ""]
     if res["mismatches"]:
         md += ["## Not as the table says", "", "| Route | Who | Data | Table | What happened |", "|---|---|---|---|---|"]
         md += ["| %s | %s | %s | %s | %s |" % (c["route"], c["who"], c["data"], c["want"],
@@ -10129,6 +10243,492 @@ def perm_touched(view, staged, factory, routes):
     return touched
 
 
+# The gate's permission scan called every cell of the table in every round (461 on one project, over an hour),
+# whatever the job changed. A job's round now calls only the rows its change can reach (perm_scope), and the whole
+# table when the change reaches a layer every route goes through, or when fx cannot follow it. fx selftest, fx
+# permissions try and fx audit-scan's app still call it all; FX_PERM_FULL=1 or permissions.scope: "full" does too.
+# What a change to a file means for the scans of the running app, by its path (lower case, whole path or file name).
+# PERM_LAYER_PATHS: code the framework runs without any code naming it, on many routes (middleware, guards, policies
+# found by convention, observers and listeners, kernels, the app's entry points and its web server's settings): changed
+# or reached by the change, every route is reached, since fx cannot follow it by name. PERM_REGISTRY_PATHS: files that
+# name every route or service (route files, providers, the dependencies) or set up those layers (config/auth.php,
+# session, CORS...): a change to them reaches every route, but naming a changed class does not make them call it, so
+# the walk stops there. A service such as LoginThrottle is neither: it is followed by name to the routes that use it.
+PERM_LAYER_PATHS = ["*middleware*", "*guard*", "*polic*", "*observer*", "*listener*", "*subscriber*", "*/events/*",
+                    "*kernel*", "*firewall*", "*interceptor*", "*/gates/*",
+                    "main.*", "*/main.*", "server.*", "*/server.*", "app.module.*", "*/app.module.*", "app.ts", "app.js",
+                    "*/app.ts", "*/app.js", "index.php", "*/public/index.php", "*.htaccess", "*nginx*", "*apache*",
+                    "*/settings.py", "settings.py", "*.env*", ".env*"]
+PERM_REGISTRY_PATHS = ["route*", "*/route*", "*urls.py", "*provider*", "bootstrap/*", "*/bootstrap/*",
+                       "config/auth.*", "*/config/auth.*", "config/session.*", "*/config/session.*", "config/cors.*",
+                       "*/config/cors.*", "config/sanctum.*", "*/config/sanctum.*", "config/jwt.*", "*/config/jwt.*",
+                       "config/fortify.*", "*/config/fortify.*", "config/permission.*", "*/config/permission.*",
+                       "config/security*", "*/config/security*",
+                       "composer.json", "composer.lock", "package.json", "package-lock.json", "yarn.lock",
+                       "pnpm-lock.yaml", "go.mod", "go.sum", "pyproject.toml", "requirements*.txt", "gemfile",
+                       "gemfile.lock", "pom.xml", "build.gradle*", "*.csproj", "*.config.js", "*.config.ts",
+                       "*.config.mjs", "*.config.cjs", "dockerfile*", "*/dockerfile*", "docker-compose*", "*.conf"]
+PERM_FULL_PATHS = PERM_LAYER_PATHS + PERM_REGISTRY_PATHS  # a change to any of them calls the whole table
+# What reaches no route: documents, tests, images. Folders by their exact name (lower case), files by their exact
+# pattern (case matters: ContestController.php is code, ContestTest.php a test).
+PERM_IGNORE_DIRS = {"test", "tests", "spec", "specs", "__tests__", "e2e", "cypress", "playwright", "__snapshots__"}
+PERM_IGNORE_TOP = {"docs", "doc"}  # only at the top: app/Http/Controllers/Docs/ is code
+PERM_IGNORE_FILES = ["*.md", "*.rst", "*.adoc", "*Test.php", "*Tests.php", "*TestCase.php", "*_test.*", "test_*.py",
+                     "*_spec.rb", "*.test.*", "*.spec.*", "*.snap", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp",
+                     "*.ico", "LICENSE*", "CHANGELOG*"]
+PERM_HANDLER_SUFFIX = re.compile(r"(?i)[_.-]?(controller|controllers|views?|handlers?|resource|router|routes?|action)$")
+PERM_CONFIG_PATHS = ["config/*", "*/config/*", "conf/*", "*/conf/*"]  # followed by their keys (config_users)
+PERM_KEY_RE = re.compile(r"""['"]?([A-Za-z_][A-Za-z0-9_-]*)['"]?\s*(?:=>|:|=)""")
+PERM_WALK_DEPTH = 2     # how many steps from a changed file to the files that use it
+PERM_WALK_MAX = 400     # files reached past which fx stops following and calls the whole table
+
+
+def perm_path_match(path, globs):
+    low = path.lower()
+    return any(fnmatch.fnmatch(low, g.lower()) or fnmatch.fnmatch(os.path.basename(low), g.lower()) for g in globs)
+
+
+def perm_ignored(path, extra=()):
+    """A file that reaches no route: a document, a test or an image (PERM_IGNORE_*), or one of extra's globs (the
+    factory's permissions.ignore_paths and protected_paths)."""
+    parts = path.split("/")
+    if any(p in PERM_IGNORE_DIRS for p in parts[:-1]) or (len(parts) > 1 and parts[0] in PERM_IGNORE_TOP):
+        return True
+    if any(fnmatch.fnmatchcase(parts[-1], g) for g in PERM_IGNORE_FILES):
+        return True
+    return bool(extra) and (perm_path_match(path, extra) or match_any(path, extra))
+
+
+def handler_names(action):
+    """The names of the file a route's handler is in, from what the routes command printed for it: its class or module,
+    without the namespace before it or the method after it (App\\Http\\Controllers\\ProjectController@show:
+    ProjectController; pkg.views.detail: views; projects#show: projects; UsersController.findOne: UsersController; an
+    invokable App\\Http\\Controllers\\MeController: MeController), with and without a suffix such as Controller. A
+    namespace (Modules\\Account) or a method (index) names no file of its own and would match every route."""
+    words = [w for w in re.split(r"[^A-Za-z0-9_]+", (action or "").split("\\")[-1]) if w]
+    if len(words) >= 2:
+        words = words[:-1]  # the method
+    name = words[-1] if words else ""
+    return {n for n in (name, PERM_HANDLER_SUFFIX.sub("", name)) if len(n) >= 2}
+
+
+def scan_full_asked():
+    """fx gate <job> --full, or FX_SCAN_FULL=1: this gate calls the whole permission table and ZAP scans the whole app."""
+    return os.environ.get("FX_SCAN_FULL") == "1"
+
+
+def change_reach(rctx, view):
+    """What of the code a job's change can reach, for the scans of its running app (perm_scope, zap_scope):
+    {kind: "full" | "affected", why, changed, code, reached, names}. Full: fx gate --full (FX_SCAN_FULL=1); a change
+    to a layer every request goes through or to a file that names every route (permissions.full_paths, else
+    PERM_LAYER_PATHS and PERM_REGISTRY_PATHS); a change that reaches such a layer (a service the auth middleware
+    calls); a config key nothing in the project reads (the framework or a library does); or a change fx cannot follow.
+    Affected: the changed files of the code (documents, tests and images reach nothing: perm_ignored), the files that
+    use them (git grep -w of their names, PERM_WALK_DEPTH steps; a config file by the keys it changed), and their
+    names. A route file or a provider that names a changed class is reached but not followed: naming a class is not
+    calling it."""
+    full = lambda why: {"kind": "full", "why": why}
+    if scan_full_asked():
+        return full("asked for (fx gate --full)")
+    try:
+        rows = changed_files(view)
+        changed = [ps[-1] for _st, ps in rows] + [ps[0] for st, ps in rows if st == "R"]
+    except (FxError, KeyError, subprocess.SubprocessError) as e:
+        return full("the job's changes could not be read (%s)" % str(e)[:120])
+    own_full = rctx.c("permissions.full_paths", None)
+    layers = own_full or PERM_LAYER_PATHS
+    registries = [] if own_full else PERM_REGISTRY_PATHS
+    extra = list(rctx.c("permissions.ignore_paths", None) or []) + list(rctx.c("protected_paths", []) or [])
+    shared = sorted(p for p in changed if perm_path_match(p, layers) or perm_path_match(p, registries))
+    if shared:
+        return full("the job changes %s, which every route may go through" % ", ".join(shared[:3]))
+    code = sorted({p for p in changed if not perm_ignored(p, extra)})
+    stem = lambda p: os.path.basename(p).split(".")[0]
+    short = [p for p in code if len(stem(p)) < 2]
+    if short:
+        return full("fx cannot follow %s by its name" % ", ".join(short[:3]))
+    conf_globs = rctx.c("permissions.config_paths", None) or PERM_CONFIG_PATHS
+    configs = [p for p in code if perm_path_match(p, conf_globs)]
+    names, reached, seen = set(), set(code), set()
+    frontier = [p for p in code if p not in configs]
+    if configs:  # a config file is followed by its keys, not by its name: config('app.x') is not every word "app"
+        found, err = config_users(view, configs, extra)
+        if err:
+            return full(err)
+        found -= reached
+        reached |= found
+        frontier += sorted(found)
+    stops = set()  # reached files that name everything: kept, not followed
+    for _ in range(PERM_WALK_DEPTH + 1):
+        frontier = [p for p in frontier if not perm_path_match(p, registries)]
+        step = ({stem(p) for p in frontier} | project_interfaces(view["worktree"], frontier)) - seen
+        step = {n for n in step if len(n) >= 2}
+        if not step:
+            break
+        names |= step
+        seen |= step
+        args = ["grep", "-l", "-w", "-F"]
+        for n in sorted(step):
+            args += ["-e", n]
+        g = git(args, view["worktree"], check=False)
+        if g.returncode not in (0, 1):
+            return full("fx could not follow the change through the code (git grep failed)")
+        found = {f for f in g.stdout.splitlines() if f and not perm_ignored(f, extra)} - reached
+        reached |= found
+        stops |= {f for f in found if perm_path_match(f, registries)}
+        if len(reached) > PERM_WALK_MAX:
+            return full("the change reaches more than %d files of the code" % PERM_WALK_MAX)
+        frontier = sorted(found)
+    # What the change reaches may be a layer every request goes through (a service the auth middleware calls): then
+    # every route is reached, whatever handles it.
+    layer = sorted(p for p in reached - set(code) if perm_path_match(p, layers))
+    if layer:
+        return full("the change reaches %s, which every route may go through" % ", ".join(layer[:3]))
+    names |= {stem(p) for p in reached if p not in configs and p not in stops}
+    why = ("%d changed file%s of the code, and %d that use%s them" % (
+        len(code), "" if len(code) == 1 else "s", len(reached) - len(code), "s" if len(reached) - len(code) == 1
+        else "") if code else "the job changes no code the app runs (only %s)" % (
+        "tests, documents and the like" if changed else "nothing"))
+    return {"kind": "affected", "why": why, "changed": changed, "code": code, "reached": sorted(reached),
+            "names": names}
+
+
+IMPLEMENTS_RE = re.compile(r"\bimplements\s+([A-Za-z0-9_\\.,\s]+?)\s*(?:\{|\bextends\b|$)", re.M)
+
+
+def project_interfaces(worktree, files):
+    """The interfaces the classes of files implement that the project itself declares: what its other code names
+    instead of the class when the class is bound to it (a provider binds LoginServiceInterface to LoginService, and the
+    controller asks for the interface). A framework's interface (ShouldQueue) is not followed: it would reach
+    everything."""
+    named = set()
+    for f in files:
+        text = read(os.path.join(worktree, f), "") or ""
+        for m in IMPLEMENTS_RE.finditer(text[:200000]):
+            for w in m.group(1).split(","):
+                w = re.split(r"[\\.]", w.strip())[-1].strip()
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]+$", w):
+                    named.add(w)
+    if not named:
+        return set()
+    args = ["grep", "-h", "-o", "-E"]
+    for n in sorted(named):
+        args += ["-e", "interface[[:space:]]+%s([^A-Za-z0-9_]|$)" % n]
+    g = git(args, worktree, check=False)
+    return {n for n in named if re.search(r"interface\s+%s(?![A-Za-z0-9_])" % n, g.stdout or "")}
+
+
+def config_users(view, configs, extra=()):
+    """The files that read what the job changed in its config files: for config/<name>.<ext>, each key on a changed
+    line, as code names it (`name.key`, or `name.outer.key` for a nested one: config('mail.from.address')); a file
+    whose changed lines name no key, by `name.` alone. (files, None), or (None, why fx cannot follow): a config file
+    nothing of the project reads (the framework or a library in vendor/ or node_modules/ does, which fx does not
+    search) cannot be followed."""
+    try:
+        mb = git(["merge-base", view["base_ref"], "HEAD"], view["worktree"]).stdout.strip()
+    except (FxError, KeyError) as e:
+        return None, "the job's config changes could not be read (%s)" % str(e)[:120]
+    word, found = re.compile(r"^[A-Za-z0-9_-]+$"), set()  # what goes into a pattern as it is (POSIX ERE, every OS)
+    for path in configs:
+        name = os.path.basename(path).split(".")[0]
+        if not word.match(name):
+            return None, "fx cannot follow the config file %s by its name" % path
+        d = git(["diff", "-U0", "%s..HEAD" % mb, "--", path], view["worktree"], check=False).stdout
+        keys = set()
+        for line in d.splitlines():
+            if line[:1] in "+-" and not line.startswith(("+++", "---")):
+                keys |= {k for k in PERM_KEY_RE.findall(line[1:]) if word.match(k)}
+        pats = ["%s\\.([A-Za-z0-9_-]+\\.)*%s([^A-Za-z0-9_-]|$)" % (name, k) for k in sorted(keys)] or \
+            ["['\"]%s\\." % name]
+        args = ["grep", "-l", "-E"]
+        for p_ in pats:
+            args += ["-e", p_]
+        g = git(args, view["worktree"], check=False)
+        if g.returncode not in (0, 1):
+            return None, "fx could not follow the config change through the code (git grep failed)"
+        users = {f for f in g.stdout.splitlines() if f and f not in configs and not perm_ignored(f, extra)}
+        if not users:
+            return None, ("nothing of the project reads what the job changed in %s (the framework or a library "
+                          "does)" % path)
+        found |= users
+    return found, None
+
+
+def perm_scope(rctx, job, view, staged_rows, factory_rows):
+    """Which rows of the table a job's round calls: a function of the app's routes (key -> its handler) that answers
+    {kind: "affected" | "full", why, only (the route keys, None for every one)}. Affected: the rows the job changed or
+    added, the routes the app did not have on the base branch, the routes of the job's own requests, and the routes
+    whose handler is a file change_reach reaches. Full: whatever makes change_reach full, the job's own technical part
+    beyond its routes' requests (logins, users), FX_PERM_FULL=1, or permissions.scope: "full"."""
+    full = lambda why: (lambda routes: {"kind": "full", "why": why, "only": None})
+    if os.environ.get("FX_PERM_FULL") == "1":
+        return full("FX_PERM_FULL=1")
+    if str(rctx.c("permissions.scope", "affected") or "affected") == "full":
+        return full("permissions.scope is \"full\" in factory.json")
+    own_requests = set()
+    if os.path.exists(perm_job_file(rctx, job)):
+        try:
+            mine = json.loads(read(perm_job_file(rctx, job), "") or "{}")
+        except ValueError:
+            mine = None
+        if not isinstance(mine, dict) or any(k for k in mine if k != "requests" and not k.startswith("_")):
+            return full("the job changes the table's technical part beyond its routes' requests (logins, users)")
+        own_requests = {perm_key_norm(k) for k in (mine.get("requests") or {})}
+    reach = change_reach(rctx, view)
+    if reach["kind"] == "full":
+        return full(reach["why"])
+    names = (reach["names"] | {PERM_HANDLER_SUFFIX.sub("", n) for n in reach["names"]}) - {""}
+    base_routes = set(((baseline_of(rctx).get("permissions") or {}).get("routes")) or {})
+
+    def scope(routes):
+        if reach["code"] and not any(routes.get(k) for k in routes):
+            return {"kind": "full", "only": None,
+                    "why": "the routes command names no handler, so fx cannot tell which routes the change reaches"}
+        only = set()
+        for key in routes:
+            if (staged_rows.get(key) or {}).get("cells") != (factory_rows.get(key) or {}).get("cells") \
+                    or key in own_requests:
+                only.add(key)
+            elif base_routes and key not in base_routes:
+                only.add(key)
+            elif handler_names(routes.get(key)) & names:
+                only.add(key)
+        return {"kind": "affected", "why": reach["why"], "only": only}
+    return scope
+
+
+# ZAP, like the permission table, scanned the whole app in every round. A job whose change reaches no code the app
+# runs (tests, documents) is not scanned: the base branch's scan stands. Otherwise the web scan still crawls the whole
+# app (a page shows what it shows, whatever changed), and the API scan gets the OpenAPI description cut down to the
+# routes the permission scan found the change can reach. fx gate --full, security.zap_scope: "full", or a change to a
+# shared layer scans it all; fx audit-scan scans a whole branch whenever the team chooses.
+
+def zap_scope(ctx, job, view, perm=None):
+    """What a job's gate gives ZAP to scan: {kind: "full" | "affected" | "skip", why, and for affected: web_routes and
+    api_routes (the route keys the change reaches), starts (paths to begin from), total (the app's routes)}. perm: the
+    permission scan's answer for this app (permissions_gate), whose routes_reached are the routes the change reaches,
+    None when it called the whole table; without it fx cannot tell, and ZAP scans the whole app."""
+    if str(ctx.c("security.zap_scope", "affected") or "affected") == "full":
+        return {"kind": "full", "why": "security.zap_scope is \"full\" in factory.json"}
+    reach = change_reach(ctx, view)
+    if reach["kind"] == "full":
+        return {"kind": "full", "why": reach["why"]}
+    if not reach["code"]:
+        return {"kind": "skip", "skip": reach["why"], "why": reach["why"]}
+    routes = (perm or {}).get("routes_reached")
+    if routes is None:
+        return {"kind": "full", "why": "no permission scan of this change says which routes it reaches"}
+    if not routes:
+        why = "the job's change reaches no route of the app (%s)" % reach["why"]
+        return {"kind": "skip", "skip": why, "why": why}
+    try:
+        tech = perm_tech(ctx, job)[0] or {}
+    except (FxError, OSError, ValueError):
+        tech = {}
+    return {"kind": "affected", "why": reach["why"], "web_routes": list(routes), "api_routes": set(routes),
+            "starts": zap_start_paths(routes, tech), "total": (perm or {}).get("routes_total"),
+            "app_routes": list((perm or {}).get("routes_all") or [])}
+
+
+def zap_start_paths(routes, tech):
+    """Paths ZAP begins from for the pages (GET routes) a change reaches: each with its parameters filled from the
+    permission table's own (else other) values; a route whose parameters have no value is left to the crawl, and so is
+    a form's target (POST and the like), which the crawl finds with its fields on the page that holds the form."""
+    reqs = {perm_key_norm(k): v for k, v in ((tech or {}).get("requests") or {}).items()}
+    out = []
+    for key in sorted(routes):
+        if " " in key and key.split(" ", 1)[0].upper() not in ("GET", "HEAD"):
+            continue
+        path = key.split(" ", 1)[1] if " " in key else key
+        req = reqs.get(key) or {}
+        vals = dict(req.get("other") or {}, **(req.get("own") or {}))
+        try:
+            filled = PERM_PARAM_RE.sub(lambda m: urllib.parse.quote(str(vals[m.group(1)]), safe=""), path)
+        except KeyError:
+            continue
+        if filled not in out:
+            out.append(filled)
+    return out[:50]
+
+
+def zap_route_regex(base, key):
+    """A ZAP include regex (Java) of one route: its path with any value for each parameter, and a query or not."""
+    path = key.split(" ", 1)[1] if " " in key else key
+    parts = re.split(r"(\{[^}]*\})", path)
+    rx = "".join("[^/?#]+" if p.startswith("{") else re.escape(p) for p in parts)
+    return "%s%s(?:[?#].*)?" % (re.escape(base.rstrip("/")), rx)
+
+
+def zap_ddn(base, routes, app_routes=()):
+    """ZAP's data driven nodes for the routes with a parameter: /users/1/lock and /users/2/lock are one node of its
+    site tree, so the attack tries each route once, not once for every row the crawl found (a list of 300 users made
+    300 targets of each form). A literal neighbour that the app's routes name (/users/new) keeps a node of its own.
+    Only the first parameter of a route is folded, and none at the root (/{slug} would fold every page)."""
+    path = lambda k: (k.split(" ", 1)[1] if " " in k else k).strip("/")
+    lits = {}  # the literal segments the app's routes have at each place a parameter may be
+    for k in list(routes) + list(app_routes or ()):
+        segs = path(k).split("/")
+        for i, s in enumerate(segs):
+            if not s.startswith("{"):
+                lits.setdefault("/".join(segs[:i]), set()).add(s)
+    out, seen = [], set()
+    for k in sorted(routes, key=path):
+        segs = path(k).split("/")
+        i = next((n for n, s in enumerate(segs) if s.startswith("{")), None)
+        if not i:  # no parameter, or one at the root
+            continue
+        prefix = "/".join(segs[:i])
+        if prefix in seen:
+            continue
+        seen.add(prefix)
+        others = "".join("(?!%s(?:[/?#]|$))" % re.escape(x) for x in sorted(lits.get(prefix, ())))
+        name = "p%d_%s" % (len(out) + 1, re.sub(r"[^A-Za-z0-9]", "", segs[i]) or "id")
+        out.append({"name": name, "regex": "%s/(%s/)(%s[^/?#]+)([^?#]*)" % (re.escape(base), re.escape(prefix), others)})
+    return out
+
+
+ZAP_PLAN_DONE_RE = re.compile(r"^Automation plan (succeeded|failed)")
+ZAP_EXIT_GRACE = int(os.environ.get("FACTORY_ZAP_EXIT_GRACE", "30") or 30)  # seconds ZAP has to end after its plan
+
+
+def zap_plan_run(cmd, cname, env, timeout):
+    """docker run of a ZAP Automation Framework plan. ZAP said its plan was over (its report written) and then never
+    ended: a browser crawl it had stopped kept a thread alive, and the gate waited half an hour for nothing. Once it
+    says so, it has ZAP_EXIT_GRACE seconds, then its container is stopped. A CompletedProcess like run()'s."""
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            errors="surrogateescape")
+    lines, done = [], threading.Event()
+
+    def read_():
+        try:
+            for line in proc.stdout:
+                lines.append(line)
+                if ZAP_PLAN_DONE_RE.match(line):
+                    done.set()
+        except (OSError, ValueError):
+            pass
+
+    reader = threading.Thread(target=read_, daemon=True)
+    reader.start()
+    try:
+        return zap_plan_wait(cmd, cname, proc, reader, lines, done, timeout)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        reader.join(5)
+        proc.stdout.close()
+
+
+def zap_plan_wait(cmd, cname, proc, reader, lines, done, timeout):
+    """zap_plan_run's wait: for the container to end, or for ZAP_EXIT_GRACE seconds once its plan is over."""
+    end = time.time() + timeout
+    while proc.poll() is None:
+        if done.wait(1) and proc.poll() is None:
+            try:
+                proc.wait(timeout=ZAP_EXIT_GRACE)
+            except subprocess.TimeoutExpired:
+                try_out(["docker", "stop", "-t", "5", cname], timeout=60)
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                reader.join(5)
+                lines.append("fx: ZAP did not end %ds after its plan was over: its container was stopped\n"
+                             % ZAP_EXIT_GRACE)
+                ok = any(x.startswith("Automation plan succeeded") for x in lines)
+                return subprocess.CompletedProcess(cmd, 0 if ok else 1, "".join(lines), None)
+        if time.time() > end:
+            raise subprocess.TimeoutExpired(cmd, timeout, output="".join(lines))
+    reader.join(5)
+    return subprocess.CompletedProcess(cmd, proc.returncode, "".join(lines), None)
+
+
+def zap_ajax_minutes(ctx):
+    """The browser crawl of the routes a change reaches (security.zap_ajax_minutes; 0: none)."""
+    try:
+        return max(0, int(ctx.c("security.zap_ajax_minutes", ZAP_AJAX_MINUTES)))
+    except (TypeError, ValueError):
+        return ZAP_AJAX_MINUTES
+
+
+def zap_affected_minutes(ctx):
+    """The attack's time when a gate scans only the routes a change reaches (security.zap_affected_minutes): the
+    whole web scan stays under ten minutes; security.zap_minutes is for a scan of the whole app."""
+    return max(1, min(int(ctx.c("security.zap_affected_minutes", ZAP_AFFECTED_MINUTES) or ZAP_AFFECTED_MINUTES),
+                      zap_minutes(ctx)))
+
+
+def zap_web_plan(ctx, target, scope, report):
+    """The ZAP Automation Framework plan of a web scan cut to the routes a change reaches (zap_scope): the classic
+    spider over the whole app (the passive rules see what it found, and it finds the forms of those routes on the
+    pages that hold them), the browser crawl and the attack (full mode) only inside a context of those routes,
+    beginning at their pages, each route one node of the site tree (zap_ddn), the attack for zap_affected_minutes at
+    most. Returns the plan as JSON (which is YAML too)."""
+    base = target.rstrip("/")
+    full = zap_mode(ctx) == "full"
+    excludes = [x.replace("\\s", " ") for x in zap_excludes(ctx)]
+    starts = ["%s%s" % (base, p if p.startswith("/") else "/" + p) for p in scope.get("starts") or []]
+    ddn = zap_ddn(base, scope["web_routes"], scope.get("app_routes"))
+    affected = {"name": "fx-affected", "urls": starts or [base + "/"],
+                "includePaths": [zap_route_regex(base, k) for k in scope["web_routes"]], "excludePaths": excludes}
+    app = {"name": "fx-app", "urls": [base + "/"], "includePaths": [re.escape(base) + "/.*"], "excludePaths": excludes}
+    if ddn:  # on both: ZAP files a URL that is in both contexts by the first one's structure
+        app["structure"] = affected["structure"] = {"dataDrivenNodes": ddn}
+    # One minute of the classic spider: the pages the change does not reach are the base branch's, and in two minutes
+    # it had found 8,000 URLs; the minute it saves goes to the attack.
+    jobs = [{"type": "spider", "parameters": {"context": "fx-app", "maxDuration": 1}}]
+    if starts:  # after the spider: a form the attack sends wrong goes back to the page before it (Laravel's back()),
+        # which was then the spider's last page (a PDF export, 1,700 times in four minutes), now one of these
+        jobs.append({"type": "requestor", "requests": [{"url": u, "method": "GET"} for u in starts]})
+    if starts and zap_ajax_minutes(ctx):
+        jobs.append({"type": "spiderAjax", "parameters": {"context": "fx-affected", "url": starts[0],
+                                                          "maxDuration": zap_ajax_minutes(ctx),
+                                                          "browserId": "firefox-headless"}})
+    if full:  # the passive rules go on during the attack; their queue is waited for once, at the end
+        jobs.append({"type": "activeScan", "parameters": {"context": "fx-affected",
+                                                          "maxScanDurationInMins": zap_affected_minutes(ctx)},
+                     # fewer tries of each rule: every route gets its turn in those minutes (fx gate --full: all)
+                     "policyDefinition": {"defaultStrength": "low", "defaultThreshold": "medium"}})
+    jobs.append({"type": "passiveScan-wait", "parameters": {"maxDuration": 1}})
+    jobs.append({"type": "report", "parameters": {"template": "traditional-json", "reportDir": "/zap/wrk",
+                                                  "reportFile": report}})
+    plan = {"env": {"contexts": [app, affected], "parameters": {"failOnError": False, "progressToStdout": True}},
+            "jobs": jobs}
+    return json.dumps(plan, indent=1)
+
+
+def openapi_cut(spec, routes):
+    """An OpenAPI (or Swagger) description with only the operations of routes ("METHOD /path" as the permission table
+    writes them), matched with the server's base path or without it, whatever the parameters are named. (the cut
+    description, how many operations it kept, how many it had)."""
+    norm = lambda path: re.sub(r"\{[^}]*\}", "{}", "/" + str(path).strip("/")).lower()
+    want = {(k.split(" ", 1)[0].upper(), norm(k.split(" ", 1)[1])) for k in routes if " " in k}
+    base = ""
+    if isinstance(spec.get("servers"), list) and spec["servers"] and isinstance(spec["servers"][0], dict):
+        base = urllib.parse.urlparse(str(spec["servers"][0].get("url") or "")).path
+    elif spec.get("basePath"):
+        base = str(spec["basePath"])
+    methods = ("get", "put", "post", "delete", "options", "head", "patch", "trace")
+    kept, total, paths = 0, 0, {}
+    for path, ops in (spec.get("paths") or {}).items():
+        if not isinstance(ops, dict):
+            continue
+        keep = {}
+        for m, op in ops.items():
+            if m.lower() not in methods:
+                keep[m] = op  # parameters, summary... shared by the operations
+                continue
+            total += 1
+            if (m.upper(), norm(path)) in want or (m.upper(), norm(base.rstrip("/") + "/" + str(path).lstrip("/"))) in want:
+                keep[m] = op
+                kept += 1
+        if any(m.lower() in methods for m in keep):
+            paths[path] = keep
+    return dict(spec, paths=paths), kept, total
+
+
 def permissions_gate(ctx, job, view, rctx, url, rdir, suffix=""):
     """The gate's run of the table on the job's app. A mismatch, a route without a row or a row without a route that
     the base branch has too is the base's (fx selftest ran the table there): it stops no job but one that touches that
@@ -10150,13 +10750,18 @@ def permissions_gate(ctx, job, view, rctx, url, rdir, suffix=""):
     if staged["problems"]:
         return {"void": ["the permission rows have problems:\n- " + "\n- ".join(staged["problems"][:20])]}
     try:
-        res = perm_matrix(rctx, view, url, tech, staged["rows"])
+        res = perm_matrix(rctx, view, url, tech, staged["rows"],
+                          scope=perm_scope(rctx, job, view, staged["rows"], perm_tables(rctx)["rows"]))
     except PermsSetup as e:
         return {"void": [e.why]}
     write_atomic(os.path.join(rdir, "permissions%s.md" % suffix), perm_markdown(res))
     write_atomic(os.path.join(rdir, "permissions%s.json" % suffix), json.dumps(
-        {k: res.get(k) for k in ("cells", "unchecked", "unrowed", "stale", "calls", "seconds")}, indent=1,
+        dict({k: res.get(k) for k in ("cells", "unchecked", "unrowed", "stale", "calls", "seconds")},
+             scope=res.get("scope")), indent=1,
         ensure_ascii=False) + "\n")
+    sc = res.get("scope") or {"kind": "full", "why": "the whole table", "rows": len({c["route"] for c in res["cells"]}),
+                              "of": len({c["route"] for c in res["cells"]})}
+    job.setdefault("perm_scope", {})[suffix.lstrip("-") or "-"] = {k: sc.get(k) for k in ("kind", "why", "rows", "of")}
     base = baseline_of(rctx).get("permissions") or {}
     base_bad = {perm_cell_key(c) for c in base.get("mismatches") or []}
     base_routes = set(base.get("routes") or {})
@@ -10184,9 +10789,20 @@ def permissions_gate(ctx, job, view, rctx, url, rdir, suffix=""):
         else:
             out_["void"].append("the permission table has a row for %s, which the job's app no longer has: its row "
                                 "goes from the job's staged logic" % r)
-    out_["summary"] = "permissions: %d cell(s), %d not as the table says%s (%ds)" % (
-        len(res["cells"]), len(res["mismatches"]),
+    # Every route the change reaches, with a row or not (not_app, out of scope): what ZAP's scans of it are cut to.
+    out_["routes_reached"] = list(sc.get("reached") or []) if sc["kind"] == "affected" else None
+    out_["routes_total"] = len(res.get("routes") or {})
+    out_["routes_all"] = sorted(res.get("routes") or {}) if sc["kind"] == "affected" else None
+    out_["summary"] = "permissions (%s): %d cell(s), %d not as the table says%s (%ds)" % (
+        "rows this job can reach, %s of %s: %s" % (sc["rows"], sc["of"], sc["why"]) if sc["kind"] == "affected"
+        else "the whole table, %s rows: %s" % (sc["rows"], sc["why"]), len(res["cells"]), len(res["mismatches"]),
         ", %d already so on the base branch" % len(out_["base"]) if out_["base"] else "", res["seconds"])
+    limited = [c for c in res.get("unchecked") or [] if "429" in c.get("why", "")]
+    if limited:  # cells never judged must not pass as if they were: the round says nothing about them
+        out_["void"].append("permissions: the app answered 429 (too many calls) to %d cell(s), even after waiting, so "
+                            "they were never judged (%s): raise its rate limits on the test stack, or set "
+                            "permissions.parallel to 1" % (len(limited), ", ".join(sorted({
+                                "%s as %s" % (c["route"], c["who"]) for c in limited})[:5])))
     if res.get("unchecked"):
         out_["notes"].append("permissions: %d cell(s) not checked: %s" % (
             len(res["unchecked"]), "; ".join(sorted({c["why"] for c in res["unchecked"]}))))
@@ -17657,6 +18273,12 @@ def zap_network(url):
     if not sys.platform.startswith("linux"):
         return [], target, None
     flags = ["--add-host", "host.docker.internal:host-gateway"]
+    # Docker Desktop from WSL: its host network is its own VM's, which has no app of WSL's, and its bridge cannot be
+    # reached from WSL to be tried; host.docker.internal reaches WSL's ports, 127.0.0.1 ones too (tried with Docker
+    # Desktop 29.9).
+    os_ = run(["docker", "info", "--format", "{{.OperatingSystem}}"], check=False, timeout=60)
+    if os_.returncode == 0 and "docker desktop" in (os_.stdout or "").lower():
+        return flags, target, None
     p = urllib.parse.urlparse(url)
     r = run(["docker", "network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"],
             check=False, timeout=60)
@@ -17675,22 +18297,30 @@ def zap_mode(ctx):
     return "full" if str(ctx.c("security.zap_mode", "baseline")).strip().lower() == "full" else "baseline"
 
 
-def zap_runs(ctx, target):
+def zap_runs(ctx, target, api_file=None, web_plan=None):
     """The ZAP scripts to run: (report name, script, arguments). Both modes also crawl with a real browser, so pages
-    a script draws are seen too, and use the rules ZAP still calls alpha."""
+    a script draws are seen too, and use the rules ZAP still calls alpha. api_file: the API scan reads this OpenAPI
+    description from its folder (/zap/wrk) instead of the app's. web_plan: the web scan runs this Automation Framework
+    plan from its folder (zap_web_plan: cut to the routes a change reaches) instead of the packaged script."""
     full = zap_mode(ctx) == "full"
     conf = ["-config scanner.maxScanDurationInMins=%d" % zap_minutes(ctx)] if full else []
     for i, rx in enumerate(zap_excludes(ctx)):  # never crawled, proxied or attacked, by any of ZAP's parts
         conf += ["-config globalexcludeurl.url_list.url(%d).regex=%s" % (i, rx),
                  "-config globalexcludeurl.url_list.url(%d).enabled=true" % i]
     limit = ["-z", " ".join(conf)] if conf else []
-    runs = [("zap", "zap-full-scan.py" if full else "zap-baseline.py",
-             ["-t", target, "-a", "-j"] + (["-m", "2"] if full else []) + limit)]
+    if web_plan:
+        runs = [("zap", "zap.sh", ["-cmd", "-addonupdate", "-addoninstall", "pscanrulesAlpha", "-addoninstall",
+                                   "ascanrulesAlpha"] + [w for c in conf for w in c.split(" ", 1)]
+                 + ["-autorun", "/zap/wrk/%s" % web_plan])]
+    else:
+        runs = [("zap", "zap-full-scan.py" if full else "zap-baseline.py",
+                 ["-t", target, "-a", "-j"] + (["-m", "2"] if full else []) + limit)]
     spec = ctx.c("security.zap_openapi")
     if spec:
         p = urllib.parse.urlparse(target)
         runs.append(("zap-api", "zap-api-scan.py",
-                     ["-t", "%s://%s/%s" % (p.scheme, p.netloc, spec.lstrip("/")), "-f", "openapi", "-a",
+                     ["-t", "/zap/wrk/%s" % api_file if api_file else "%s://%s/%s" % (p.scheme, p.netloc, spec.lstrip("/")),
+                      "-f", "openapi", "-a",
                       "-O", "%s://%s" % (p.scheme, p.netloc)] + limit + ([] if full else ["-S"])))
     return runs
 
@@ -18038,16 +18668,62 @@ def zap_cpus():
     return min(n, _DOCKER_NCPU[0]) if _DOCKER_NCPU[0] else None
 
 
-def scan_zap(ctx, job, url, rdir, notes=None, image=None, only=None, on_pass=None, api_at=None):
+def scan_zap(ctx, job, url, rdir, notes=None, image=None, only=None, on_pass=None, api_at=None, api_routes=None,
+             web=None):
     """image: which image to run, when not the one security.zap_image names. only: the names of the runs to make (zap,
     zap-api), when not all of them. on_pass(name, findings): called as each run is over with its login kept to the
     end (fx selftest keeps it, so that a later run that fails does not cost this one). api_at: (view, url) of a second
     running copy of the app with its own database (security.zap_parallel, zap_twin): the API scan then runs against it
-    while the web scan runs against url, both at once, so neither can end the other's login or change its data."""
+    while the web scan runs against url, both at once, so neither can end the other's login or change its data.
+    api_routes: the API scan reads the OpenAPI description cut down to these routes (zap_scope), saved next to the
+    reports; none of them in it, it does not run. web: zap_scope's answer when it cut the scan to the routes a change
+    reaches: the web scan then runs zap_web_plan (its classic spider over the whole app, the browser crawl and the
+    attack inside those routes)."""
     image = image or ctx.c("security.zap_image", ZAP_IMAGE) or ZAP_IMAGE
     notes = notes if notes is not None else []
     os.makedirs(rdir, exist_ok=True)
     names = [r[0] for r in zap_runs(ctx, "http://placeholder/") if only is None or r[0] in only]
+    api_file = None
+    if api_routes is not None and "zap-api" in names:
+        spec_url = urllib.parse.urljoin((api_at[1] if api_at else url).rstrip("/") + "/",
+                                        str(ctx.c("security.zap_openapi")).lstrip("/"))
+        try:
+            with urllib.request.urlopen(spec_url, timeout=60) as r_:
+                spec = json.loads(r_.read().decode("utf-8", "replace"))
+            if not isinstance(spec, dict):
+                raise ValueError("not an object")
+        except (OSError, ValueError) as e:
+            spec = None
+            notes.append("zap: the API scan covers every route: fx could not read the OpenAPI description to cut it "
+                         "down to the job's routes (%s)" % str(e)[:150])
+        if spec is not None:
+            cut, kept, total = openapi_cut(spec, api_routes)
+            if not api_routes:
+                names.remove("zap-api")
+                notes.append("zap: the API scan did not run: the job's change reaches no route (fx gate <job> --full "
+                             "scans them all)")
+            elif not kept:  # routes it reaches, and none of them found: fx could not map them, so it scans them all
+                notes.append("zap: the API scan covers every route: none of the %d routes the job's change reaches is "
+                             "an operation of the OpenAPI description as fx reads it (its servers' base path?)"
+                             % len(api_routes))
+            else:
+                api_file = "openapi-scope.json"
+                write_atomic(os.path.join(rdir, api_file), json.dumps(cut, indent=1) + "\n")
+                notes.append("zap: the API scan covered the %d of %d operations of the OpenAPI description that the "
+                             "job's change reaches (zap/%s; fx gate <job> --full scans them all)" % (kept, total, api_file))
+    if not names:
+        return [], None
+    web_plan = None
+    if web and web.get("web_routes") and "zap" in names:
+        web_plan = "zap-plan.yaml"
+        _f, web_target, _n = zap_network(url)
+        write_atomic(os.path.join(rdir, web_plan), zap_web_plan(ctx, web_target, web, "zap.json") + "\n")
+        notes.append("zap: the web scan attacked %d of %s routes, the ones the job's change reaches (at low strength, "
+                     "for at most %d minutes%s); its classic spider and passive rules covered the whole app "
+                     "(zap/%s; fx gate <job> --full scans it all)"
+                     % (len(web["web_routes"]), web.get("total") or "the app's", zap_affected_minutes(ctx),
+                        ", and crawled them with a browser" if zap_ajax_minutes(ctx) and web.get("starts") else "",
+                        web_plan))
     apart = bool(api_at) and names == ["zap", "zap-api"]
     kinds = sorted({"api" if n == "zap-api" else "web" for n in names}, key=["web", "api"].index)
     if apart:
@@ -18078,7 +18754,10 @@ def scan_zap(ctx, job, url, rdir, notes=None, image=None, only=None, on_pass=Non
         """One run: (its report's data, None), or (None, why it gave none). Raises ScannerLogin."""
         view, app_url, flags, target = at[kind]
         cname = "%s-%s" % (stem, kind) if apart else stem
-        cmd = ["docker", "run", "--rm", "--name", cname, "--label", "fx.place=%s" % held, "-v", "%s:/zap/wrk/:rw" % rdir]
+        # --init: a browser crawl leaves Firefox's helpers behind, and with ZAP as process 1 nothing reaps them: an
+        # Automation Framework plan then never ends after its report.
+        cmd = ["docker", "run", "--rm", "--init", "--name", cname, "--label", "fx.place=%s" % held,
+               "-v", "%s:/zap/wrk/:rw" % rdir]
         if cpus:
             cmd += ["--cpus", str(cpus)]
         if home:
@@ -18103,8 +18782,11 @@ def scan_zap(ctx, job, url, rdir, notes=None, image=None, only=None, on_pass=Non
             os.remove(report)
         started.append(cname)
         try:
-            r = run(cmd + flags + [image] + start + args + ["-J", name + ".json", "-I"], check=False, env=env,
-                    timeout=max(1800, (zap_minutes(ctx) + 10) * 60))
+            tail = [] if script == "zap.sh" else ["-J", name + ".json", "-I"]  # a plan names its own report
+            full_cmd = cmd + flags + [image] + start + args + tail
+            limit = max(1800, (zap_minutes(ctx) + 10) * 60)
+            r = (zap_plan_run(full_cmd, cname, env, limit) if script == "zap.sh"
+                 else run(full_cmd, check=False, env=env, timeout=limit))
         except subprocess.TimeoutExpired:
             try_out(["docker", "stop", "-t", "5", cname], timeout=60)
             return None, "ZAP timed out (%s)" % script
@@ -18157,7 +18839,7 @@ def scan_zap(ctx, job, url, rdir, notes=None, image=None, only=None, on_pass=Non
     found = {}
     if not apart:
         scanned = False
-        for name, script, args in zap_runs(ctx, at["web"][3]):
+        for name, script, args in zap_runs(ctx, at["web"][3], api_file, web_plan):
             if name not in names:
                 continue
             kind = "api" if name == "zap-api" else "web"
@@ -18177,7 +18859,7 @@ def scan_zap(ctx, job, url, rdir, notes=None, image=None, only=None, on_pass=Non
             passed(name, data, at[kind][3])
         return zap_found(found), None
     # Side by side: the web scan on url, the API scan on its own copy of the app.
-    plan = [(name, kind, next(r for r in zap_runs(ctx, at[kind][3]) if r[0] == name))
+    plan = [(name, kind, next(r for r in zap_runs(ctx, at[kind][3], api_file, web_plan) if r[0] == name))
             for name, kind in (("zap", "web"), ("zap-api", "api"))]
     outcome = {}
     pool = concurrent.futures.ThreadPoolExecutor(2)
@@ -18209,6 +18891,10 @@ def scan_zap(ctx, job, url, rdir, notes=None, image=None, only=None, on_pass=Non
     return zap_found(found), None
 
 
+ZAP_AJAX_MINUTES = 0  # the browser crawl of the routes a change reaches (zap_web_plan; security.zap_ajax_minutes): on
+# a server-drawn app it found one page in three minutes, and in one minute Firefox had not started, went on crawling
+# through the attack and kept ZAP from ending. Give a single-page app 2 or 3.
+ZAP_AFFECTED_MINUTES = 6  # the attack on the routes a change reaches (zap_affected_minutes)
 ZAP_TWIN = "zapapi"  # the second copy of the app the API scan runs against (security.zap_parallel)
 
 
@@ -18351,18 +19037,28 @@ def accepted_mark(ctx, job):
     return digest(sorted(json.dumps(e, sort_keys=True) for e in accepted_entries(ctx, job)))[:16]
 
 
-def zap_scan_mark(ctx, job):
+def zap_scope_mark(ctx, scope):
+    """What part of the app a scan covered (zap_scope): the whole app, or the routes a change reaches and how long the
+    attack on them was. A round that scanned only some routes says nothing for fx gate --full on the same commit."""
+    if not scope or scope.get("kind") != "affected":
+        return "full"
+    return ["affected", sorted(scope.get("web_routes") or []), sorted(scope.get("api_routes") or []),
+            zap_affected_minutes(ctx), zap_ajax_minutes(ctx)]
+
+
+def zap_scan_mark(ctx, job, scope=None):
     """Everything that decides what a ZAP scan of this job's app does and finds, but for the commit: the scan's settings
-    and image, how long it may attack, the API description and the login it uses, how the app is started, and the test
-    data the builder's seed loads. Reports made under another mark say nothing about a scan made now."""
+    and image, how long it may attack, the API description and the login it uses, how the app is started, the test
+    data the builder's seed loads, and what part of the app it covered (zap_scope_mark). Reports made under another
+    mark say nothing about a scan made now."""
     app = ctx.c("app") or {}
     return digest([scan_signature(ctx, "zap"), zap_baseline_image(ctx), zap_minutes(ctx), ctx.c("security.zap_openapi"),
                    ctx.c("security.zap_auth"), zap_excludes(ctx), {k: v for k, v in app.items() if not str(k).startswith("_")} if isinstance(app, dict) else app,
                    ctx.c("e2e"), file_mark(os.path.join(ctx.job_dir(job["id"]), "ui", "seed.sh"))]
-                  + (["parallel"] if zap_parallel(ctx) else []))[:16]
+                  + (["parallel"] if zap_parallel(ctx) else []) + ([zap_scope_mark(ctx, scope)] if scope else []))[:16]
 
 
-def zap_stored(ctx, job, rn, head):
+def zap_stored(ctx, job, rn, head, scope=None):
     """The ZAP reports of the round before, when this round may judge them instead of scanning: {dir, round, scanned,
     names}; else None, and ZAP scans as it always did. All of this must hold: that round failed at the security scan
     and at nothing else; it ran on this very commit; ZAP did scan then, with the scan settings of now; the scan is not
@@ -18382,7 +19078,7 @@ def zap_stored(ctx, job, rn, head):
     if not scan.get("scanned") or age > conf["max_age_sec"] or age < -300:
         return None
     try:
-        if prev.get("accepted") == accepted_mark(ctx, job) or scan.get("settings") != zap_scan_mark(ctx, job):
+        if prev.get("accepted") == accepted_mark(ctx, job) or scan.get("settings") != zap_scan_mark(ctx, job, scope):
             return None
     except (FxError, OSError, ValueError, subprocess.TimeoutExpired):
         return None
@@ -18683,14 +19379,15 @@ def block_rank(ctx):
     return SEV_RANK.get(word, SEV_RANK[BLOCK_SEVERITY])
 
 
-def run_security(ctx, job, rdir, app_url_, whole=False, zap_from=None, stack=None):
+def run_security(ctx, job, rdir, app_url_, whole=False, zap_from=None, stack=None, scope=None):
     progress(progress_label("security scan", job))
     """All enabled scanners; returns findings, the blocking list, skipped notes, other notes, the enabled scanners
     that did not run (missed; ZAP without Docker is only noted as skipped) and the required ones that did not
     (required_failed). whole: everything in the branch and its history, not only what the job changed; every finding
     then counts as new. zap_from: the reports of an earlier round that ZAP may judge again instead of scanning (see
     zap_stored); ran and zap_scan in the answer say what did run, and when ZAP's reports were made. stack: the whole job
-    whose apps run, for security.zap_parallel (the API scan's own copy of the app, zap_twin)."""
+    whose apps run, for security.zap_parallel (the API scan's own copy of the app, zap_twin). scope (zap_scope): what
+    of the app ZAP scans for this job, None for all of it."""
     wt = job["worktree"]
     accepted = accepted_entries(ctx, None if whole else job)  # before anything runs: a mistake here is the factory's, and says so
     mb = None if whole else git(["merge-base", job["base_ref"], "HEAD"], wt).stdout.strip()
@@ -18788,8 +19485,11 @@ def run_security(ctx, job, rdir, app_url_, whole=False, zap_from=None, stack=Non
                 notes.append("zap: round %d's reports of this commit %s, so ZAP scanned again" % (
                     zap_from["round"], "could not be read (%s)" % why if kept is None else
                     "still hold %d finding(s) that block by the rules as they are now" % len(still)))
+            api_routes = (scope or {}).get("api_routes") if not whole else None
+            web = scope if not whole and (scope or {}).get("kind") == "affected" else None
             with zap_twin(ctx, stack, job, notes) as api_at:
-                f, err = scan_zap(ctx, job, app_url_, os.path.join(rdir, "zap"), notes, image, api_at=api_at)
+                f, err = scan_zap(ctx, job, app_url_, os.path.join(rdir, "zap"), notes, image, api_at=api_at,
+                                  api_routes=api_routes, web=web)
                 if not err:
                     zap_scan.update(scanned=now())
                     f = compared(f, "zap")
@@ -18804,6 +19504,10 @@ def run_security(ctx, job, rdir, app_url_, whole=False, zap_from=None, stack=Non
             no_docker = "Docker is installed but not running (start Docker to enable ZAP scans)"
         if no_docker:  # a laptop with Docker off: noted, not a reason to hand every job to a human
             skipped.append("zap: " + no_docker)
+        elif sc["zap"] and not whole and (scope or {}).get("skip"):
+            notes.append("zap: not run: %s, so the base branch's scan stands (fx gate <job> --full scans the whole "
+                         "app)" % scope["skip"])
+            ran.add("zap")  # it is done for this change: a required ZAP is not missed
         else:
             use("zap", "docker", zap)
         if sc["zap"]:
@@ -18841,12 +19545,28 @@ def run_security(ctx, job, rdir, app_url_, whole=False, zap_from=None, stack=Non
                  not f.get("unconfirmed") and SEV_RANK.get(f["severity"], 2) >= limit)]
     if zap_scan and not whole:
         try:
-            zap_scan["settings"] = zap_scan_mark(ctx, job)
+            zap_scan["settings"] = zap_scan_mark(ctx, job, scope)
         except (FxError, OSError, ValueError, subprocess.TimeoutExpired):
             zap_scan = {}  # nothing to compare a later round's settings with: that round scans
-    return {"findings": findings, "blocking": blocking, "skipped": skipped, "notes": notes,
+    zap_scoped = None
+    if scope and not whole and sc.get("zap") and app_url_:
+        zap_scoped = {"kind": scope.get("kind"), "why": scope.get("why") or scope.get("skip")}
+        if scope.get("kind") == "affected":
+            zap_scoped.update(routes=len(scope.get("web_routes") or []), of=scope.get("total"))
+    return {"findings": findings, "blocking": blocking, "skipped": skipped, "notes": notes, "zap_scoped": zap_scoped,
             "missed": sorted(missed), "required_failed": required_failed, "ran": sorted(ran), "zap_scan": zap_scan or None,
             "flags": sorted({f["path"] for f in findings if f.get("look") and not f.get("accepted")})}
+
+
+def zap_scope_words(zs):
+    """One line on what ZAP scanned for a job: for security.md and the pull request."""
+    if zs.get("kind") == "affected":
+        return ("affected: the attack and the browser crawl covered %s of %s routes, the ones this change reaches (%s); "
+                "the classic spider and the passive rules covered the whole app" % (
+                    zs.get("routes"), zs.get("of") or "the app's", zs.get("why")))
+    if zs.get("kind") == "skip":
+        return "not run: %s; the base branch's scan stands" % zs.get("why")
+    return "full: the whole app (%s)" % zs.get("why")
 
 
 SECURITY_ROWS = 300
@@ -18855,6 +19575,9 @@ SECURITY_ROWS = 300
 def security_markdown(res):
     failed = res["blocking"] or res.get("required_failed")
     md = ["SECURITY SCAN: %s" % ("FAIL" if failed else "PASS"), ""]
+    zs = res.get("zap_scoped")
+    if zs:
+        md += ["## ZAP's scope", "", "- " + zap_scope_words(zs), ""]
     if res.get("required_failed"):
         md += ["## Required scanners that did not run", ""] + ["- " + s for s in res["required_failed"]] + [""]
     if res["skipped"]:
@@ -19618,6 +20341,16 @@ def doctor_checks(ctx, issue=None, session=True, live=False):
         add("sandbox for merge requests and jobs (advice)", True,
             "ready (%s)" % SANDBOX_VM if ok_ else "%s; until then a review stops before running a merge request, and "
                                                   "a job before its setup" % why_)
+        if ok_:
+            try:
+                offer = sandbox_size_offer(sandbox_vm_size(sandbox_vm_row()))
+            except (OSError, subprocess.TimeoutExpired):
+                offer = None
+            if offer and offer["change"]:
+                add("the sandbox VM's size (advice)", True, "%s; fx suggests %s GiB and %s CPUs (%s): ask the person, "
+                    "then fx sandbox install --memory <GiB> --cpus <n>" % (
+                        offer["change"], offer["suggest"]["memory_gib"], offer["suggest"]["cpus"],
+                        offer["suggest"]["why"]))
     for line in aws_key_advice(ctx):
         add("keys on this machine (advice)", True, line)
     if live:
@@ -23172,48 +23905,186 @@ class NoSandbox(FxError):
 
 # The VM's size. It was 6 GiB and 4 CPUs on every machine, and a web job's browser tests (several Playwright workers,
 # full-page screenshots) beside its app, database and cache ran it out of memory on a machine with 24 GB: Chromium was
-# killed, three tests crashed in every run, and the job lost two rounds to it. So it takes a share of the machine,
-# never less than it had, unless the person sets its size (fx sandbox install|reset --memory/--cpus), which is kept on
-# this machine for every later install and reset.
-SANDBOX_MEMORY_GIB = 6   # the least the VM gets, and all it gets on a machine that does not tell its memory
+# killed, three tests crashed in every run, and the job lost two rounds to it. No size fits every machine and every
+# project, and neither does a share fx picks: the person says how much of this machine the VM may have, the first time
+# (fx sandbox install answers next: ask-size, with what fx would suggest), kept on this machine for every later install
+# and reset. From then on fx measures what the VM really uses (VmWatch: each command in a box that runs long enough),
+# keeps it in sandbox-usage.jsonl, and suggests a size from that history (sandbox_size_offer): when a gate ran out of
+# memory, in fx sandbox status and fx doctor. The VM's size changes only on the person's answer.
+SANDBOX_MEMORY_GIB = 6     # the least fx suggests (what the VM had before 3.12), and its size with no history at all
 SANDBOX_CPUS = 4
-SANDBOX_SHARE = 0.5      # of the machine's memory and CPUs
-SANDBOX_HOST_KEEP_GIB = 4  # what the VM's share always leaves to the machine
+SANDBOX_SHARE = 0.5        # of the machine, what fx suggests before anything was measured
+SANDBOX_HOST_KEEP_GIB = 4  # what a suggestion always leaves to the machine
+SANDBOX_HEADROOM = 1.25    # on top of the most the VM was measured to use
+SANDBOX_OOM_GROW = 1.5     # a VM that ran out of memory: at least this times the size it had then
+SANDBOX_USAGE_KEEP = 500   # lines of sandbox-usage.jsonl kept
+SANDBOX_USAGE_DAYS = 60    # how far back a suggestion looks
 
 
 def sandbox_size_path():
     return os.path.join(state_dir(), "sandbox-size.json")
 
 
-def sandbox_size(memory=None, cpus=None):
-    """The size the sandbox VM is to have: {memory_gib, cpus, by, machine_gib, machine_cpus}. memory and cpus: the
-    person's own (fx sandbox install|reset --memory/--cpus), saved for every later install and reset; without them the
-    size saved before, else a share of this machine."""
+def sandbox_usage_path():
+    return os.path.join(state_dir(), "sandbox-usage.jsonl")
+
+
+def sandbox_machine():
+    """This machine: {memory_gib (None when it does not tell), cpus}."""
+    gib = meter_host()["total_mb"] / 1024
+    return {"memory_gib": round(gib, 1) if gib > 0 else None, "cpus": os.cpu_count() or SANDBOX_CPUS}
+
+
+def sandbox_chosen():
+    """The size the person chose for the VM on this machine: {memory_gib, cpus, at}, or None before they did."""
     try:
         saved = json.loads(read(sandbox_size_path(), "") or "{}")
     except ValueError:
-        saved = {}
-    saved = saved if isinstance(saved, dict) else {}
-    host_gib, ncpu = meter_host()["total_mb"] / 1024, os.cpu_count() or SANDBOX_CPUS
-    if memory is not None:
-        if memory < 2 or (host_gib > 0 and memory > host_gib - 2):
-            raise FxError("--memory %s: between 2 and %s GiB (this machine has %.1f GiB, and keeps 2 for itself)"
-                          % (memory, max(2, int(host_gib - 2)), host_gib) if host_gib > 0 else
-                          "--memory %s: at least 2 GiB" % memory, code=3)
-    if cpus is not None and not 1 <= cpus <= ncpu:
-        raise FxError("--cpus %s: between 1 and %d, the CPUs of this machine" % (cpus, ncpu), code=3)
-    if memory is not None or cpus is not None:
-        saved = dict(saved, **{k: v for k, v in (("memory_gib", memory), ("cpus", cpus)) if v is not None})
+        return None
+    if not isinstance(saved, dict) or not isinstance(saved.get("memory_gib"), (int, float)):
+        return None
+    if not isinstance(saved.get("cpus"), int):  # 3.12.0 kept only what was passed
+        ncpu = os.cpu_count() or SANDBOX_CPUS
+        saved = dict(saved, cpus=max(min(SANDBOX_CPUS, ncpu), int(ncpu * SANDBOX_SHARE)))
+    return saved
+
+
+def sandbox_choose(memory=None, cpus=None):
+    """The person's answer (fx sandbox install|reset --memory/--cpus), checked against this machine and saved for every
+    later install and reset. A value not given keeps the one chosen before, else fx's suggestion. Returns the size."""
+    m = sandbox_machine()
+    if memory is not None and (memory < 2 or (m["memory_gib"] and memory > m["memory_gib"] - 2)):
+        raise FxError("--memory %s: between 2 and %s GiB (this machine has %s GiB, and keeps 2 for itself)"
+                      % (memory, max(2, int(m["memory_gib"] - 2)), m["memory_gib"]) if m["memory_gib"] else
+                      "--memory %s: at least 2 GiB" % memory, code=3)
+    if cpus is not None and not 1 <= cpus <= m["cpus"]:
+        raise FxError("--cpus %s: between 1 and %d, the CPUs of this machine" % (cpus, m["cpus"]), code=3)
+    before = sandbox_chosen() or {}
+    sug = sandbox_size_offer()["suggest"] if (memory is None or cpus is None) and not before else {}
+    size = {"memory_gib": memory if memory is not None else before.get("memory_gib", sug.get("memory_gib")),
+            "cpus": cpus if cpus is not None else before.get("cpus", sug.get("cpus"))}
+    size["memory_gib"] = int(size["memory_gib"]) if float(size["memory_gib"]).is_integer() else size["memory_gib"]
+    size["at"] = now()
+    os.makedirs(state_dir(), exist_ok=True)
+    write_atomic(sandbox_size_path(), json.dumps(size) + "\n")
+    return size
+
+
+def sandbox_usage(days=SANDBOX_USAGE_DAYS):
+    """What VmWatch measured on this machine in the last days, oldest first."""
+    since, rows = time.time() - days * 86400, []
+    for line in (read(sandbox_usage_path(), "") or "").splitlines():
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and float(r.get("ts") or 0) >= since:
+            rows.append(r)
+    return rows
+
+
+def sandbox_usage_add(row):
+    """One measured command, kept for the suggestions; the file keeps its last SANDBOX_USAGE_KEEP lines."""
+    try:
         os.makedirs(state_dir(), exist_ok=True)
-        write_atomic(sandbox_size_path(), json.dumps(saved) + "\n")
-    share = SANDBOX_MEMORY_GIB if host_gib <= 0 else max(
-        SANDBOX_MEMORY_GIB, min(int(host_gib * SANDBOX_SHARE), int(host_gib - SANDBOX_HOST_KEEP_GIB)))
-    mem = saved.get("memory_gib") if isinstance(saved.get("memory_gib"), (int, float)) else share
-    cpu = saved.get("cpus") if isinstance(saved.get("cpus"), int) else max(min(SANDBOX_CPUS, ncpu),
-                                                                          int(ncpu * SANDBOX_SHARE))
-    return {"memory_gib": int(mem) if float(mem).is_integer() else mem, "cpus": cpu,
-            "by": "you" if "memory_gib" in saved or "cpus" in saved else "a share of this machine",
-            "machine_gib": round(host_gib, 1) if host_gib > 0 else None, "machine_cpus": ncpu}
+        path = sandbox_usage_path()
+        with open(path, "a") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if os.path.getsize(path) > SANDBOX_USAGE_KEEP * 400:
+            lines = (read(path, "") or "").splitlines()
+            if len(lines) > SANDBOX_USAGE_KEEP:
+                write_atomic(path, "\n".join(lines[-SANDBOX_USAGE_KEEP:]) + "\n")
+    except OSError:
+        pass  # what is kept for a suggestion never stops a command
+
+
+def gib_up(x):
+    return int(math.ceil(x - 1e-9))
+
+
+def sandbox_size_offer(vm=None):
+    """What fx suggests for the VM, from what it used on this machine (sandbox_usage), for the person to answer:
+    {machine, vm, chosen, history, suggest {memory_gib, cpus, why}, change (a reason to ask now, or None), options}.
+    vm: the size the VM has (sandbox_vm_size), when known."""
+    m, chosen, rows = sandbox_machine(), sandbox_chosen(), sandbox_usage()
+    outside = sandbox_host_steps_gib()
+    keep = max(SANDBOX_HOST_KEEP_GIB, gib_up(outside * SANDBOX_HEADROOM) + 2) if outside else SANDBOX_HOST_KEEP_GIB
+    cap = max(2, int(m["memory_gib"] - keep)) if m["memory_gib"] else None
+    measured = [r for r in rows if isinstance(r.get("peak_gib"), (int, float))]
+    ooms = [r for r in rows if r.get("oom")]
+    hist = {"commands": len(measured), "since": rows[0]["at"] if rows else None,
+            "peak_gib": round(max(r["peak_gib"] for r in measured), 1) if measured else None,
+            "out_of_memory": len(ooms),
+            "out_of_memory_at_gib": sorted({r.get("vm_gib") for r in ooms if r.get("vm_gib")}),
+            "peak_load": round(max(float(r.get("peak_load") or 0) for r in measured), 1) if measured else None}
+    if not measured and not ooms:
+        mem = SANDBOX_MEMORY_GIB if not m["memory_gib"] else max(SANDBOX_MEMORY_GIB, int(m["memory_gib"] * SANDBOX_SHARE))
+        why = ("nothing was measured in the VM on this machine yet: %s" % (
+            "half of this machine's %s GiB" % m["memory_gib"] if m["memory_gib"] and mem > SANDBOX_MEMORY_GIB
+            else "%d GiB, what it had before" % SANDBOX_MEMORY_GIB))
+    else:
+        need = (hist["peak_gib"] or 0) * SANDBOX_HEADROOM
+        for r in ooms:
+            need = max(need, float(r.get("vm_gib") or 0) * SANDBOX_OOM_GROW)
+        mem = max(SANDBOX_MEMORY_GIB, gib_up(need))
+        said = ["over %d command%s measured since %s the VM used at most %s GiB" % (
+            len(measured), "" if len(measured) == 1 else "s", (hist["since"] or "")[:10], hist["peak_gib"])] \
+            if measured else []
+        if ooms:
+            said.append("%d ran out of memory (at %s GiB)" % (len(ooms), ", ".join(
+                str(x) for x in hist["out_of_memory_at_gib"]) or "?"))
+        why = "; ".join(said) + ("; that and a quarter more" if not ooms else "; half again the size that ran out")
+    if cap and mem > cap:
+        why += ("; this machine can give it at most %d GiB and keep %d for itself%s, which is less than that: fewer jobs "
+                "at once or fewer browser workers" % (cap, keep, " (the factory's steps that run on it, such as virtual "
+                                                                  "phones or an app's build, used up to %.1f GiB)" % outside
+                                                      if keep > SANDBOX_HOST_KEEP_GIB else ""))
+        mem = cap
+    vm_cpus = (vm or {}).get("cpus") or (chosen or {}).get("cpus")
+    cpus = max(min(SANDBOX_CPUS, m["cpus"]), int(m["cpus"] * SANDBOX_SHARE)) if not vm_cpus else vm_cpus
+    if vm_cpus and hist["peak_load"] and hist["peak_load"] > vm_cpus * 1.2 and vm_cpus < m["cpus"] - 1:
+        cpus = min(m["cpus"] - 1, max(vm_cpus + 2, gib_up(hist["peak_load"])))
+        why += "; its load reached %s on %d CPUs: %d CPUs" % (hist["peak_load"], vm_cpus, cpus)
+    suggest = {"memory_gib": mem, "cpus": cpus, "why": why}
+    has = (vm or {}).get("memory_gib") or (chosen or {}).get("memory_gib")
+    change = None
+    if not chosen:
+        change = "no size was chosen for the VM on this machine yet"
+    elif has and (mem > has or cpus > ((vm or {}).get("cpus") or chosen["cpus"])):
+        change = "what was measured needs more than the VM has (%s GiB, %s CPUs)" % (has, (vm or {}).get("cpus") or
+                                                                                    chosen["cpus"])
+    elif has and not ooms and len(measured) >= 20 and has >= max(2 * mem, mem + 4):
+        change = "the VM has %s GiB and never used more than %s: the machine could have the rest back" % (
+            has, hist["peak_gib"])
+    options = [dict(memory_gib=mem, cpus=cpus, label="%s GiB, %d CPUs (suggested)" % (mem, cpus))]
+    if has and (has, (vm or chosen or {}).get("cpus")) != (mem, cpus):
+        options.append(dict(memory_gib=has, cpus=(vm or chosen or {}).get("cpus") or cpus,
+                            label="%s GiB, %s CPUs (as now)" % (has, (vm or chosen or {}).get("cpus") or cpus)))
+    if cap:
+        more = min(cap, max(mem + 4, gib_up(mem * 1.5)))
+        if more > mem and all(o["memory_gib"] != more for o in options):
+            options.append(dict(memory_gib=more, cpus=cpus, label="%d GiB, %d CPUs (more room)" % (more, cpus)))
+    return {"machine": m, "vm": vm, "chosen": chosen, "history": hist, "suggest": suggest, "change": change,
+            "options": options[:3], "most_gib": cap, "machine_keeps_gib": keep,
+            "outside_the_vm_gib": round(outside, 1) if outside else None,
+            "ask": "ask the person how much of this machine the sandbox VM may have (the options, or their own "
+                   "number), then fx sandbox install --memory <GiB> --cpus <n>"}
+
+
+def sandbox_host_steps_gib():
+    """The most memory a step of any factory was measured to use on this machine itself, outside the VM (costs.json,
+    host_mb): a mobile app's build and its virtual phones on macOS and Linux, or anything a job runs here. What the VM's
+    size has to leave the machine besides its own needs; 0 when nothing was measured. On Windows the phones and a
+    desktop app's real build run on Windows, outside WSL, and are not in it."""
+    most = 0.0
+    for rows in costs_load().values():
+        for r in rows if isinstance(rows, list) else []:
+            if isinstance(r, dict) and not r.get("at_rest"):
+                try:
+                    most = max(most, float(r.get("host_mb") or 0))
+                except (TypeError, ValueError):
+                    continue
+    return most / 1024
 
 
 def sandbox_vm_size(row):
@@ -23227,9 +24098,9 @@ def sandbox_vm_size(row):
             "cpus": row.get("cpus") if isinstance(row.get("cpus"), int) else None}
 
 
-def sandbox_resize_needed(has, want, asked):
-    """Whether the VM is to get the size wanted: any other size when the person set one now, otherwise only a VM
-    smaller than it (a VM made bigger by hand is never shrunk unasked)."""
+def sandbox_resize_needed(has, want, asked=True):
+    """Whether the VM is to get the size the person chose: any other size when they chose it now (asked), otherwise
+    only a VM smaller than it (one made bigger by hand, limactl edit, is never shrunk unasked)."""
     if not has or has.get("memory_gib") is None:
         return False
     if asked:
@@ -23243,11 +24114,11 @@ def sandbox_running_boxes():
     return [n for n in vm_text(p).split() if not n.endswith("-proxy")] if p.returncode == 0 else []
 
 
-def sandbox_resize(size, asked, restart):
-    """fx sandbox install on a VM that is there: give it the size wanted (sandbox_size), which needs it stopped
-    (limactl stop, edit, then started again below). The boxes running in it stop with it, and start again at their
-    job's next command, as after a restart of the machine; so with boxes running it is done only with --restart. What
-    to add to the answer, or None when the size is right (or there is no VM yet: it is made with that size)."""
+def sandbox_resize(size, restart, asked=True):
+    """fx sandbox install on a VM that is there: give it the size the person chose, which needs it stopped (limactl
+    stop, edit, then started again by the caller). The boxes running in it stop with it, and start again at their job's
+    next command, as after a restart of the machine; so with boxes running it is done only with --restart. What to add
+    to the answer, or None when the size is right (or there is no VM yet: it is made with that size)."""
     try:
         row = sandbox_vm_row()
     except (OSError, subprocess.TimeoutExpired):
@@ -23258,12 +24129,12 @@ def sandbox_resize(size, asked, restart):
     to = {"memory_gib": size["memory_gib"], "cpus": size["cpus"]}
     boxes = sandbox_running_boxes() if row.get("status") == "Running" else []
     if boxes and not restart:
-        return {"size_note": "the VM has %s GiB and %s CPUs and is to get %s GiB and %s CPUs (%s), which restarts it. %d "
+        return {"size_note": "the VM has %s GiB and %s CPUs and is to get %s GiB and %s CPUs, which restarts it. %d "
                              "box%s run%s in it now (%s): their commands would stop. Run fx sandbox install --restart "
                              "when that is all right" % (has["memory_gib"], has["cpus"], to["memory_gib"], to["cpus"],
-                                                         size["by"], len(boxes), "es" if len(boxes) > 1 else "",
+                                                         len(boxes), "es" if len(boxes) > 1 else "",
                                                          "" if len(boxes) > 1 else "s", ", ".join(boxes[:5])),
-                "boxes_running": boxes}
+                "boxes_running": boxes, "next": "ask-restart"}
     try:
         if row.get("status") == "Running":
             subprocess.run(["limactl", "stop", SANDBOX_VM], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -23279,6 +24150,115 @@ def sandbox_resize(size, asked, restart):
                                                                  SANDBOX_VM, SANDBOX_VM, to["memory_gib"], to["cpus"],
                                                                  SANDBOX_VM)}
     return {"resized": {"from": has, "to": to}, "boxes_stopped": boxes}
+
+
+VM_WATCH_EVERY = 5   # seconds between two readings of the VM's memory
+VM_WATCH_AFTER = 15  # a command shorter than this is not measured: it costs a shell into the VM
+
+
+class VmWatch:
+    """While a command runs in a box: the most memory the whole sandbox VM used (its MemTotal less MemAvailable, so the
+    page cache it can drop does not count) and its highest load, read every VM_WATCH_EVERY seconds by one shell into
+    the VM that starts once the command has run VM_WATCH_AFTER seconds. Everything that runs in the VM counts, the other
+    jobs' boxes too: that is what the VM's size has to hold. Never stops the command it watches."""
+
+    def __init__(self, box, what):
+        self.box, self.what = box, what
+        self.t0, self.proc, self.stopped = time.time(), None, threading.Event()
+        self.total = self.peak = self.load = self.cpus = None
+        self.samples = 0
+        self.thread = None
+
+    def start(self):
+        """FACTORY_VM_WATCH=0 turns the measuring off (the suggestions then rest on what was measured before)."""
+        if os.environ.get("FACTORY_VM_WATCH") == "0" or (os.environ.get("FACTORY_FAKE_MACHINE")
+                                                          and not os.environ.get("FACTORY_VM_WATCH")):
+            return self
+        self.thread = threading.Thread(target=self.watch, daemon=True)
+        self.thread.start()
+        return self
+
+    def watch(self):
+        if self.stopped.wait(float(os.environ.get("FACTORY_VM_WATCH_AFTER") or VM_WATCH_AFTER)):
+            return
+        loop = ("n=$(nproc); while :; do set -- $(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print t, a}' "
+                "/proc/meminfo); read l _ < /proc/loadavg; echo \"$1 $2 $l $n\"; sleep %d; done" % VM_WATCH_EVERY)
+        try:
+            # Its own process group: limactl runs ssh as a child, which ending limactl alone would leave holding the
+            # pipe (and the loop in the VM running) until fx exits.
+            self.proc = subprocess.Popen(["limactl", "shell", "--workdir", "/", SANDBOX_VM, "--", "timeout", "86400",
+                                          "sh", "-c", loop], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL, text=True, errors="replace", start_new_session=True)
+        except OSError:
+            return
+        if self.stopped.is_set():
+            self.end_proc()
+            return
+        try:
+            for line in self.proc.stdout:
+                self.take(line)
+        except (OSError, ValueError):
+            pass  # the pipe was closed to stop it (end_proc)
+
+    def take(self, line):
+        p = line.split()
+        try:
+            total, avail, load, cpus = int(p[0]), int(p[1]), float(p[2]), int(p[3])
+        except (IndexError, ValueError):
+            return
+        if total <= 0:
+            return
+        self.total, self.cpus = total, cpus
+        self.peak = max(self.peak or 0, total - avail)
+        self.load = max(self.load or 0.0, load)
+        self.samples += 1
+
+    def end_proc(self):
+        if self.proc is None:
+            return
+        for sig in (signal.SIGTERM, signal.SIGKILL):  # KILL after TERM always: limactl may be gone, its child not
+            try:
+                os.killpg(self.proc.pid, sig)
+            except (OSError, AttributeError):
+                try:
+                    self.proc.send_signal(sig)
+                except OSError:
+                    pass
+            try:
+                self.proc.wait(timeout=5 if sig == signal.SIGTERM else 2)
+            except subprocess.TimeoutExpired:
+                pass
+        try:
+            self.proc.stdout.close()  # the reading thread ends even if something still holds the pipe
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def stop(self, rc=None):
+        """The command ended: what was seen, kept in sandbox-usage.jsonl when anything was (with the VM's OOM kills, for a
+        command that failed). {peak_gib, vm_gib, peak_load, vm_cpus, oom} or None."""
+        self.stopped.set()
+        self.end_proc()
+        if self.thread is not None:
+            self.thread.join(timeout=10)
+        if not self.samples:
+            return None
+        gib = lambda kb: round(kb / 1048576, 2)
+        oom = vm_oom_kills(self.t0 - 5) if rc not in (0, None) else None
+        row = {"at": now(), "ts": time.time(), "box": self.box.get("name"), "what": self.what,
+               "seconds": round(time.time() - self.t0), "exit": rc, "vm_gib": round(self.total / 1048576),
+               "peak_gib": gib(self.peak), "peak_load": round(self.load, 2), "vm_cpus": self.cpus,
+               "oom": len(oom) if oom else 0}
+        sandbox_usage_add(row)
+        return dict(row, oom_kills=oom or [])
+
+
+def command_label(cmd):
+    """A command as the history names it: its first words, without the folders (a path names the project)."""
+    try:
+        words = shlex.split(cmd)
+    except ValueError:
+        words = cmd.split()
+    return " ".join(os.path.basename(w) for w in words[:3])[:60]
 
 
 def sandbox_template(size=None):
@@ -23565,7 +24545,7 @@ systemctl daemon-reload && systemctl restart docker
     return box
 
 
-def box_client_proxy_line(ip):
+def box_client_proxy_line(ip, no_proxy="localhost,127.0.0.1,::1"):
     """The box's Docker client config (/root/.docker/config.json, proxies.default): docker build passes the proxy to
     every RUN step and docker run / compose to every container, so a project's Dockerfile (RUN apk add, apt-get,
     composer, npm) installs through it without --build-arg. By address: a container does not have the box's
@@ -23574,8 +24554,7 @@ def box_client_proxy_line(ip):
     if not ip:
         return "rm -f /root/.docker/config.json"
     url = "http://%s:8888" % ip
-    conf = json.dumps({"proxies": {"default": {"httpProxy": url, "httpsProxy": url,
-                                               "noProxy": "localhost,127.0.0.1,::1"}}})
+    conf = json.dumps({"proxies": {"default": {"httpProxy": url, "httpsProxy": url, "noProxy": no_proxy}}})
     return "mkdir -p /root/.docker && printf %%s %s > /root/.docker/config.json" % shlex.quote(conf)
 
 
@@ -23674,7 +24653,7 @@ def box_env(box, env):
         url = "http://%s:8888" % box["proxy_ip"]
         for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
             got[k] = url
-        got["NO_PROXY"] = got["no_proxy"] = "localhost,127.0.0.1,::1"
+        got["NO_PROXY"] = got["no_proxy"] = box_no_proxy(box)
         got["NODE_USE_ENV_PROXY"] = "1"  # Node's own fetch (corepack fetching pnpm) reads HTTP_PROXY only so (22.21+)
     return got
 
@@ -23713,10 +24692,18 @@ def box_exec(box, cmd, cwd, env, timeout=1800, merge=True):
     there. A command over it raises subprocess.TimeoutExpired, as run does."""
     box_put_env_files(box, env)
     inner = "timeout -k 15 %d bash -lc %s" % (int(timeout), shlex.quote(cmd)) if timeout else cmd
-    p = vm_run(box_argv(box, inner, cwd, env), timeout=int(timeout) + 90 if timeout else None, merge=merge)
+    watch = VmWatch(box, command_label(cmd)).start()  # what the VM used while it ran: sandbox_size_offer
+    try:
+        p = vm_run(box_argv(box, inner, cwd, env), timeout=int(timeout) + 90 if timeout else None, merge=merge)
+    except BaseException:
+        watch.stop(None)
+        raise
+    seen = watch.stop(124 if timeout and p.returncode == 124 else p.returncode)
     if timeout and p.returncode == 124:
         raise subprocess.TimeoutExpired(cmd, timeout, output=vm_text(p))
-    return BoxRun(p.returncode, vm_text(p), (p.stderr or b"").decode("utf-8", "replace") if not merge else "")
+    r = BoxRun(p.returncode, vm_text(p), (p.stderr or b"").decode("utf-8", "replace") if not merge else "")
+    r.vm = seen
+    return r
 
 
 def box_spawn(box, cmd, cwd, env, log, key):
@@ -23894,9 +24881,59 @@ done
         raise NoSandbox("the box's firewall rules could not be set: %s" % vm_text(p)[-500:], code=3)
 
 
-def box_open(box, ctx=None):
+COMPOSE_FILE_RE = re.compile(r"(^|/)(docker-)?compose[^/]*\.ya?ml$|(^|/)[^/]*compose[^/]*\.ya?ml$")
+
+
+def compose_service_names(roots):
+    """Every name a service of a compose file under roots (the job's clones, the factory) answers to: its key under
+    services:, its container_name and hostname. What the stack's containers call each other by, which must not go
+    through the box's proxy (a minio-init calling http://minio:9000 got tinyproxy's 403 Filtered)."""
+    names = set()
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        g = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], root, check=False)
+        if g.returncode == 0:
+            rels = [r for r in (g.stdout or "").split("\0") if r]
+        else:  # not a git folder: its files, a few levels down, without what never holds the stack
+            rels = []
+            for folder, dirs, files in os.walk(root):
+                rel = os.path.relpath(folder, root)
+                dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "vendor", "jobs") and rel.count(os.sep) < 3]
+                rels += [os.path.normpath(os.path.join(rel, f)).replace(os.sep, "/") for f in files]
+        for rel in [r for r in rels if COMPOSE_FILE_RE.search(r)][:50]:
+            text = read(os.path.join(root, rel), "") or ""
+            inside, level = False, None
+            for line in text.splitlines():
+                if re.match(r"^services:\s*(#.*)?$", line):
+                    inside, level = True, None
+                    continue
+                if inside and re.match(r"^\S", line):
+                    inside = False
+                if inside:
+                    m = re.match(r"^(\s+)([A-Za-z0-9][A-Za-z0-9_.-]*):\s*(#.*)?$", line)
+                    if m and (level is None or len(m.group(1)) == level):
+                        level = len(m.group(1))
+                        names.add(m.group(2))
+                m = re.match(r"^\s+(?:container_name|hostname):\s*['\"]?([A-Za-z0-9][A-Za-z0-9_.-]*)", line)
+                if m:
+                    names.add(m.group(1))
+    return names
+
+
+def box_no_proxy(box):
+    """NO_PROXY while the box installs: this machine's names, Docker's host, and the stack's own services."""
+    return ",".join(["localhost", "127.0.0.1", "::1", "host.docker.internal"] +
+                    sorted(x for x in (box.get("no_proxy") or "").split(",") if x))
+
+
+def box_open(box, ctx=None, view=None):
     """An install: the box gets a proxy again, which lets through only the registries, until box_cut. With ctx, its
-    filter is written again from sandbox.allow as it is now: a host the user allowed after the box was made counts."""
+    filter is written again from sandbox.allow as it is now: a host the user allowed after the box was made counts.
+    The services of the compose files of the job's clones (view) and of the factory are left out of the proxy."""
+    if ctx is not None and getattr(ctx, "factory", None):
+        roots = [ctx.factory] + (list(view_worktrees(view).values()) if view else [])
+        box["no_proxy"] = ",".join(sorted(compose_service_names(roots)))
     filt = sandbox_filter(sandbox_allow(ctx)) if ctx is not None else None
     script = r"""# fx-box-open
 set -e
@@ -23916,7 +24953,7 @@ echo "proxy=$pip"
     box["proxy_ip"] = ip
     box_rules(box, True)
     vm_run(["sudo", "docker", "exec", box["name"], "bash", "-c", "# fx-box-hosts\n" + box_hosts_line(ip) + "\n" +
-            box_client_proxy_line(ip)], timeout=60)
+            box_client_proxy_line(ip, box_no_proxy(box))], timeout=60)
     if filt is not None:
         box["filter"] = hashlib.sha256(filt.encode()).hexdigest()[:12]
     box["online"] = True
@@ -24023,8 +25060,8 @@ def job_box_setup(ctx, view, box):
             log = os.path.join(ctx.job_dir(job_real_id(view)), "setup-box-%s.log" % n)
             write_atomic(log, p.stdout or "")
             if p.returncode != 0:
-                raise FxError("setup of %s in the job's box failed (exit %d); see %s.%s" % (
-                    n, p.returncode, log, net_failure_words(ctx, p.stdout)), code=3)
+                raise FxError("setup of %s in the job's box failed (exit %d);%s see %s.%s" % (
+                    n, p.returncode, died_words(p), log, net_failure_words(ctx, p.stdout)), code=3)
             box.setdefault("setup", []).append(n)
             job_box_keep(ctx, vid, box)
         job_box_warm(ctx, view, box)
@@ -24036,7 +25073,7 @@ def job_box_warm(ctx, view, box):
     not in a gate with no way out. Their failing to start is the gate's to say, not the install's."""
     if not ctx.c("app.up") and not any(ctx.rc(n, "app.up") for n in view_worktrees(view) if n in ctx.repo_names()):
         return
-    box_open(box, ctx)
+    box_open(box, ctx, view)
     try:
         app_start(ctx, dict(view, box=box, box_job=True))
     except (FxError, subprocess.TimeoutExpired) as e:
@@ -24209,16 +25246,71 @@ def box_sync_out(ctx, view, box, stamp):
     return came
 
 
+BOX_DIED = "/tmp/fx-died.log"
+
+
+def box_died_watch(box):
+    """While an install runs in the box: each container of its Docker that ends with an error has its exit code and
+    last lines kept, read right when it dies, before compose removes it (a failed minio-init left nothing in
+    setup.log). Never stops the install."""
+    # Each container's output is followed from its start: one run with --rm is already gone when it dies.
+    script = (r"""# fx-box-died-watch
+[ -f {f}.pid ] && kill "$(cat {f}.pid)" 2>/dev/null; rm -rf {f} {f}.pid {f}.d; mkdir -p {f}.d
+nohup bash -c 'echo $$ > {f}.pid; exec docker events --filter type=container --filter event=start --filter event=die """
+              r"""--format "{{{{.Action}}}} {{{{.Actor.ID}}}} {{{{.Actor.Attributes.name}}}} {{{{.Actor.Attributes.exitCode}}}}"' """
+              r"""2>/dev/null | while read act id name code; do case "$act" in
+  start) (docker logs -f "$id" > {f}.d/"$id" 2>&1 &) ;;
+  die) sleep 0.5; if [ "$code" != 0 ]; then {{ echo "==== $name exited $code"; """
+              r"""if [ -s {f}.d/"$id" ]; then tail -n 60 {f}.d/"$id"; else docker logs --tail 60 "$id" 2>&1; fi; """
+              r"""docker inspect -f '{{{{json .State.Health}}}}' "$id" 2>/dev/null; }} >> {f}; fi; rm -f {f}.d/"$id" ;;
+esac; done >/dev/null 2>&1 &""").format(f=BOX_DIED)
+    try:
+        vm_run(["sudo", "docker", "exec", "-d", box["name"], "bash", "-c", script], timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def box_died_collect(box):
+    """What box_died_watch kept, with the containers left unhealthy; the watch ends."""
+    script = r"""# fx-box-died-collect
+sleep 1; [ -f %s.pid ] && kill "$(cat %s.pid)" 2>/dev/null
+for id in $(docker ps -aq --filter health=unhealthy 2>/dev/null); do
+  echo "==== $(docker inspect -f '{{.Name}}' $id | tr -d /) exited unhealthy"; docker logs --tail 60 $id 2>&1
+done
+cat %s 2>/dev/null; rm -rf %s %s.pid %s.d
+true""" % (BOX_DIED, BOX_DIED, BOX_DIED, BOX_DIED, BOX_DIED, BOX_DIED)
+    try:
+        p = vm_run(["sudo", "docker", "exec", box["name"], "bash", "-c", script], timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return vm_text(p).strip()[-20000:] if p.returncode == 0 else ""
+
+
+def died_words(p):
+    """The services that ended with an error during an install, for fx's error: ' minio-init exited 1 (its last lines
+    are at the end of the log)' or ''."""
+    died = getattr(p, "died", None)
+    return (" %s (their last lines are at the end of the log)" % ", ".join("%s exited %s" % d for d in died[:5])
+            if died else "")
+
+
 def box_job_exec(ctx, view, box, cmd, cwd, env, timeout, online=False, sep=False):
     """A command of a job in its box: the clones' changes in, the command (with the registries only when online), what
     it changed in a clone back. Returns a BoxRun."""
     with box_lock(ctx, box["name"] + ".sync"):
         stamp = box_sync_in(ctx, view, box)
     if online:
-        box_open(box, ctx)
+        box_open(box, ctx, view)
         job_box_keep(ctx, str(view.get("id")), box)
+        box_died_watch(box)
     try:
-        return box_exec(box, cmd, cwd, env, timeout=timeout, merge=not sep)
+        r = box_exec(box, cmd, cwd, env, timeout=timeout, merge=not sep)
+        if online:
+            died = box_died_collect(box)
+            if r.returncode != 0 and died:  # what the stack's containers said before they were removed
+                r.stdout = (r.stdout or "") + "\n==== containers that ended with an error while this ran\n" + died
+                r.died = sorted(set(re.findall(r"^==== (\S+) exited (\d+)", died, re.M)))
+        return r
     finally:
         if online:
             box_cut(box)
@@ -24329,12 +25421,13 @@ def cmd_sandbox(ctx, a):
         except (OSError, subprocess.TimeoutExpired):
             row = None
         if row:
-            res["size"], want = sandbox_vm_size(row), sandbox_size()
-            res["size_wanted"] = want
-            if sandbox_resize_needed(res["size"], want, False):
-                res["size_note"] = ("the VM has %s GiB and %s CPUs; fx sandbox install gives it %s GiB and %s CPUs (%s)"
-                                    % (res["size"]["memory_gib"], res["size"]["cpus"], want["memory_gib"],
-                                       want["cpus"], want["by"]))
+            res["size"], res["size_chosen"] = sandbox_vm_size(row), sandbox_chosen()
+            offer = sandbox_size_offer(res["size"])
+            if offer["change"]:
+                res["size_offer"] = {k: offer[k] for k in ("change", "suggest", "options", "history", "machine")}
+                res["size_note"] = ("%s; fx suggests %s GiB and %s CPUs (%s): ask the person, then fx sandbox install "
+                                    "--memory <GiB> --cpus <n>" % (offer["change"], offer["suggest"]["memory_gib"],
+                                                                    offer["suggest"]["cpus"], offer["suggest"]["why"]))
         if older:
             res["boxes_with_older_allow"] = older
             res["note"] = ("these jobs' boxes were made with an older sandbox.allow: their next install (fx run --job "
@@ -24351,11 +25444,24 @@ def cmd_sandbox(ctx, a):
             out({"ok": False, "why": kvm, "install": SANDBOX_INSTALL, "next": "fix that, then fx sandbox install again"})
             sys.exit(3)
         asked = getattr(a, "memory", None) is not None or getattr(a, "cpus", None) is not None
-        size = sandbox_size(getattr(a, "memory", None), getattr(a, "cpus", None))
+        if asked:
+            size = sandbox_choose(getattr(a, "memory", None), getattr(a, "cpus", None))
+        else:
+            size = sandbox_chosen()
+        if not size:  # the first time on this machine: the person says how much of it the VM may have
+            try:
+                vm = sandbox_vm_size(sandbox_vm_row())
+            except (OSError, subprocess.TimeoutExpired):
+                vm = None
+            offer = sandbox_size_offer(vm if vm and vm.get("memory_gib") else None)
+            out(dict(offer, ok=False, next="ask-size",
+                     why="no size was chosen for the sandbox VM on this machine: ask the person how much memory and how "
+                         "many CPUs it may have, then fx sandbox %s --memory <GiB> --cpus <n>" % a.action))
+            sys.exit(2)
         if a.action == "reset":
             subprocess.run(["limactl", "delete", "--force", SANDBOX_VM], stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL)
-        resized = sandbox_resize(size, asked, getattr(a, "restart", False)) if a.action == "install" else None
+        resized = sandbox_resize(size, getattr(a, "restart", False), asked) if a.action == "install" else None
         ok, why = sandbox_state()
         if not ok:
             names = (subprocess.run(["limactl", "list", "--format", "{{.Name}}"], stdout=subprocess.PIPE,
@@ -24373,13 +25479,20 @@ def cmd_sandbox(ctx, a):
             has = sandbox_vm_size(sandbox_vm_row())
         except (OSError, subprocess.TimeoutExpired):
             has = None
-        res = {"ok": ok, "vm": SANDBOX_VM, "why": why or None, "size": has, "size_wanted": size,
+        res = {"ok": ok, "vm": SANDBOX_VM, "why": why or None, "size": has, "size_chosen": size,
                "next": "go on" if ok else "fix what fx said"}
         if resized:
             res.update(resized)
         out(res)
         if not ok:
             sys.exit(3)
+        return
+    if a.action == "size":
+        try:
+            vm = sandbox_vm_size(sandbox_vm_row()) if shutil.which("limactl") else None
+        except (OSError, subprocess.TimeoutExpired):
+            vm = None
+        out(dict(sandbox_size_offer(vm if vm and vm.get("memory_gib") else None), ok=True))
         return
     if a.action == "host":
         sandbox_host(ctx, a)
@@ -24407,7 +25520,7 @@ def cmd_sandbox(ctx, a):
                 job_box_keep(ctx, vid, None)
         out({"ok": True, "removed": names})
         return
-    raise FxError("fx sandbox status | install | reset | clean | host", code=3)
+    raise FxError("fx sandbox status | size | install | reset | clean | host", code=3)
 
 
 def review_box_ctx(ctx, repo):
@@ -29441,16 +30554,16 @@ def build_parser():
                    "clone's code); env: its test values")
     s.add_argument("--code", action="store_true", help="check: also that the cited code reads each variable (base)")
     s.set_defaults(fn=cmd_limits)
-    s = sub.add_parser("sandbox", help="the sandbox VM where merge requests and jobs run: status, install, reset, "
-                                       "clean, host (a job on this machine, on the person's word)")
-    s.add_argument("action", choices=["status", "install", "reset", "clean", "host"])
+    s = sub.add_parser("sandbox", help="the sandbox VM where merge requests and jobs run: status, size (what fx "
+                                       "suggests for it, from what it used), install, reset, clean, host (a job on "
+                                       "this machine, on the person's word)")
+    s.add_argument("action", choices=["status", "size", "install", "reset", "clean", "host"])
     s.add_argument("--job", help="host: the job that runs on this machine")
     s.add_argument("--reason", help="host: the person's own words, which go in the pull request")
     s.add_argument("--confirm", help="host: the code fx printed when the sandbox was missing")
-    s.add_argument("--memory", type=float, metavar="GIB", help="install, reset: the VM's memory in GiB, kept for every "
-                   "later install and reset (default: half of this machine's, at least 6)")
-    s.add_argument("--cpus", type=int, help="install, reset: the VM's CPUs, kept likewise (default: half of this "
-                   "machine's, at least 4)")
+    s.add_argument("--memory", type=float, metavar="GIB", help="install, reset: the VM's memory in GiB, as the person "
+                   "chose it, kept for every later install and reset (the first time, install asks: next ask-size)")
+    s.add_argument("--cpus", type=int, help="install, reset: the VM's CPUs, as the person chose them, kept likewise")
     s.add_argument("--restart", action="store_true", help="install: restart the VM for its new size even while jobs' "
                    "boxes run in it")
     s.set_defaults(fn=cmd_sandbox)
@@ -29542,6 +30655,9 @@ def build_parser():
     s.add_argument("--dry-run", action="store_true",
                    help="run the whole gate (checks, app, e2e, UI check, scanners) and count nothing: the round is put "
                         "aside, the job stays where it was (try the factory's scripts before they cost a round)")
+    s.add_argument("--full", action="store_true",
+                   help="call the whole permission table and let ZAP scan the whole app, whatever the job changed "
+                        "(by default a gate scans what the job's change can reach)")
     s.set_defaults(fn=cmd_gate)
     s = sub.add_parser("checks", help="run the job's checks script in its clone and keep the result for the commit: the "
                                       "gate does not run it again on a commit that passed")
