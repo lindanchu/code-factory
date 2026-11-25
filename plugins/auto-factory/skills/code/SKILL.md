@@ -456,7 +456,8 @@ a factory whose limits were never worked out (after the update to this version, 
    always; at most 3 jobs per session). When the team already has a Jira issue for a fix (the user says so, or names
    it), start that issue instead, so the job keeps its Jira link: `fx new <KEY> --fixes-limit <module>/<parameter>`
    (as `fx limits tasks` names them; repeatable); fx adds the task's criteria to the issue. Once their pull requests are merged and **Learn** applied their logic,
-   `fx limits check` passes and jobs start again.
+   `fx limits check` passes and jobs start again. Inside such a job, `fx limits check <job>` checks the limits as
+   its gate does: the job's staged logic over the factory's, and the code in the job's clone (`read` says so).
 
 `next: limits` from the gate of a running job: the round did not count, no builder. Run the steps above; the job
 goes on from its gate once the fixes are merged.

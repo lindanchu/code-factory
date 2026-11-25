@@ -1974,7 +1974,9 @@ def limits_task_text(m):
             "2. %s: the row of \"%s\" gives that variable in Env, the value the factory's test stack "
             "runs with in Test value (high enough, or off, so that tests and scanners never meet the limit), and the "
             "line that reads it in Code.\n"
-            "3. A test shows the limit applies with the default and follows the variable when it is set.\n"
+            "3. A test shows the limit applies with the default and follows the variable when it is set.\n\n"
+            "`fx limits check <this job>` checks it as the gate does: the job's staged logic over the factory's, and the "
+            "code in the job's clone.\n"
             % (m["parameter"], m["module"], m["value"] or "?", m["code"] or "the code", name, m["value"] or "?",
                "`logic/shared.md` (its Limits table)" if m["module"] == LIMITS_SHARED else
                "`logic/%s/README.md`" % m["module"], m["parameter"]))
@@ -1989,9 +1991,28 @@ def cmd_limits(ctx, a):
         job = ctx.load(a.job)
         out({"ok": True, "job": job["id"], "env": limits_env(ctx, job)})
         return
+    if a.job and a.action != "check":
+        raise FxError("fx limits %s works on the factory's logic: give no job (a job's own limits: fx limits check <job>)"
+                      % a.action, code=3)
+    if a.job:  # as the gate checks it (limits_gate): the job's staged logic over the factory's, the code of its clone
+        job = ctx.load(a.job)
+        roots = job_code_roots(job)
+        code = roots if isinstance(roots, dict) else {job.get("repo") or (ctx.repo_names() or ["app"])[0]: roots}
+        code = {n: d for n, d in code.items() if d}
+        if not code or not all(os.path.isdir(d) for d in code.values()):
+            raise FxError("the job's clone is gone; nothing to check its limits against", code=3)
+        sdir = os.path.join(ctx.job_dir(job["id"]), "logic")
+        staged = md_files(sdir, recursive=True)
+        res = limits_check(ctx, over=sdir, code=code)
+        out(dict(res, words=limits_words(res), next="go on" if res["ok"] else "fix what words says",
+                 read="the factory's logic with the job's staged logic over it (%s), and the code in the job's clone"
+                      % (", ".join(staged) if staged else "the job staged none")))
+        return
     res = limits_check(ctx, code=knowledge_codes(ctx) if a.code else None)
     if a.action == "check":
-        out(dict(res, words=limits_words(res), next="go on" if res["ok"] else "limits"))
+        out(dict(res, words=limits_words(res), next="go on" if res["ok"] else "limits",
+                 read="the factory's logic%s; a job's own staged logic: fx limits check <job>"
+                      % (" and the base code" if a.code else "")))
         return
     if a.action == "tasks":
         folder = os.path.join(ctx.jobs, LIMITS_DIR)
@@ -29131,7 +29152,8 @@ def build_parser():
     s.set_defaults(fn=cmd_usage)
     s = sub.add_parser("limits", help="the app's limits: check, write fix tasks, mark worked out, a job's test values")
     s.add_argument("action", choices=["check", "tasks", "mark", "env"])
-    s.add_argument("job", nargs="?")
+    s.add_argument("job", nargs="?", help="check: a job's own limits, as its gate checks them (its staged logic, its "
+                   "clone's code); env: its test values")
     s.add_argument("--code", action="store_true", help="check: also that the cited code reads each variable (base)")
     s.set_defaults(fn=cmd_limits)
     s = sub.add_parser("sandbox", help="the sandbox VM where merge requests and jobs run: status, install, reset, "

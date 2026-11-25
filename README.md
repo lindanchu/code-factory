@@ -1229,6 +1229,12 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
   jobs at once with room to spare (above); for heavy builds several at a time, raise `memory` in
   `fx-sandbox.yaml` before `fx sandbox install`, or with `limactl edit fx-sandbox`.
 
+### Upgrading to 3.11.2: a job checks its own limits
+
+- `fx limits check <job>` checks the limits as the job's gate does: the job's staged logic over the factory's, and
+  the code in the job's clone. Its answer says what it read (`read`); without a job it reads the factory's logic
+  only. `fx limits tasks` and `fx limits mark` refuse a job instead of ignoring it.
+
 ### Upgrading to 3.11.1: a scan stops for its login only when it was refused
 
 - A ZAP scan stops the gate for its login (`next: login`) only when most of its answers were 401, 403 or 429, as

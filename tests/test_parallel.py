@@ -2029,6 +2029,32 @@ class LimitsTest(BoxCase):
         self.assertEqual(code, 0, res)
         self.assertTrue(self.box.job(f, res["job"]).get("limits_fix"))
 
+    def test_a_fix_task_checks_its_own_staged_limits(self):
+        f = self.factory_with("lim6", self.RATE, self.LOCK)
+        self.assertEqual(self.box.fx(f, "limits", "mark")[0], 0)
+        task = self.box.fx(f, "limits", "tasks")[1]["tasks"][0]["task_file"]
+        self.assertIn("fx limits check <this job>", slurp(task))
+        code, res = self.box.fx(f, "new", "--local", "Make it settable", "--issue-file", task, "--base", "main")
+        self.assertEqual(code, 0, res)
+        jid = res["job"]
+        job = self.box.job(f, jid)
+        wt = job.get("worktree") or next(iter(job["repos"].values()))["worktree"]
+        code, res = self.box.fx(f, "limits", "check", jid)
+        self.assertFalse(res["ok"])  # nothing staged yet: the factory's logic, still MISSING
+        self.assertIn("the job staged none", res["read"])
+        # the builder's work: the code reads the variable, the staged table names it
+        write(os.path.join(wt, "app", "Login.php"), "line\n" * 8 + "$max = getenv('LOGIN_MAX_ATTEMPTS') ?: 5;\n")
+        write(os.path.join(wt, "config", "api.php"), "line\nline\n'rate' => env('API_RATE_LIMIT', 60),\n")
+        fixed = self.LOCK.replace("MISSING: LOGIN_MAX_ATTEMPTS", "LOGIN_MAX_ATTEMPTS")
+        write(os.path.join(f, "jobs", jid, "logic", "auth", "README.md"), self.TABLE % "\n".join([self.RATE, fixed]))
+        code, res = self.box.fx(f, "limits", "check", jid)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["missing"], [])
+        self.assertIn("auth/README.md", res["read"])
+        code, res = self.box.fx(f, "limits", "tasks", jid)
+        self.assertEqual(code, 3, res)
+        self.assertIn("give no job", res["error"])
+
     def test_a_limit_with_no_test_value_cannot_be_marked(self):
         f = self.factory_with("lim2", "| Calls per minute | 60 | `config/api.php:3` | API_RATE_LIMIT |  |")
         code, res = self.box.fx(f, "limits", "mark")
