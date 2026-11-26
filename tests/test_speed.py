@@ -1048,6 +1048,37 @@ class Issue8Test(FxTestCase):
             fx.factory_freeze(self.f.ctx(), head)  # raised SameFileError before
         self.assertEqual(ctx._frozen, snap)
 
+    def test_a_factory_in_a_folder_of_its_repository_is_frozen_there(self):
+        """Several factories in one git repository (<project>/<repo>/factory.json): the frozen worktree is of the whole
+        repository, and every frozen step read <worktree>/factory.json, which is not there."""
+        mono = os.path.join(self.f.root if hasattr(self.f, "root") else os.path.dirname(self.f.factory), "mono")
+        fac = os.path.join(mono, "shop", "api")
+        shutil.copytree(self.f.factory, fac, ignore=shutil.ignore_patterns("jobs", ".git"))
+        write(os.path.join(mono, "README.md"), "factories\n")
+        write(os.path.join(fac, ".gitignore"), "jobs/\nbaseline.json\n")
+        write(os.path.join(fac, "qa", "e2e", "a.spec.ts"), "t\n")
+        sh(["git", "init", "-q"], mono)
+        sh(["git", "add", "-A"], mono)
+        sh(["git", "commit", "-qm", "two factories"], mono)
+        write(os.path.join(fac, "baseline.json"), "{}\n")  # kept beside the settings, never committed
+        head = sh(["git", "rev-parse", "HEAD"], mono).strip()
+        cwd = os.getcwd()
+        os.chdir(fac)
+        try:
+            ctx = fx.Ctx()
+            with mock.patch.object(fx, "lane_folders", return_value=[("ui", "qa")]), \
+                    mock.patch.dict(os.environ, {"FACTORY_NO_FREEZE": ""}):
+                self.assertIsNone(fx.factory_freeze(ctx, head))
+        finally:
+            os.chdir(cwd)
+        root = fx.settings_root(ctx)
+        self.assertEqual(root, os.path.join(ctx.work, fx.FROZEN_DIR, head[:12], "shop", "api"))
+        self.assertTrue(ctx.cfg)  # factory.json read from there
+        self.assertTrue(os.path.isfile(os.path.join(root, "checks.sh")))
+        self.assertTrue(os.path.isfile(os.path.join(root, "baseline.json")))
+        self.assertEqual(os.path.realpath(os.path.join(root, "qa")), os.path.realpath(os.path.join(fac, "qa")))
+        self.assertFalse(os.path.exists(os.path.join(ctx.work, fx.FROZEN_DIR, head[:12], "baseline.json")))
+
 
 class SandboxSizeTest(FxTestCase):
     """The VM's size: the person's answer the first time, then what fx measured suggests (#6)."""

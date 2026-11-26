@@ -1239,6 +1239,13 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
 - The VM's memory: one box per job at once (and per candidate or package). Its 6 GB held three small web
   jobs at once with room to spare (above); since 3.13 you choose it, from what fx measured (below).
 
+### Upgrading to 3.15.1: a factory in a folder of its repository
+
+- Several factories kept in one git repository (`<project>/<repo>/factory.json`) could not run a gate or `fx checks`:
+  the gate's frozen copy of the factory is a worktree of the whole repository, and it read `factory.json` at the top
+  of it ("this factory repository is not set up yet"). It now reads the factory's own folder in that worktree. A
+  factory that has its repository to itself is not affected; `FACTORY_NO_FREEZE=1` is no longer needed.
+
 ### Upgrading to 3.15.0: a job's box that broke under it
 
 - The sandbox VM's unattended upgrades ran needrestart, which restarted containerd and Sysbox under the running

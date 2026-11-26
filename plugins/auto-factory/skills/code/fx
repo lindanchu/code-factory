@@ -3277,11 +3277,15 @@ def factory_freeze(ctx, at, job=None):
         return None
     root = os.path.join(ctx.work, FROZEN_DIR)
     snap = os.path.join(root, at[:12])
+    # The worktree is of the whole git repository; a factory kept in a folder of it (several factories in one
+    # repository, each factory.json in a folder of its own) is that folder of the worktree.
+    prefix = git(["rev-parse", "--show-prefix"], ctx.factory, check=False).stdout.strip().strip("/")
+    frozen = os.path.join(snap, prefix) if prefix else snap
     os.makedirs(root, exist_ok=True)
     with path_lock("factory-freeze", root, wait=300):
         if not os.path.isfile(os.path.join(snap, ".git")) or \
                 git(["rev-parse", "HEAD"], snap, check=False).stdout.strip() != at or \
-                factory_dirty(ctx, job, root=snap):  # what an earlier gate ran changed it: made again
+                factory_dirty(ctx, job, root=frozen):  # what an earlier gate ran changed it: made again
             if os.path.isfile(os.path.join(snap, ".git")):
                 git(["worktree", "remove", "--force", snap], ctx.factory, check=False)
             shutil.rmtree(snap, ignore_errors=True)
@@ -3303,7 +3307,7 @@ def factory_freeze(ctx, at, job=None):
     if bcfg and bcfg["repo"] == "factory":
         keep.append(bcfg["manifest"])  # the reference images' list as recorded here, pushed or not yet committed
     for name in keep:
-        src, dst = os.path.join(ctx.factory, name), os.path.join(snap, name)
+        src, dst = os.path.join(ctx.factory, name), os.path.join(frozen, name)
         if not os.path.exists(src):
             continue
         # A copy made before has a lane's folder (qa/) as a link back to the factory: the file there is the source
@@ -3313,15 +3317,15 @@ def factory_freeze(ctx, at, job=None):
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(src, dst)
     for _, path in lane_folders(ctx):  # a lane's folder: its holder's work in progress lives there, read as it is
-        dst = os.path.join(snap, path)
+        dst = os.path.join(frozen, path)
         if os.path.isdir(os.path.join(ctx.factory, path)) and not os.path.islink(dst):
             shutil.rmtree(dst, ignore_errors=True)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             os.symlink(os.path.join(ctx.factory, path), dst)
-    if os.path.isdir(os.path.join(ctx.factory, "local")) and not os.path.exists(os.path.join(snap, "local")):
-        os.symlink(os.path.join(ctx.factory, "local"), os.path.join(snap, "local"))
+    if os.path.isdir(os.path.join(ctx.factory, "local")) and not os.path.exists(os.path.join(frozen, "local")):
+        os.symlink(os.path.join(ctx.factory, "local"), os.path.join(frozen, "local"))
     dirty = factory_dirty(ctx, job)
-    ctx._frozen = snap
+    ctx._frozen = frozen
     ctx.load_config(True)
     return ("the factory folder has changes not committed; this gate used the settings as committed (%s) and left them "
             "out:\n%s" % (at[:10], dirty)) if dirty else None
