@@ -215,6 +215,11 @@ elif name == "limactl":
                 sys.exit(1)
             open(boxfile(n_), "w").write("true")
             boxlog("resume", n_)
+        elif "# fx-box-health" in s_:  # what an exec in the box says: STUB_RUN_DIR/health-<name> (3 images by default)
+            n_ = re.search(r"docker exec (\S+)", s_).group(1)
+            hf = os.path.join(rundir, "health-" + n_)
+            boxlog("health", n_)
+            print(open(hf).read() if os.path.exists(hf) else "3")
         elif "# fx-box-rules" in s_:
             boxlog("rules", re.search(r"--comment (\S+)", s_).group(1), online="--dport 8888" in s_)
         elif "iptables -D DOCKER-USER" in s_ and "--dport 8888" in s_:
@@ -2011,7 +2016,7 @@ class ScriptTest(unittest.TestCase):
             self.assertEqual(json.load(f)["version"], v)
         with open(os.path.join(ROOT, "plugins", "auto-factory", "skills", "code", "shared", "VERSION")) as f:
             self.assertEqual(f.read().strip(), v)  # the two skills ship together
-        self.assertEqual(v, "3.14.0")
+        self.assertEqual(v, "3.15.0")
 
     def test_three_commands(self):
         """/auto-factory:code and /auto-factory:review (no auto test here): a plugin skill's command is

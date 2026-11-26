@@ -1239,6 +1239,38 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
 - The VM's memory: one box per job at once (and per candidate or package). Its 6 GB held three small web
   jobs at once with room to spare (above); since 3.13 you choose it, from what fx measured (below).
 
+### Upgrading to 3.15.0: a job's box that broke under it
+
+- The sandbox VM's unattended upgrades ran needrestart, which restarted containerd and Sysbox under the running
+  boxes. A box stayed "Up", but every command in it failed (`unsafe procfs detected`), and the gate counted that as
+  the code's FAIL; a box started again by hand had lost the images its setup pulled, and the next round failed too.
+- needrestart in the VM now only lists what it would restart, and never containerd, Docker or Sysbox
+  (`/etc/needrestart/conf.d/fx-sandbox.conf`). A VM made before 3.15.0 gets the file before its next box;
+  `fx sandbox status` shows `auto_restarts`, and `fx doctor` checks it.
+- Before a job's command, fx looks at its box once: a box whose runtime went away is made again, with the job's setup,
+  and a box whose Docker lost the setup's images runs the setup again. fx says so in one line.
+- A round whose checks or app failed for that reason is `void: true` with `next: gate`: it does not count, and no
+  builder is sent. `fx sandbox box --job <job> --recreate` makes one job's box again without making the whole VM again.
+
+### Upgrading to 3.15.0: an e2e suite kept in the factory repository
+
+- The e2e map looked for test files only in the project's clone, so a factory that keeps its suite in its own
+  repository (a `qa/` folder, often a lane's) ran the whole suite in every job. The map now says
+  `"tests_root": "factory"`: its `tests` are then paths of the factory repository, and `paths`, `shared` and `none`
+  stay the project's. The chosen paths are relative to `FACTORY_E2E_ROOT` (the factory, or the job's copy of a lane's
+  folder). A test of that suite not committed yet runs in every job that reads it there.
+- An entry with `"tests": []` is an area no e2e test opens: a change there runs no e2e test.
+- `fx e2e check` names a suite that is in the factory when the map does not say so. Run `fx e2e check` after
+  updating; add `"tests_root": "factory"` to a map whose tests are in the factory repository.
+
+### Upgrading to 3.15.0: smaller fixes
+
+- `fx tidy` no longer appends the line that points at `open.md` to `open.md` itself on every run, and takes out the
+  copies an older tidy left there.
+- `fx tidy` moves the change history of `logic/shared.md` into `logic/history.md`. A `shared.md` still over the
+  limit gets advice that works (`logic_by_hand`), in tidy and in `fx doctor`, instead of a `--split` that refuses it.
+- `fx doctor` no longer counts `docker run --pull=never` (or a `docker run` of an image setup pulls) as a fetch.
+
 ### Upgrading to 3.14.0: a job runs the e2e tests its change reaches
 
 - A gate ran the whole end-to-end suite for every job, every round (about 970 browser tests and 28 minutes on one

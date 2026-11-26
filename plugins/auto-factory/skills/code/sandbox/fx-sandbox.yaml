@@ -24,6 +24,16 @@ provision:
     export DEBIAN_FRONTEND=noninteractive
     # at every start: the VM's disk without flushes (SANDBOX_NO_FLUSH in fx: nothing here is kept that a crash could cost)
     findmnt -no OPTIONS / | grep -q nobarrier || mount -o remount,barrier=0 / || true
+    # at every start: needrestart (unattended-upgrades) never restarts containerd, Docker or Sysbox under the boxes
+    # (SANDBOX_NEEDRESTART in fx): a box whose sysbox-fs went away fails every command, and not for the code
+    mkdir -p /etc/needrestart/conf.d
+    cat > /etc/needrestart/conf.d/fx-sandbox.conf <<'NREOF'
+    # fx: the boxes run on containerd, Docker and Sysbox: never restart them under a box
+    $nrconf{restart} = 'l';
+    $nrconf{override_rc}{qr(^containerd)} = 0;
+    $nrconf{override_rc}{qr(^docker)} = 0;
+    $nrconf{override_rc}{qr(^sysbox)} = 0;
+    NREOF
     test -f /etc/fx-sandbox-ready && exit 0
     apt-get update
     apt-get install -y ca-certificates curl jq iptables

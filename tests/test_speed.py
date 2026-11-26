@@ -2000,6 +2000,72 @@ class E2eChoiceTest(ChecksCase):
                       self.checks_md())
 
 
+class E2eSuiteInTheFactoryTest(ChecksCase):
+    """A factory that keeps the e2e suite in its own repository (qa/e2e/) got no test of its map's to match: every job
+    ran the whole suite. The map says "tests_root": "factory", and its tests are files of the factory repository."""
+    script = E2E_SCRIPT
+    base_files = {"README.md": "p\n", "src/cart/cart.py": "x = 1\n", "src/static/about.html": "<p/>\n",
+                  "src/home/h.py": "h\n", "docs/a.md": "a\n"}
+    qa = {"qa/e2e/cart/buy.spec.ts": "t\n", "qa/e2e/home/home.spec.ts": "t\n", "qa/playwright.config.ts": "c\n"}
+    m = {"tests_root": "factory", "tests": ["qa/e2e/**/*.spec.ts"], "shared": ["qa/playwright.config.ts"],
+         "none": ["docs/**", "app.py"],
+         "map": [{"paths": ["src/cart/**"], "tests": ["qa/e2e/cart/**"]},
+                 {"paths": ["src/home/**"], "tests": ["qa/e2e/home/*.spec.ts"]},
+                 {"paths": ["src/static/**"], "tests": []}]}
+
+    def setUp(self):
+        super().setUp()
+        for rel, text in self.qa.items():
+            write(os.path.join(self.f.factory, rel), text)
+        write(os.path.join(self.f.factory, ".gitignore"), "jobs/\n")
+        sh(["git", "init", "-q"], self.f.factory)
+        sh(["git", "add", "-A"], self.f.factory)
+        sh(["git", "commit", "-q", "-m", "factory"], self.f.factory)
+        self.put_map(self.m)
+
+    def put_map(self, m):
+        path = os.path.join(fx.repo_knowledge_dir(self.f.ctx()), "e2e-map.json")
+        write(path, json.dumps(m))
+        sh(["git", "add", "-A"], self.f.factory)
+        sh(["git", "commit", "-q", "-m", "map"], self.f.factory)
+
+    def ran(self):
+        code, res = self.checks()
+        self.assertEqual((code, res["checks"]), (0, "PASS"), res)
+        return slurp(res["log"])
+
+    def test_a_change_runs_the_factory_tests_of_its_pages(self):
+        self.f.commit({"src/cart/cart.py": "x = 2\n"})
+        self.assertIn("picked:qa/e2e/cart/buy.spec.ts \n", self.ran())
+        env = fx.e2e_env(*fx.one_app(self.f.ctx(), self.f.job()))
+        self.assertEqual(env["FACTORY_E2E_ROOT"], self.f.factory)
+        code, res = self.fx("e2e", "check")
+        self.assertEqual((res["ok"], res["tests_root"], res["tests"], res["empty"]), (True, "factory", 2, []), res)
+
+    def test_a_factory_test_not_committed_runs_in_every_job(self):
+        self.f.commit({"src/cart/cart.py": "x = 2\n"})
+        write(os.path.join(self.f.factory, "qa/e2e/home/home.spec.ts"), "t2\n")
+        write(os.path.join(self.f.factory, "qa/e2e/home/new.spec.ts"), "t\n")
+        self.assertIn("picked:qa/e2e/cart/buy.spec.ts qa/e2e/home/home.spec.ts qa/e2e/home/new.spec.ts \n", self.ran())
+
+    def test_an_entry_with_no_test_runs_none(self):
+        self.f.commit({"src/static/about.html": "<p>x</p>\n"})
+        log = self.ran()
+        self.assertIn("full= why=no e2e test: the change reaches no page", log)
+
+    def test_a_suite_in_the_factory_without_tests_root_is_named(self):
+        self.put_map({k: v for k, v in self.m.items() if k != "tests_root"})
+        code, res = self.fx("e2e", "check")
+        self.assertEqual((code, res["ok"]), (1, False), res)
+        self.assertIn('"tests_root": "factory"', res["problem"])
+        self.f.commit({"src/cart/cart.py": "x = 2\n"})
+        self.assertIn("full=1 why=the e2e map's \"tests\" match no file of the repository, but files of the factory",
+                      self.ran())
+        self.put_map(dict(self.m, tests_root="qa"))
+        code, res = self.fx("e2e", "check")
+        self.assertIn('"tests_root" is "project"', res["problem"])
+
+
 class StagesTest(unittest.TestCase):
     def test_each_stage_ends_where_the_next_starts(self):
         out = ("x\n::fx-stage lint 1000000100\nok\n::fx-stage unit 1000000130\n::fx-stage odd\n"

@@ -4424,6 +4424,7 @@ def cmd_setup(ctx, a):
             job_box_keep(ctx, job["id"], box)
     if box:
         job_box_warm(ctx, job, box)
+        job_box_images(ctx, job["id"], box)
     res = {"ok": True, "job": job["id"], "log": logs.get(todo[0]) if not several else None}
     warn = [w for n in todo for w in [node_engine_warning(ctx, job, n, box)] if w]
     if box and box.get("warm_failed"):
@@ -4685,6 +4686,9 @@ def gate_round_repos(ctx, job, a, place):
             info["script"] = os.path.relpath(checks_script(ctx, job, n), settings_root(ctx))
             cr = checks_once(rc_, v, os.path.join(rdir, info["log"]), "gate", rn=rn, place=place)
             info["cr"], info["checks_out"] = cr, cr["output"]
+            if cr.get("box_gone"):
+                gate_void(ctx, job["id"], rn, rdir, place, box_gone_words("the checks script of %s" % n,
+                                                                          cr["box_gone"]), next_step="gate")
             off = None if cr["ok"] else box_offline_failure(ctx, v, cr["output"])
             if off:
                 gate_void(ctx, job["id"], rn, rdir, place, gate_offline_words("the checks script of %s" % n, off),
@@ -4759,7 +4763,12 @@ def gate_round_repos(ctx, job, a, place):
         except FxError as e:
             if e.extra.get("port_taken"):
                 gate_void(ctx, job["id"], rn, rdir, place, str(e))
-            off = box_offline_failure(ctx, job, read(e.extra.get("log") or "", "") or str(e))
+            said = read(e.extra.get("log") or "", "") or str(e)
+            gone = box_gone_failure(said + "\n" + str(e))
+            if gone:
+                job_box_broken(ctx, job, gone)
+                gate_void(ctx, job["id"], rn, rdir, place, box_gone_words("app.up", gone), next_step="gate")
+            off = box_offline_failure(ctx, job, said)
             if off:
                 gate_void(ctx, job["id"], rn, rdir, place, gate_offline_words("app.up", off), next_step="stop")
             problems.append("the app%s could not start: %s" % ("s" if len(apps) > 1 else "", e))
@@ -5177,6 +5186,9 @@ def gate_round_one(ctx, job, a, place):
         # failure is never taken over: see the checks section.
         cr = checks_once(ctx, job, os.path.join(rdir, "checks.log"), "gate", rn=rn, place=place)
         checks_out, checks_ok = cr["output"], cr["ok"]
+        if cr.get("box_gone"):
+            gate_void(ctx, job["id"], rn, rdir, place, box_gone_words("the checks script", cr["box_gone"]),
+                      next_step="gate")
         off = None if cr["ok"] else box_offline_failure(ctx, job, cr["output"])
         if off:
             gate_void(ctx, job["id"], rn, rdir, place, gate_offline_words("the checks script", off),
@@ -5240,7 +5252,12 @@ def gate_round_one(ctx, job, a, place):
         except FxError as e:
             if e.extra.get("port_taken"):
                 gate_void(ctx, job["id"], rn, rdir, place, str(e))
-            off = box_offline_failure(ctx, job, read(e.extra.get("log") or "", "") or str(e))
+            said = read(e.extra.get("log") or "", "") or str(e)
+            gone = box_gone_failure(said + "\n" + str(e))
+            if gone:
+                job_box_broken(ctx, job, gone)
+                gate_void(ctx, job["id"], rn, rdir, place, box_gone_words("app.up", gone), next_step="gate")
+            off = box_offline_failure(ctx, job, said)
             if off:
                 gate_void(ctx, job["id"], rn, rdir, place, gate_offline_words("app.up", off), next_step="stop")
             problems.append("the app could not start: %s" % e)
@@ -5980,8 +5997,15 @@ def checks_env(ctx, job):
 # one test file per line, maybe none) or FACTORY_E2E_FULL=1, FACTORY_E2E_WHY either way, and FACTORY_CHANGED_FILES (a
 # file: the job's changed paths against FACTORY_BASE_REF). Without FACTORY_E2E_TESTS a script runs the whole suite, as
 # one written before this did. The whole suite itself runs in fx selftest, and in the team's CI on the base branch.
+#
+# A factory may keep the suite in its own repository (qa/e2e/, often a lane's folder): "tests_root": "factory" says
+# so. Then "tests" and each entry's "tests" are paths of the factory repository, "paths", "shared" and "none" still the
+# project's; a test file of that suite not committed yet runs in every job that reads it there, and FACTORY_E2E_ROOT
+# names the folder the chosen paths are relative to (the factory, or the job's copy of the lanes' folders). An entry
+# whose "tests" is empty is an area no e2e test opens: a change there runs none.
 
 E2E_MAP_NAME = "e2e-map.json"
+E2E_ROOTS = ("project", "factory")
 
 
 def e2e_match(path, globs):
@@ -6002,11 +6026,52 @@ def e2e_map(ctx):
     globs = lambda v: isinstance(v, list) and all(isinstance(x, str) and x.strip() for x in v)
     if not isinstance(m, dict) or not m.get("tests") or not globs(m.get("tests")) or \
             not all(globs(m.get(k, [])) for k in ("shared", "none")) or not isinstance(m.get("map", []), list) or \
-            not all(isinstance(e, dict) and e.get("paths") and globs(e["paths"]) and e.get("tests") and globs(e["tests"])
+            not all(isinstance(e, dict) and e.get("paths") and globs(e["paths"]) and globs(e.get("tests", []))
                     for e in m.get("map", [])):
         return None, ("%s does not say what fx reads: \"tests\" (globs), \"shared\" and \"none\" (globs), \"map\" "
-                      "(entries of \"paths\" and \"tests\" globs)" % rel)
+                      "(entries of \"paths\" globs and \"tests\" globs, maybe none)" % rel)
+    if str(m.get("tests_root", "project")).strip().lower() not in E2E_ROOTS:
+        return None, '%s: "tests_root" is "project" (the default: the tests are in the repository) or "factory" (they ' \
+                     'are in the factory repository, as its own suite)' % rel
     return m, None
+
+
+def e2e_in_factory(m):
+    """The map's tests are files of the factory repository (its own suite, a qa/ folder), not of the project."""
+    return str((m or {}).get("tests_root", "project")).strip().lower() == "factory"
+
+
+def e2e_factory_root(ctx, job, m):
+    """The folder a job reads the factory's suite from, the map's test paths being relative to it: the factory
+    repository, or the job's copies of the lanes' folders (lane_reads) when the suite is in a copied one."""
+    try:
+        reads = lane_reads(ctx, job)
+    except (FxError, OSError):
+        reads = {}
+    copied = [p for p, r in reads.items() if r["copy"]]
+    every = e2e_test_files(ctx.factory, m)
+    if copied and every and all(any(path_under(t, c) for c in copied) for t in every):
+        return lane_root(ctx, job), copied
+    return ctx.factory, copied
+
+
+def e2e_factory_changed(ctx, m, copied=()):
+    """The factory suite's test files not committed yet: they run in every job that reads them there (not in a job that
+    reads a lane's copy of their folder, which has them as committed)."""
+    files = plain_git(ctx.factory, "diff", "--no-renames", "--name-only", "-z", "HEAD").split("\0") + git(
+        ["ls-files", "-z", "--others", "--exclude-standard"], ctx.factory, check=False).stdout.split("\0")
+    return sorted({f for f in files if f and e2e_match(f, m["tests"]) and os.path.isfile(os.path.join(ctx.factory, f))
+                   and not any(path_under(f, c) for c in copied)})
+
+
+def e2e_no_tests_why(ctx, m, root):
+    """Why the map's "tests" match no file: in the factory's case, or when they are there instead of in the project."""
+    if e2e_in_factory(m):
+        return "the e2e map's \"tests\" match no file of the factory repository (\"tests_root\": \"factory\")"
+    if e2e_test_files(ctx.factory, m) and os.path.realpath(root) != os.path.realpath(ctx.factory):
+        return ("the e2e map's \"tests\" match no file of the repository, but files of the factory repository: the "
+                "suite is kept there, so the map says \"tests_root\": \"factory\"")
+    return "the e2e map's \"tests\" match no file of the repository"
 
 
 def e2e_changed(ctx, wt, base_ref):
@@ -6041,23 +6106,30 @@ def e2e_select(ctx, job, full=False):
         return dict(res, why=problem)
     if changed is None:
         return dict(res, why="the change against the base branch (%s) is not known" % (base or "none"))
-    every = e2e_test_files(job["worktree"], m)
+    in_factory = e2e_in_factory(m)
+    copied = ()
+    if in_factory:
+        res["root"], copied = e2e_factory_root(ctx, job, m)
+    every = e2e_test_files(ctx.factory if in_factory else job["worktree"], m)
     if not every:
-        return dict(res, why="the e2e map's \"tests\" match no file of the repository")
+        return dict(res, why=e2e_no_tests_why(ctx, m, job["worktree"]))
     entries = m.get("map", [])
-    mapped = {t for t in every if any(e2e_match(t, e["tests"]) for e in entries)}
+    mapped = {t for t in every if any(e2e_match(t, e.get("tests", [])) for e in entries)}
     res["unmapped"] = [t for t in every if t not in mapped]
     chosen = set(res["unmapped"])
+    if in_factory:  # a test of the factory's suite not committed yet: every job runs it, as one the job changed
+        res["changed_tests"] = e2e_factory_changed(ctx, m, copied)
+        chosen.update(res["changed_tests"])
     for f in changed:
-        if e2e_match(f, m["tests"]):
+        if not in_factory and e2e_match(f, m["tests"]):
             if f in every:
                 chosen.add(f)
             continue
         if e2e_match(f, m.get("shared", [])):
             return dict(res, why="%s is shared by every page (the map's \"shared\")" % f)
         hit = [e for e in entries if e2e_match(f, e["paths"])]
-        if hit:
-            chosen.update(t for t in every for e in hit if e2e_match(t, e["tests"]))
+        if hit:  # an entry with no test: an area no e2e test opens
+            chosen.update(t for t in every for e in hit if e2e_match(t, e.get("tests", [])))
         elif not e2e_match(f, m.get("none", [])):
             return dict(res, why="%s is in no entry of the e2e map" % f)
     picked = sorted(chosen)
@@ -6082,6 +6154,8 @@ def e2e_env(ctx, job, full=False):
         changed = os.path.join(d, tag + "-changed.txt")
         write_atomic(changed, "".join(f + "\n" for f in sel["changed"]))
         env["FACTORY_CHANGED_FILES"] = changed
+        if sel.get("root"):  # the factory's suite: its paths are relative to this folder
+            env["FACTORY_E2E_ROOT"] = sel["root"]
         if sel["full"]:
             env["FACTORY_E2E_FULL"] = "1"
         else:
@@ -6261,16 +6335,17 @@ def e2e_map_check(rctx, root):
     m, problem = e2e_map(rctx)
     if problem:
         return {"ok": False, "problem": problem}
-    every = e2e_test_files(root, m)
+    every = e2e_test_files(rctx.factory if e2e_in_factory(m) else root, m)
     have = [f for f in git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], root, check=False).stdout.split("\0")
             if f]
     empty = []
     for i, e in enumerate(m.get("map", [])):
         empty += ["map[%d].paths %s" % (i, g) for g in e["paths"] if not any(e2e_match(f, [g]) for f in have)]
-        empty += ["map[%d].tests %s" % (i, g) for g in e["tests"] if not any(e2e_match(t, [g]) for t in every)]
-    mapped = {t for t in every if any(e2e_match(t, e["tests"]) for e in m.get("map", []))}
+        empty += ["map[%d].tests %s" % (i, g) for g in e.get("tests", []) if not any(e2e_match(t, [g]) for t in every)]
+    mapped = {t for t in every if any(e2e_match(t, e.get("tests", [])) for e in m.get("map", []))}
     unmapped = [t for t in every if t not in mapped]
-    return {"ok": bool(every) and not empty, "problem": None if every else "the map's \"tests\" match no file",
+    return {"ok": bool(every) and not empty, "problem": None if every else e2e_no_tests_why(rctx, m, root),
+            "tests_root": "factory" if e2e_in_factory(m) else "project",
             "tests": len(every), "entries": len(m.get("map", [])), "unmapped": unmapped, "empty": empty}
 
 
@@ -6573,6 +6648,7 @@ def checks_execute(ctx, job, look, log_path, by, who=None, cand=None, rn=None, p
     t0, started, rc, timed_out, box, p = time.time(), now(), None, False, None, None
     ran_env = checks_env(ctx, who)
     watch.start(limit)
+    box_gone = None
     try:
         box = job_box_of(ctx, who)
         if box:  # in the job's box: what it changes in the clone comes back, and the checks below see it
@@ -6581,6 +6657,12 @@ def checks_execute(ctx, job, look, log_path, by, who=None, cand=None, rn=None, p
             p = run(["bash", checks_script(ctx, job)], cwd=wt, check=False, env=ran_env, timeout=limit,
                     group=True, on_start=watch.attach)
         output, rc = p.stdout or "", p.returncode
+        box_gone = box_gone_failure(output) if box and rc != 0 else None
+    except NoSandbox as e:  # copying the files in, or the exec itself, on a box whose runtime went away
+        box_gone = box_gone_failure(str(e))
+        if not box_gone:
+            raise
+        output, rc = str(e), 125
     except subprocess.TimeoutExpired as e:
         timed_out = True
         output = ((e.output if isinstance(e.output, str) else "") + "\n%s timed out after %ss\n" % (
@@ -6625,6 +6707,9 @@ def checks_execute(ctx, job, look, log_path, by, who=None, cand=None, rn=None, p
     outside = None if ok else outside_stop(watch, rc, timed_out)
     if outside:
         row["outside_stop"] = outside["why"][:400]
+    if box_gone and not ok:
+        row["box_gone"] = box_gone[:300]
+        job_box_broken(ctx, who, box_gone)
     seen = getattr(p, "vm", None)  # what VmWatch saw: it read the VM's log already for a command that failed
     oom = None if not box or ok else seen["oom_kills"] if seen else vm_oom_kills(t0 - 5)
     if oom:
@@ -6633,7 +6718,7 @@ def checks_execute(ctx, job, look, log_path, by, who=None, cand=None, rn=None, p
     script = os.path.relpath(checks_script(ctx, job), settings_root(ctx))
     problem = None if ok else "%s timed out after %ss" % (script, limit) if timed_out else "%s exited with %d" % (script, rc)
     return dict(row, ok=ok, reused=False, output=output, timed_out=timed_out, outside=outside, problem=problem,
-                why_run=look.get("why"), in_box=bool(box))
+                why_run=look.get("why"), in_box=bool(box) or bool(box_gone), box_gone=box_gone if not ok else None)
 
 
 def checks_once(ctx, job, log_path, by, who=None, cand=None, rn=None, place=None):
@@ -6700,6 +6785,7 @@ def checks_flaky_again(ctx, job, look, log_path, by, who, cand, rn, place, res):
     limit or that something outside stopped (outside_stop handles that), nor on uncommitted changes.
     tests.retry_flaky: false turns it off."""
     if res.get("ok") or res.get("timed_out") or res.get("outside") or look.get("dirty") or res.get("vm_oom") \
+            or res.get("box_gone") \
             or ctx.c("tests.retry_flaky", True) is False:
         return res  # vm_oom: the VM ran out of memory, and would again in a run as long (machine_short)
     signs = flaky_signs(res.get("output"))
@@ -11662,6 +11748,9 @@ def cmd_logic(ctx, a):
             a.split = re.sub(r"^logic/", "", posixpath.normpath(a.split.replace("\\", "/")))
             if a.split.count("/") != 1 or not os.path.isfile(os.path.join(logic_dir(ctx), a.split)) or \
                     a.split.split("/")[1] in LOGIC_ASIDE:
+                if a.split.count("/") == 0 and os.path.isfile(os.path.join(logic_dir(ctx), a.split)):
+                    raise FxError("--split names no feature file of logic/ (logic/<module>/<feature>.md): %s. %s" % (
+                        a.split, logic_split_advice("logic/" + a.split)))
                 raise FxError("--split names no feature file of logic/ (logic/<module>/<feature>.md): %s" % a.split)
             a.module = a.module or a.split.split("/")[0]
         if not a.module or not SLUG_RE.match(a.module):
@@ -20511,10 +20600,12 @@ def doctor_checks(ctx, issue=None, session=True, live=False):
         "logged in" if not nope else "%s: %s" % (nope["why"], nope.get("command") or "; ".join(nope.get("install") or [])))
     if ctx.cfg and live:
         long_ = doc_long_files(ctx)
+        by_hand = [logic_split_advice(f) for f, _ in long_ if f.startswith("logic/") and f.count("/") != 2]
         add("knowledge and logic files under %d KB (an agent reads a whole file)" % (doc_max_bytes(ctx) // 1024),
             not long_, "; ".join("%s %.0f KB" % (f, kb) for f, kb in long_[:8]) + (
                 " and %d more" % (len(long_) - 8) if len(long_) > 8 else "") + (
-                ": fx tidy, then a logic writer for each logic file (fx logic ctx --split <file>)" if long_ else ""))
+                ": fx tidy, then a logic writer for each feature file (fx logic ctx --split <file>)" if long_ else "") + (
+                "; " + "; ".join(by_hand) if by_hand else ""))
     gi = (read(os.path.join(ctx.factory, ".gitignore"), "") or "").splitlines()
     add(".gitignore keeps jobs/ local", "jobs/" in gi or "/jobs/" in gi)
     mode = jira_mode(ctx)
@@ -20637,6 +20728,10 @@ def doctor_checks(ctx, issue=None, session=True, live=False):
                     "then fx sandbox install --memory <GiB> --cpus <n>" % (
                         offer["change"], offer["suggest"]["memory_gib"], offer["suggest"]["cpus"],
                         offer["suggest"]["why"]))
+            restarts = sandbox_restarts_words()
+            if restarts is not None:
+                add("the sandbox VM never restarts containerd or Sysbox under a box (advice)", True,
+                    "" if restarts == "off" else "%s: %s" % (SANDBOX_NEEDRESTART, restarts))
     for line in aws_key_advice(ctx):
         add("keys on this machine (advice)", True, line)
     if live:
@@ -24152,6 +24247,19 @@ SANDBOX_PORT0 = 20000  # a box's own ports, forwarded to the app's 127.0.0.1:<po
 # job's setup, and `fx sandbox reset` makes the VM anew. Applied by the VM's start-up script (a new VM) and before
 # every box (a VM made by an older fx).
 SANDBOX_NO_FLUSH = "findmnt -no OPTIONS / | grep -q nobarrier || mount -o remount,barrier=0 / || true"
+# No automatic restart of what the boxes run on. Ubuntu's unattended-upgrades runs needrestart, which restarted
+# containerd and sysbox under the running boxes: a box stayed "Up", but the new sysbox-fs knew nothing of it, every exec
+# failed ("unsafe procfs detected") and a gate counted that as the code's FAIL. needrestart only lists what it would
+# restart, and never containerd, Docker or Sysbox. Written by the VM's start-up script (a new VM) and before every box
+# (a VM made by an older fx); fx doctor and fx sandbox status check it.
+SANDBOX_NEEDRESTART = "/etc/needrestart/conf.d/fx-sandbox.conf"
+SANDBOX_NEEDRESTART_CONF = ("# fx: the boxes run on containerd, Docker and Sysbox: never restart them under a box\n"
+                            "$nrconf{restart} = 'l';\n"
+                            "$nrconf{override_rc}{qr(^containerd)} = 0;\n"
+                            "$nrconf{override_rc}{qr(^docker)} = 0;\n"
+                            "$nrconf{override_rc}{qr(^sysbox)} = 0;\n")
+SANDBOX_NO_RESTARTS = "mkdir -p %s && printf %%s %s > %s" % (
+    posixpath.dirname(SANDBOX_NEEDRESTART), shlex.quote(SANDBOX_NEEDRESTART_CONF), SANDBOX_NEEDRESTART)
 SANDBOX_ALLOW = ["registry.npmjs.org", "registry.yarnpkg.com", "repo.packagist.org", "packagist.org",
                  "codeload.github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org",
                  "repo.maven.apache.org", "repo1.maven.org", "registry-1.docker.io", "auth.docker.io",
@@ -24729,6 +24837,44 @@ def gate_offline_words(what, line):
             % (what, line))
 
 
+# A box whose runtime went away under it: the VM restarted containerd or Sysbox (needrestart, a person), and the box,
+# still "Up", has no sysbox-fs state any more. Every exec fails with the first sign; a browser launched just as
+# sysbox-fs went away finds no /tmp (the second, many times over). Neither says anything about the code.
+BOX_GONE_RE = re.compile(r"unsafe procfs detected|sysbox-fs[^\n]*(?:not running|connection refused|no such file)")
+BOX_GONE_TMP_RE = re.compile(r"ENOENT[^\n]*mkdtemp\W+/tmp/playwright")
+BOX_GONE_TMP_MIN = 3
+
+
+def box_gone_failure(text):
+    """Why a step in a job's box failed for the box's runtime having gone away (BOX_GONE_RE), not for the code: the
+    first sign, or None."""
+    lines = (text or "").splitlines()
+    m = next((l.strip()[:300] for l in lines if BOX_GONE_RE.search(l)), None)
+    if m:
+        return m
+    tmp = [l.strip() for l in lines if BOX_GONE_TMP_RE.search(l)]
+    if len(tmp) >= BOX_GONE_TMP_MIN:
+        return "%d browser launches found no /tmp in the box (%s)" % (len(tmp), tmp[0][:200])
+    return None
+
+
+def box_gone_words(step, why):
+    return ("%s failed because the job's box lost its runtime (the sandbox VM restarted containerd or Sysbox under it): "
+            "`%s`. The box is made again, with the job's setup, before the next run" % (step, why))
+
+
+def job_box_broken(ctx, view, why):
+    """The job's box is no use any more (box_gone_failure): its record says so, and the next job_box_of makes a new
+    one, set up again."""
+    vid = str((view or {}).get("id") or "")
+    if not vid or not getattr(ctx, "cfg", None):
+        return
+    box = job_box_rec(ctx, vid)
+    if box:
+        box["broken"] = why[:300]
+        job_box_keep(ctx, vid, box)
+
+
 def box_offline_failure(ctx, job, text):
     """Why a gate's step failed for the job's box having no network (by design), not for the code: the first such line
     of its log, or None. Only signs no code fault prints: a name that does not resolve, a proxy that is not there, an
@@ -24789,6 +24935,7 @@ def box_create(ctx, job_id, port, nports, image=None):
             "Filter \"/etc/tinyproxy/filter\"\nConnectPort 443\nConnectPort 80\nLogLevel Connect\n")
     script = r"""set -e
 {no_flush}
+{no_restarts}
 d=/opt/fx-boxes/{name}; mkdir -p $d
 printf %s {conf} > $d/fx.conf
 printf %s {filt} > $d/filter
@@ -24808,7 +24955,8 @@ docker run -d --runtime=sysbox-runc --name {name} --hostname box --network {net}
 echo "subnet=$sub"
 echo "proxy=$pip"
 """.format(name=name, net=net, proxy=proxy, pub=pub, image=shlex.quote(image), conf=shlex.quote(conf),
-           filt=shlex.quote(sandbox_filter(sandbox_allow(ctx))), no_flush=SANDBOX_NO_FLUSH)
+           filt=shlex.quote(sandbox_filter(sandbox_allow(ctx))), no_flush=SANDBOX_NO_FLUSH,
+           no_restarts=SANDBOX_NO_RESTARTS)
     p = vm_run(["sudo", "bash", "-c", script], timeout=600)
     box = {"name": name, "net": net, "proxy": proxy, "port": port, "nports": nports, "online": True, "image": image,
            "filter": hashlib.sha256(sandbox_filter(sandbox_allow(ctx)).encode()).hexdigest()[:12]}
@@ -25274,6 +25422,63 @@ def box_resume(box):
         raise NoSandbox("the job's box started without its Docker: %s" % vm_text(p)[-500:], code=3)
 
 
+_BOX_LOOKED = {}  # the boxes box_health looked at in this fx: once each
+
+
+def box_health(box, fresh=False):
+    """What a running box can still do: {gone, images}. gone: why an exec in it fails (box_gone_failure), or None.
+    images: how many images its own Docker has (None when it cannot say), so a box that lost what its setup pulled is
+    seen before a gate runs on it. Looked at once for each fx."""
+    if not fresh and box["name"] in _BOX_LOOKED:
+        return _BOX_LOOKED[box["name"]]
+    # Its Docker may still be starting (a box just started again): it is waited for, and a Docker that never answers
+    # says nothing about images (no-docker), so no setup runs again for that alone.
+    inner = ("for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done; "
+             "if docker info >/dev/null 2>&1; then docker images -q | wc -l; else echo no-docker; fi")
+    script = "# fx-box-health\ndocker exec %s sh -c %s 2>&1 | tail -5" % (box["name"], shlex.quote(inner))
+    try:
+        text = vm_text(vm_run(["sudo", "bash", "-c", script], timeout=120)).strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return {"gone": None, "images": None}
+    last = text.splitlines()[-1].strip() if text else ""
+    got = {"gone": box_gone_failure(text), "images": int(last) if last.isdigit() else None}
+    _BOX_LOOKED[box["name"]] = got
+    return got
+
+
+def job_box_mend(ctx, vid, box):
+    """A running box as it is now: None when its runtime went away (it is deleted: the caller makes a new one, set up
+    again), the box otherwise, its setups to run again when its Docker lost the images they pulled."""
+    why = box.get("broken") or box_health(box)["gone"]
+    if why:
+        hint("the job's box %s lost its runtime (%s): fx makes a new box and runs the job's setup in it again" % (
+            box["name"], why[:200]))
+        box_destroy(box)
+        job_box_keep(ctx, vid, None)
+        _BOX_LOOKED.pop(box["name"], None)
+        return None
+    had, now_ = box.get("images") or 0, box_health(box)["images"]
+    if had and now_ == 0 and box.get("setup"):
+        hint("the job's box %s lost the images its setup pulled (its Docker was started again under it): the job's "
+             "setup runs in it again" % box["name"])
+        box["setup"] = []
+        job_box_keep(ctx, vid, box)
+    return box
+
+
+def job_box_recreate(ctx, view):
+    """fx sandbox box <job> --recreate: the job's box deleted and made again, with each repository's setup, without
+    making the whole VM again (fx sandbox reset)."""
+    vid = str(view.get("id") or "")
+    with box_lock(ctx, vid):
+        box = job_box_rec(ctx, vid)
+        if box:
+            box_destroy(box)
+            _BOX_LOOKED.pop(box["name"], None)
+        job_box_keep(ctx, vid, None)
+    return job_box_of(ctx, view)
+
+
 def job_box_of(ctx, view, start=True, setup=True):
     """The box a job's command runs in, or None when it runs on this machine: a review's own view says itself (its
     sandbox, or none on the reviewer's word), fx's own runs (an id starting with _) and a job the person let run here
@@ -25293,23 +25498,26 @@ def job_box_of(ctx, view, start=True, setup=True):
         if box:
             state = box_running(box)
             if state is True:
+                box = job_box_mend(ctx, vid, box) if start else box
+            if state is True and box:
                 if box.get("online"):  # an install that did not end (fx stopped): cut it now
                     box_cut(box)
                     job_box_keep(ctx, vid, box)
                 return box if not setup else job_box_setup(ctx, view, box)
             if not start:
                 return None
-            if state is None:
+            if box and state is None:
                 ok, why = sandbox_up()
                 if not ok:
                     raise job_no_sandbox(ctx, real, why)
                 state = box_running(box)  # a VM that was only stopped still has the job's box, and what it installed
-            if state is None:
+            if box and state is None:
                 job_box_keep(ctx, vid, None)  # the VM was made again or cleaned: a new box, set up again
                 box = None
-            else:
+            elif box:
                 box_resume(box)  # its rules too: a restarted VM has none
                 job_box_keep(ctx, vid, box)
+                box = job_box_mend(ctx, vid, box)
         if not start:
             return None
         if not box:
@@ -25359,7 +25567,17 @@ def job_box_setup(ctx, view, box):
             box.setdefault("setup", []).append(n)
             job_box_keep(ctx, vid, box)
         job_box_warm(ctx, view, box)
+        job_box_images(ctx, vid, box)
     return box
+
+
+def job_box_images(ctx, vid, box):
+    """How many images the box's Docker has after its setup: what job_box_mend sees lost, should that Docker be
+    started again under the job."""
+    images = box_health(box, fresh=True)["images"]
+    if images is not None:
+        box["images"] = images
+        job_box_keep(ctx, vid, box)
 
 
 def job_box_warm(ctx, view, box):
@@ -25700,6 +25918,18 @@ def sandbox_host(ctx, a):
          "note": "this job's commands now run on this machine, without isolation; its pull request says so"})
 
 
+def sandbox_restarts_words():
+    """Whether needrestart may restart containerd, Docker or Sysbox under the boxes (SANDBOX_NEEDRESTART), in words."""
+    try:
+        p = vm_run(["cat", SANDBOX_NEEDRESTART], timeout=60, merge=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    have = vm_text(p)
+    if p.returncode == 0 and "qr(^sysbox)} = 0" in have and "qr(^containerd)} = 0" in have:
+        return "off"
+    return "on: needrestart may restart containerd and Sysbox under the boxes (turned off before the next box)"
+
+
 def cmd_sandbox(ctx, a):
     """The machine's sandbox VM: status, install (create and start it), reset (delete and make it again), clean (boxes
     a crashed review left)."""
@@ -25729,6 +25959,7 @@ def cmd_sandbox(ctx, a):
                 opts = ""
             if opts:
                 res["disk_flushes"] = "off" if "nobarrier" in opts.split(",") else "on (turned off before the next box)"
+            res["auto_restarts"] = sandbox_restarts_words()
         if older:
             res["boxes_with_older_allow"] = older
             res["note"] = ("these jobs' boxes were made with an older sandbox.allow: their next install (fx run --job "
@@ -25797,6 +26028,19 @@ def cmd_sandbox(ctx, a):
         return
     if a.action == "host":
         sandbox_host(ctx, a)
+        return
+    if a.action == "box":
+        if not a.job or not getattr(a, "recreate", False):
+            raise FxError("fx sandbox box --job <job> --recreate: the job's box made again, with its setup", code=3)
+        job = ctx.load(a.job)
+        ok, why = sandbox_state()
+        if not ok:
+            raise NoSandbox(why, code=3)
+        box = job_box_recreate(ctx, job)
+        if not box:
+            raise FxError("%s has no box: it runs on this machine (fx sandbox host), or is fx's own" % job["id"], code=3)
+        out({"ok": True, "job": job["id"], "box": box["name"], "setup": box.get("setup") or [],
+             "next": "run the step that failed again (fx gate %s)" % job["id"]})
         return
     if a.action == "clean":
         if not ctx or not getattr(ctx, "cfg", None):
@@ -28301,6 +28545,30 @@ def factory_setup_scripts(ctx):
     return got
 
 
+def setup_pulled_images(ctx):
+    """The images the setup scripts (and setup commands) pull: `docker pull <image>` and `docker compose pull`'s are
+    the ones a script can run offline afterwards."""
+    got = set()
+    texts = [str(ctx.c("setup") or "")] + [str(ctx.rc(n, "setup") or "") for n in ctx.repo_names()]
+    texts += [read(os.path.join(ctx.factory, rel), "") or "" for rel in sorted(factory_setup_scripts(ctx))]
+    for t in texts:
+        for line in t.splitlines():
+            for m in re.finditer(r"\bdocker\s+(?:image\s+)?pull\s+(?:-\S+\s+)*([^\s;&|'\")]+)", line.split("#", 1)[0]):
+                got.add(m.group(1))
+    return got
+
+
+def docker_run_offline(line, pulled=()):
+    """A docker run (or docker compose run) that fetches nothing: it says --pull=never, or its image is one setup
+    pulled."""
+    if not re.search(r"\bdocker\s+(?:compose\s+(?:\S+\s+)*?)?run\b", line):
+        return False
+    if re.search(r"--pull(?:=|\s+)['\"]?never\b", line):
+        return True
+    words = set(re.findall(r"[^\s;&|'\"()]+", line))
+    return any(img in words for img in pulled)
+
+
 def doctor_scripts(ctx, add):
     """The factory's scripts parse (bash -n), and none changed since the selftest that last ran them: a script ported or
     rewritten (after a pull, a rebase, a lost branch) is only known to work once a selftest ran it."""
@@ -28316,6 +28584,7 @@ def doctor_scripts(ctx, add):
     offline = sorted(set([os.path.relpath(f, ctx.factory) for f in glob.glob(os.path.join(ctx.factory, CHECKS_DIR, "*.sh"))]
                          + [x for x in scripts if x not in factory_setup_scripts(ctx)]))
     allow = sandbox_allow(ctx)
+    pulled = setup_pulled_images(ctx)
     fetch = []
     for rel in offline:
         text = read(os.path.join(ctx.factory, rel), "") or ""
@@ -28324,6 +28593,8 @@ def doctor_scripts(ctx, add):
             m = re.search(r"\b(git\s+clone|git\s+fetch|curl|wget)\b.*?(?:https?://|git@)([\w.-]+)", code_)
             if m and not any(m.group(2) == h or (h.startswith("*.") and m.group(2).endswith(h[1:])) for h in allow):
                 fetch.append("%s:%d %s %s" % (rel, i, m.group(1).split()[0], m.group(2)))
+            elif docker_run_offline(code_, pulled):
+                continue
             elif re.search(r"\b(docker\s+(run|pull|build)|pnpm\s+install(?!.*--offline)|npm\s+(ci|install)|composer\s+"
                            r"install|yarn\s+install(?!.*--offline)|pip\s+install)\b", code_):
                 fetch.append("%s:%d %s" % (rel, i, code_.strip()[:60]))
@@ -28332,7 +28603,8 @@ def doctor_scripts(ctx, add):
         not fetch or not boxed,
         "a job's checks script, app.up and e2e run in its box with no network (only setup reaches the registries): "
         "these lines fetch, so they fail there. Move what they fetch into setup (images pulled, packages fetched), "
-        "read another repository through repos[].needs ($FACTORY_CLONE_<NAME>): %s" % "; ".join(fetch[:8])
+        "read another repository through repos[].needs ($FACTORY_CLONE_<NAME>); a docker run of an image setup pulled "
+        "says so with --pull=never: %s" % "; ".join(fetch[:8])
         if fetch else "")
     at = (baseline_json(ctx) or {}).get("factory_commit")
     if not scripts or not at:
@@ -29228,6 +29500,7 @@ PART_MARK = "<!-- part of %s; its index: README.md -->"
 LOGIC_HISTORY = "history.md"   # what changed when: never needed to work, so no agent is pointed at it
 LOGIC_OPEN = "open.md"         # a module's open points: read by intake and spec
 LOGIC_ASIDE = (LOGIC_HISTORY, LOGIC_OPEN)
+LOGIC_OPEN_POINTER = "In [%s](%s): read it when the work touches an open point." % (LOGIC_OPEN, LOGIC_OPEN)
 HISTORY_HEAD_RE = re.compile(r"(?i)^##\s+(?:\d+\.\s*)?(?:lịch sử(?: thay đổi)?|change ?log|change history|history|"
                              r"overall (?:log|history)|nhật ký(?: tổng| thay đổi| chung)?|lịch sử tổng)\s*$")
 OPEN_HEAD_RE = re.compile(r"(?i)^##\s+(?:\d+\.\s*)?(?:điểm chưa chốt|open points?|open questions?)\b")
@@ -29655,20 +29928,53 @@ def logic_tidy(ctx, ldir=None, only=None):
                 moved.append({"file": rel, "to": "%s/%s" % (mod, LOGIC_HISTORY), "what": "history"})
             if opens:
                 heads = [s.split("\n", 1)[0] for s in opens]
-                body = "".join(s.split("\n", 1)[1] if "\n" in s else "" for s in opens).strip("\n")
+                # The pointer line an earlier tidy left in the README is not an open point: it never goes into open.md.
+                body = "".join(s.split("\n", 1)[1] if "\n" in s else "" for s in opens)
+                body = "\n".join(l for l in body.splitlines() if l.strip() != LOGIC_OPEN_POINTER).strip("\n")
                 op = os.path.join(md, LOGIC_OPEN)
-                old = read(op)
-                write_atomic(op, (old.rstrip("\n") + "\n\n" if old else
-                                  "# Open points: %s\n\n<!-- the module's open points, conflicts and questions, moved "
-                                  "out of its README: intake and spec read them -->\n\n" % mod) + body + "\n")
-                rest = rest.rstrip("\n") + "\n\n%s\nIn [%s](%s): read it when the work touches an open point.\n" % (
-                    heads[0], LOGIC_OPEN, LOGIC_OPEN)
-                moved.append({"file": rel, "to": "%s/%s" % (mod, LOGIC_OPEN), "what": "open points"})
+                if body.strip():
+                    old = read(op)
+                    write_atomic(op, (old.rstrip("\n") + "\n\n" if old else
+                                      "# Open points: %s\n\n<!-- the module's open points, conflicts and questions, "
+                                      "moved out of its README: intake and spec read them -->\n\n" % mod) + body + "\n")
+                    moved.append({"file": rel, "to": "%s/%s" % (mod, LOGIC_OPEN), "what": "open points"})
+                rest = rest.rstrip("\n") + "\n\n%s\n%s\n" % (heads[0], LOGIC_OPEN_POINTER)
             if hs or opens:
                 write_atomic(p, rest.rstrip("\n") + "\n")
             if doc_size(p) > limit:
                 too_long.append({"file": "logic/" + rel, "kb": round(doc_size(p) / 1024.0, 1)})
+        op = os.path.join(md, LOGIC_OPEN)  # copies of the pointer line an older tidy put into open.md itself
+        old = read(op)
+        if old is not None and (only is None or "%s/%s" % (mod, LOGIC_OPEN) in only):
+            kept = [l for l in old.splitlines() if l.strip() != LOGIC_OPEN_POINTER]
+            if len(kept) != len(old.splitlines()):
+                write_atomic(op, re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).rstrip("\n") + "\n")
+                moved.append({"file": "%s/%s" % (mod, LOGIC_OPEN), "to": None,
+                              "what": "%d copies of the line pointing at open.md itself" % (
+                                  len(old.splitlines()) - len(kept))})
+    for n in md_files(ldir):  # logic/shared.md and the like: their history into logic/history.md, as a module's
+        if n == "README.md" or n in LOGIC_ASIDE or "/" in n or (only is not None and n not in only):
+            continue
+        p = os.path.join(ldir, n)
+        rest, hs = take_section(read(p, "") or "", HISTORY_HEAD_RE)
+        if hs:
+            logic_history_add(os.path.join(ldir, LOGIC_HISTORY), "# Logic history", [(n, s) for s in hs],
+                              "what changed when; nobody needs it to work, so no agent is pointed here")
+            write_atomic(p, rest.rstrip("\n") + "\n")
+            moved.append({"file": n, "to": LOGIC_HISTORY, "what": "history"})
+        if doc_size(p) > limit:
+            too_long.append({"file": "logic/" + n, "kb": round(doc_size(p) / 1024.0, 1)})
     return moved, too_long
+
+
+def logic_split_advice(f):
+    """What shortens an over-long logic file: a logic writer for a feature file (logic/<module>/<feature>.md); a file of
+    logic/ itself (shared.md, README.md) holds no feature to split off, so its rules of one module go to that module."""
+    rel = re.sub(r"^logic/", "", f)
+    if rel.count("/") == 1:
+        return "%s logic ctx --split %s" % (FX_CMD, f)
+    return ("%s: fx tidy has moved its history out; shorten the rest by hand: rules of one module go into that "
+            "module's files, the rest stays here in fewer words" % f)
 
 
 def lessons_compact(text):
@@ -29707,10 +30013,15 @@ def cmd_tidy(ctx, a):
            "too_long_no_headings": stuck, "logic_moved": moved, "logic_too_long": too_long,
            "lessons_kb": round(lsize / 1024.0, 1)}
     if too_long:  # semantic work: a logic writer for each, and init is not done before (fx doctor says so)
-        res["logic_split"] = ["%s logic ctx --split %s" % (FX_CMD, t["file"]) for t in too_long]
+        advice = [logic_split_advice(t["file"]) for t in too_long]
+        res["logic_split"] = [x for x in advice if x.startswith(FX_CMD)]
+        if len(res["logic_split"]) < len(advice):  # logic/shared.md and the like: no feature file to split off
+            res["logic_by_hand"] = [x for x in advice if not x.startswith(FX_CMD)]
         res["next_logic"] = ("not done yet: for each command in logic_split, run it and spawn a logic writer with the "
                              "prompt and model it returns (one message, all of them), then fx logic check and fx logic "
-                             "index; fx doctor fails until no logic file is over %d KB" % (doc_max_bytes(ctx) // 1024))
+                             "index; fx doctor fails until no logic file is over %d KB" % (doc_max_bytes(ctx) // 1024)
+                             + ("; each file in logic_by_hand is shortened as it says" if res.get("logic_by_hand")
+                                else ""))
     if lsize > doc_max_bytes(ctx):
         res["lessons_note"] = ("lessons.md is over the limit: at the next Learn, propose moving stable lessons into "
                                "the knowledge (fx lessons graduate); agents read a short copy meanwhile")
@@ -30860,9 +31171,11 @@ def build_parser():
     s.set_defaults(fn=cmd_limits)
     s = sub.add_parser("sandbox", help="the sandbox VM where merge requests and jobs run: status, size (what fx "
                                        "suggests for it, from what it used), install, reset, clean, host (a job on "
-                                       "this machine, on the person's word)")
-    s.add_argument("action", choices=["status", "size", "install", "reset", "clean", "host"])
-    s.add_argument("--job", help="host: the job that runs on this machine")
+                                       "this machine, on the person's word), box --recreate (one job's box anew)")
+    s.add_argument("action", choices=["status", "size", "install", "reset", "clean", "host", "box"])
+    s.add_argument("--job", help="host: the job that runs on this machine; box: the job whose box")
+    s.add_argument("--recreate", action="store_true", help="box: delete the job's box and make it again, with each "
+                   "repository's setup (a box broken under the job, without making the whole VM again)")
     s.add_argument("--reason", help="host: the person's own words, which go in the pull request")
     s.add_argument("--confirm", help="host: the code fx printed when the sandbox was missing")
     s.add_argument("--memory", type=float, metavar="GIB", help="install, reset: the VM's memory in GiB, as the person "
@@ -31353,6 +31666,7 @@ def main(argv=None):
     a = build_parser().parse_args(argv)
     _MAX_WAIT[0] = a.max_wait
     _LANE_NAMED.clear()  # what a command found out about the factory repository's files holds for that command
+    _BOX_LOOKED.clear()
     os.environ.setdefault("SEMGREP_ENABLE_VERSION_CHECK", "0")  # its update check hangs behind proxies
     # git and the scanners read what the commits hold, whatever refs/replace or a grafts file says
     os.environ.update(GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.path.join(os.devnull, "none"))

@@ -501,6 +501,32 @@ class DoctorScriptsTest(ProjectCase):
         fetch = [r for r in rows if "fetch nothing" in r[0]][0]
         self.assertIn("checks/fe.sh:2 git gitlab.com", fetch[2])
 
+    def test_a_docker_run_that_says_pull_never_fetches_nothing(self):
+        write(os.path.join(self.factory, "checks", "be.sh"),
+              "#!/usr/bin/env bash\n"
+              "docker run --rm --pull=never -v \"$PWD:/app\" node:22-alpine sh -c 'pnpm install --offline'\n"
+              "docker run --rm --pull never php:8.3-cli php -v\n"
+              "docker run --rm redis:7 redis-cli ping\n"
+              "docker run --rm busybox:1 true\n")
+        write(os.path.join(self.factory, "stack", "setup.sh"), "#!/usr/bin/env bash\ndocker pull redis:7\n")
+        cfg = load_json(os.path.join(self.factory, "factory.json"))
+        cfg["setup"] = "bash stack/setup.sh"
+        self.write_config(cfg)
+        rows = []
+        fx.doctor_scripts(self.ctx(), lambda n, ok, d="": rows.append((n, ok, d)))
+        fetch = [r for r in rows if "fetch nothing" in r[0]][0]
+        self.assertNotIn("checks/be.sh:2", fetch[2])
+        self.assertNotIn("checks/be.sh:3", fetch[2])
+        self.assertNotIn("checks/be.sh:4", fetch[2])  # setup pulled redis:7
+        self.assertIn("checks/be.sh:5 docker run --rm busybox:1", fetch[2])
+        self.assertIn("--pull=never", fetch[2])
+
+    def test_docker_run_offline(self):
+        self.assertTrue(fx.docker_run_offline("docker compose -p x run --rm --pull never app true"))
+        self.assertTrue(fx.docker_run_offline("docker run --pull='never' img"))
+        self.assertFalse(fx.docker_run_offline("docker run --pull=always img"))
+        self.assertFalse(fx.docker_run_offline("docker pull img", {"img"}))
+
 
 # --------------------------------------------------------------------------
 # 19. a gate tried without counting
@@ -806,6 +832,56 @@ class LongFilesTest(LogicCase):
         check = fx.logic_check(ctx, ld, {"be": self.tmp, "fe": self.tmp}, check_index=True)
         self.assertFalse([p for p in check["problems"] if "history.md" in p or "open.md" in p], check["problems"])
         self.assertEqual(check["too_long"], ["billing/credit.md"])
+
+    def test_tidy_again_adds_no_pointer_line_to_open_md(self):
+        ld = os.path.join(self.factory, "logic")
+        self.ok("tidy", "--force")
+        op = os.path.join(ld, "billing", "open.md")
+        first = slurp(op)
+        self.assertNotIn(fx.LOGIC_OPEN_POINTER, first)
+        res = self.ok("tidy", "--force")
+        self.assertEqual(slurp(op), first)
+        self.assertEqual(slurp(os.path.join(ld, "billing", "README.md")).count(fx.LOGIC_OPEN_POINTER), 1)
+        self.assertFalse([m for m in res["logic_moved"] if m["to"] == "billing/open.md"], res["logic_moved"])
+        # an older tidy's copies of the line in open.md are taken out, and new open points still move
+        write(op, first + "\n" + fx.LOGIC_OPEN_POINTER + "\n\n" + fx.LOGIC_OPEN_POINTER + "\n")
+        mod = os.path.join(ld, "billing", "README.md")
+        write(mod, slurp(mod).replace(fx.LOGIC_OPEN_POINTER, fx.LOGIC_OPEN_POINTER + "\n2. Who signs a credit?"))
+        res = self.ok("tidy", "--force")
+        text = slurp(op)
+        self.assertNotIn(fx.LOGIC_OPEN_POINTER, text)
+        self.assertIn("credit note a refund", text)
+        self.assertIn("Who signs a credit?", text)
+        self.assertNotIn("Who signs", slurp(mod))
+        self.assertTrue(any("copies of the line" in m["what"] for m in res["logic_moved"]), res["logic_moved"])
+
+    def test_tidy_moves_the_history_of_shared_md(self):
+        ld = os.path.join(self.factory, "logic")
+        write(os.path.join(ld, "shared.md"), "# Shared rules\n\n## Limits\n| Limit | Value |\n|---|---|\n| a | 1 |\n"
+              "\n## Lịch sử thay đổi\n| Ngày | Thay đổi |\n|---|---|\n| 01.11.2026 | SHOP-9 viết |\n")
+        res = self.ok("tidy", "--force")
+        shared = slurp(os.path.join(ld, "shared.md"))
+        self.assertNotIn("Lịch sử", shared)
+        self.assertIn("## Limits", shared)
+        hist = slurp(os.path.join(ld, "history.md"))
+        self.assertIn("## shared.md", hist)
+        self.assertIn("SHOP-9", hist)
+        self.assertIn({"file": "shared.md", "to": "history.md", "what": "history"}, res["logic_moved"])
+
+    def test_a_long_shared_md_gets_advice_that_works(self):
+        ld = os.path.join(self.factory, "logic")
+        write(os.path.join(ld, "shared.md"), "# Shared rules\n\n" + big("Limits", 120))
+        res = self.ok("tidy", "--force")
+        self.assertIn("logic/shared.md", [t["file"] for t in res["logic_too_long"]])
+        self.assertFalse([c for c in res["logic_split"] if "shared.md" in c], res["logic_split"])
+        self.assertTrue(any(x.startswith("logic/shared.md: ") and "by hand" in x for x in res["logic_by_hand"]),
+                        res.get("logic_by_hand"))
+        code, res = self.fx("doctor")
+        row = next(c for c in res["checks"] if c["check"].startswith("knowledge and logic files under"))
+        self.assertIn("logic/shared.md: fx tidy has moved its history out", row["detail"])
+        code, res = self.fx("logic", "ctx", "--split", "logic/shared.md")
+        self.assertNotEqual(code, 0)
+        self.assertIn("by hand", res["error"])
 
     def test_history_headings_in_both_languages(self):
         for h in ("## Overall log", "## Overall history", "## Nhật ký tổng", "## 4. Nhật ký thay đổi", "## Nhật ký",

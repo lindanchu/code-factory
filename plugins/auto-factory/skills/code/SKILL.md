@@ -133,7 +133,9 @@ them to create a separate repository for the factory (for example
     another tool stopped, a process that was killed: what fx saw is in the
     `outside-stop.json` it names in `kept`); or the machine was too small for it (the
     sandbox VM killed processes for memory, or every failed test is a browser that
-    crashed: `machine-short.json`). The round does not count and no builder is
+    crashed: `machine-short.json`); or the job's box lost its runtime (the VM restarted
+    containerd or Sysbox under it: fx makes the box again, with the job's setup, before
+    the next run). The round does not count and no builder is
     needed: never spawn one for it. Tell the user what fx said. `next: gate` → run
     `fx gate <job>` again once; `next: pr` → nothing was pushed, run the same `fx pr`
     again once; `next: stop` → stop and wait for the user; `next: login` → **Scanner
@@ -1086,6 +1088,9 @@ one as it finishes.
 aside, the job stays where it was): use it when the factory's scripts (checks, `app.up`, e2e) changed, before they
 cost a round. A gate that fails because the job's box has no network (`void: true`, `next: stop`) is the factory's
 script to fix (fetch at setup, another repository through `repos[].needs`), never a builder's.
+A box that cannot run anything any more (every command fails, a setup's images are gone) is made again by fx itself
+before the job's next command; `python3 ${CLAUDE_SKILL_DIR}/fx sandbox box --job <job> --recreate` does it on demand,
+with each repository's setup, and leaves every other box and the VM as they are.
 
 `python3 ${CLAUDE_SKILL_DIR}/fx gate <job>` starts a round (`--full`: the whole permission table and ZAP over the
 whole app, whatever the job changed; only when the user asks for it, since by default a gate scans what the change can

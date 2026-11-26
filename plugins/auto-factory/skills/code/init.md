@@ -94,7 +94,11 @@ with `has_commits` and `greenfield`), `added`, `created` and `notes`.
   with the prompt and model it returns (all of them in one message): a feature
   file becomes sub-features, a module README is shortened. Then `fx logic check`,
   `fx logic index`, and `fx tidy --force` once more; `fx doctor` fails while any
-  knowledge or logic file is over the limit.
+  knowledge or logic file is over the limit. A file of `logic/` itself
+  (`shared.md`) has no feature to split off: tidy moves its history into
+  `logic/history.md`, and when it is still too long it is in `logic_by_hand`:
+  move each rule of one module into that module's files, and say the rest in
+  fewer words.
   Run `fx knowledge check` and `fx logic check`, tell the user in a few lines what
   moved (files before and after, in KB), then commit and push. A file in
   `too_long_no_headings` has no `##` to split at: give it headings, then run tidy
@@ -446,8 +450,18 @@ pages):
   (layouts, shared CSS and JS, routes, middleware, config, migrations, package
   manifests, the bundler's and the e2e runner's config, the suite's helpers): a
   change there runs the whole suite. `none`: what reaches no page (server-side
-  unit tests, docs). `map`: each area's code and the tests of its pages. Globs:
-  `*` stays in one folder, `**` crosses them.
+  unit tests, docs). `map`: each area's code and the tests of its pages. An
+  entry with `"tests": []` is an area no e2e test opens (a static docs page):
+  a change there runs no e2e test. Globs: `*` stays in one folder, `**`
+  crosses them.
+- A suite kept in the factory repository (a `qa/` folder with its own runner
+  config, often a lane's folder): add `"tests_root": "factory"`. Then `tests`
+  and each entry's `tests` are paths of the factory repository (`qa/e2e/**`),
+  while `paths`, `shared` and `none` stay paths of the project. A test file of
+  that suite not committed yet runs in every job that reads it there. The
+  chosen paths are relative to `FACTORY_E2E_ROOT` (the factory repository, or
+  the job's copy of a lane's folders), so the script hands them to the runner
+  as they are, or strips the folder its runner runs from.
 - A changed file in no entry, or a map fx cannot read, runs the whole suite. A
   test file no entry lists runs in every job. So when unsure, leave a file out:
   that costs time, never a missed test.

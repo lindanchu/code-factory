@@ -243,6 +243,38 @@ class KvmTest(unittest.TestCase):
         yaml = slurp(os.path.join(fx.SKILL_DIR, "sandbox", "fx-sandbox.yaml"))
         self.assertLess(yaml.index("barrier=0"), yaml.index("test -f /etc/fx-sandbox-ready && exit 0"))  # each start
 
+    def test_the_vm_never_restarts_containerd_or_sysbox_under_a_box(self):
+        """unattended-upgrades ran needrestart, which restarted containerd and sysbox under a running box: every exec in
+        it failed, and the gate counted that as the code's FAIL."""
+        scripts = []
+
+        def vm(argv, **kw):
+            scripts.append(argv[-1])
+            return subprocess.CompletedProcess(argv, 1, b"no Docker here")
+        with mock.patch.object(fx, "vm_run", vm), mock.patch.object(fx, "box_destroy", lambda box: None):
+            with self.assertRaises(fx.NoSandbox):
+                fx.box_create(None, "T-1", 5000, 1)
+        self.assertLess(scripts[0].index(fx.SANDBOX_NO_RESTARTS), scripts[0].index("docker network create"))
+        for line in ("$nrconf{restart} = 'l';", "$nrconf{override_rc}{qr(^containerd)} = 0;",
+                     "$nrconf{override_rc}{qr(^sysbox)} = 0;", "$nrconf{override_rc}{qr(^docker)} = 0;"):
+            self.assertIn(line, fx.SANDBOX_NEEDRESTART_CONF)
+        yaml = slurp(os.path.join(fx.SKILL_DIR, "sandbox", "fx-sandbox.yaml"))
+        self.assertLess(yaml.index(fx.SANDBOX_NEEDRESTART), yaml.index("test -f /etc/fx-sandbox-ready && exit 0"))
+        for line in fx.SANDBOX_NEEDRESTART_CONF.splitlines():
+            self.assertIn("    " + line + "\n", yaml)  # the same file, written by a new VM's start-up script
+
+    def test_what_a_box_whose_runtime_went_away_says(self):
+        gone = ("OCI runtime exec failed: exec failed: unable to start container process: error executing setns process: "
+                "get handle to /proc/thread-self/fd: unsafe procfs detected: openat2 fsmount:fscontext:proc/thread-self/fd/:"
+                " operation not permitted: unknown")
+        self.assertIn("unsafe procfs detected", fx.box_gone_failure("x\n" + gone + "\n"))
+        tmp = "browserType.launch: ENOENT: no such file or directory, mkdtemp '/tmp/playwright_chromiumdev_profile-ab'"
+        self.assertIsNone(fx.box_gone_failure(tmp + "\n" + tmp))  # two may be the code's
+        self.assertIn("4 browser launches found no /tmp", fx.box_gone_failure("\n".join([tmp] * 4)))
+        for text in ("Error: expect(received).toBe(expected)", "OCI runtime exec failed: exec: \"php\": executable file "
+                     "not found in $PATH", ""):
+            self.assertIsNone(fx.box_gone_failure(text), text)
+
 
 class NoWayAroundTest(unittest.TestCase):
     def test_every_command_of_a_review_goes_through_the_box(self):
@@ -395,6 +427,62 @@ class JobBoxTest(FxTestCase):
         self.assertEqual(len(self.vm("resume")), 1)
         self.assertEqual(len(self.vm("create")), 1)  # the same box: what it installed is still there
         self.assertEqual(self.records()[0][1]["name"], name)
+
+    def setups_run(self):
+        return len([c for c in self.box_cmds() if c["cmd"] == "echo setup-ran"])
+
+    def test_a_box_whose_runtime_went_away_is_made_again_with_its_setup(self):
+        self.setup_job()
+        name = self.records()[0][1]["name"]
+        write(os.path.join(self.rundir, "health-" + name), "OCI runtime exec failed: get handle to /proc/thread-self/fd: "
+              "unsafe procfs detected: openat2 fsmount:fscontext:proc/thread-self/fd/: operation not permitted\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            code, text = self.raw("run", "--job", "T-1", "--", "echo", "back")
+        self.assertEqual(code, 0, text)
+        self.assertIn("back", text)
+        self.assertIn(name, [c["name"] for c in self.vm("destroy")])
+        self.assertEqual(len(self.vm("create")), 2)
+        self.assertEqual(self.setups_run(), 2)
+        self.assertNotEqual(self.records()[0][1]["name"], name)
+
+    def test_a_box_that_lost_its_images_runs_its_setup_again(self):
+        self.setup_job()
+        rec = self.records()[0][1]
+        self.assertEqual(rec["images"], 3)  # what setup left in the box's Docker
+        write(os.path.join(self.rundir, "health-" + rec["name"]), "0\n")
+        code, text = self.raw("run", "--job", "T-1", "--", "echo", "back")
+        self.assertEqual(code, 0, text)
+        self.assertEqual((len(self.vm("create")), self.setups_run()), (1, 2))
+
+    def test_a_round_lost_to_the_box_s_runtime_does_not_count(self):
+        self.setup_job()
+        self.f.commit({"app.py": "x = 1\n"})
+        write(os.path.join(self.f.factory, "checks.sh"), "echo 'OCI runtime exec failed: get handle to "
+              "/proc/thread-self/fd: unsafe procfs detected: openat2'\nexit 126\n")
+        name = self.records()[0][1]["name"]
+        code, res = self.fx("gate", "T-1")
+        self.assertEqual(code, 3, res)
+        self.assertTrue(res.get("void"), res)
+        self.assertEqual(res["next"], "gate")
+        self.assertIn("lost its runtime", res["error"])
+        self.assertIn("unsafe procfs detected", self.records()[0][1]["broken"])
+        write(os.path.join(self.f.factory, "checks.sh"), "echo checks-ran\nexit 0\n")
+        code, text = self.raw("run", "--job", "T-1", "--", "echo", "back")
+        self.assertEqual(code, 0, text)
+        self.assertIn(name, [c["name"] for c in self.vm("destroy")])  # the broken box goes, a new one is set up
+        self.assertEqual(self.setups_run(), 2)
+
+    def test_one_job_s_box_is_made_again_on_its_own(self):
+        self.setup_job()
+        name = self.records()[0][1]["name"]
+        code, res = self.fx("sandbox", "box", "--job", "T-1", "--recreate")
+        self.assertEqual(code, 0, res)
+        self.assertNotEqual(res["box"], name)
+        self.assertIn(name, [c["name"] for c in self.vm("destroy")])
+        self.assertEqual(self.setups_run(), 2)
+        code, res = self.fx("sandbox", "box", "--job", "T-1")
+        self.assertEqual(code, 3, res)
 
     def test_the_box_goes_with_the_job_s_clones(self):
         self.setup_job()
