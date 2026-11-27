@@ -4614,14 +4614,107 @@ def gate_void(ctx, job_id, rn, rdir, place, why, also=None, next_step=None):
                   code=3, extra={"void": True, "round": rn, "kept": aside, "next": "gate" if n < 3 else "stop"})
 
 
+GATE_DRY_STAGES = ("build", "review", "approve", "pr")
+
+
+def job_pushed_any(job):
+    """Something of the job left this machine: a branch pushed or a pull request opened."""
+    reps = job.get("repos") or {}
+    return bool(job.get("pushed_head") or job.get("pr_url") or any(
+        isinstance(r, dict) and (r.get("pushed_head") or r.get("pr_url")) for r in reps.values()))
+
+
+def gate_stage_ok(job, dry=False):
+    """A round runs after a build, while the job has rounds left. A dry run counts nothing and moves nothing, so it may
+    also run once the job went on (review, approve, or pr while nothing is pushed yet) and with no round left: the way
+    to try the factory's scripts, seed or permission table on code that already passed, without forcing the stage."""
+    if dry:
+        if job["stage"] not in GATE_DRY_STAGES or (job["stage"] == "pr" and job_pushed_any(job)):
+            raise FxError("a dry run of the gate runs on built code that is not pushed yet (stages %s); job is in stage "
+                          "%s" % (", ".join(GATE_DRY_STAGES), job["stage"]))
+        return
+    if job["stage"] != "build":
+        raise FxError("gate runs after a build; job is in stage %s%s" % (job["stage"], (
+            ". `fx gate %s --dry-run` tries it without counting" % job["id"]) if job["stage"] in GATE_DRY_STAGES else ""))
+    if rounds_left(job) <= 0:
+        raise FxError("no rounds left for %s. Rounds lost to the factory (its seed, its permission table, its scripts), "
+                      "not to the job's code, can be given back by a human: `fx rounds %s --give-back <n,...>`"
+                      % (job["id"], job["id"]))
+
+
+def rounds_code(job, back, reason):
+    return hashlib.sha256(json.dumps([job["id"], sorted(back), reason.strip()]).encode("utf-8")).hexdigest()[:12]
+
+
+def cmd_rounds(ctx, a):
+    """A human gives back rounds a job lost to the factory, not to its code: a seed that lacked a row, a permission table
+    that could not judge a cell, a checks script that was wrong. fx cannot tell those from the code's own failures (a
+    cell that answers otherwise may be either), so a person says it, in two steps like fx override: the first run says
+    what would happen and prints a code; the second, with it and their own words, writes it into the job. A job that
+    had gone on to its pull request for want of rounds, with nothing pushed yet, goes back to build: its next gate is a
+    real round. Without --give-back: the job's rounds as they are."""
+    job = ctx.load(a.job)
+    start = job.get("round_start", 0)
+    failed = {r.get("round"): r for r in job.get("gate_rounds") or [] if isinstance(r, dict) and r.get("gate") == "FAIL"
+              and not r.get("given_back") and r.get("round", 0) > start}
+    state = {"round": job["round"] - start, "max_rounds": job.get("max_rounds"), "rounds_left": rounds_left(job),
+             "rounds_returned": int(job.get("rounds_returned") or 0), "stage": job["stage"],
+             "failed_rounds": {str(k): {kk: v.get(kk) for kk in ("commit", "failed_at", "at")} for k, v in sorted(failed.items())}}
+    if not a.give_back:
+        out(dict({"ok": True, "job": job["id"]}, **state))
+        return
+    try:
+        back = sorted({int(x) for x in str(a.give_back).replace(" ", "").split(",") if x})
+    except ValueError:
+        raise FxError("--give-back takes round numbers, comma-separated (2,3)", code=3)
+    wrong = [r for r in back if r not in failed]
+    if wrong or not back:
+        raise FxError("--give-back: round(s) %s did not fail in this attempt, or were given back already; failed: %s" % (
+            ", ".join(map(str, wrong)) or "none", ", ".join(map(str, sorted(failed))) or "none"), code=3)
+    if not (a.reason or "").strip():
+        raise FxError("--reason: why those rounds say nothing about the job's code (what in the factory failed them)",
+                      code=3)
+    if job["stage"] not in ("build", "review", "approve", "pr") or (job["stage"] == "pr" and job_pushed_any(job)):
+        raise FxError("%s is in stage %s%s: rounds are given back before its pull request is pushed; after that it is "
+                      "/auto-factory:code rework" % (job["id"], job["stage"], " and pushed" if job["stage"] == "pr" else ""),
+                      code=3)
+    code = rounds_code(job, back, a.reason)
+    to_build = job["stage"] == "pr"
+    if a.confirm != code:
+        if a.confirm:
+            raise FxError("--confirm does not match what would be given back now: run it without --confirm to see", code=3)
+        out(dict({"ok": True, "job": job["id"], "written": False, "would_give_back": back,
+                  "rounds_left_after": rounds_left(job) + len(back),
+                  "would_move": "pr -> build (nothing is pushed yet)" if to_build else None, "confirm": code,
+                  "next": "ask the user, naming each round and why it failed (round-N/checks.md); only when they say "
+                          "the factory failed it, not the job's code",
+                  "then": "%s rounds %s --give-back %s --reason %s --approved \"<who said yes and when, in their words>\" "
+                          "--confirm %s" % (FX_CMD, shlex.quote(job["id"]), ",".join(map(str, back)),
+                                            shlex.quote(a.reason), code)}, **state))
+        return
+    if not (a.approved or "").strip():
+        raise FxError("--approved: who gave the rounds back and when, in their words", code=3)
+    for r in back:
+        failed[r]["given_back"] = "human"
+    job["rounds_returned"] = int(job.get("rounds_returned") or 0) + len(back)
+    job.setdefault("rounds_human", []).append({"rounds": back, "reason": a.reason.strip(), "approved": a.approved.strip(),
+                                               "at": now()})
+    note = "round(s) %s given back by a human: %s (%s)" % (",".join(map(str, back)), a.reason.strip(), a.approved.strip())
+    if to_build:
+        job["needs_human"], job["incomplete"], job["handoff_reason"] = False, False, None
+        job["build_reason"] = "feedback"
+        ctx.move(job, "build", note, force=True)  # the one way back from pr: rounds a person gave back, nothing pushed
+    else:
+        ctx.save(job, note)
+    out({"ok": True, "job": job["id"], "written": True, "given_back": back, "rounds_left": rounds_left(job),
+         "stage": job["stage"], "next": "gate" if job["stage"] == "build" else job["stage"]})
+
+
 def cmd_gate(ctx, a):
     if getattr(a, "full", False):
         os.environ["FX_SCAN_FULL"] = "1"  # scan_full_asked: the whole permission table and the whole app for ZAP
     job = ctx.load(a.job)
-    if job["stage"] != "build":
-        raise FxError("gate runs after a build; job is in stage %s" % job["stage"])
-    if rounds_left(job) <= 0:
-        raise FxError("no rounds left for %s" % job["id"])
+    gate_stage_ok(job, getattr(a, "dry_run", False))
     # A gate takes its place on the machine one phase at a time (GatePhases). One whose checks already passed on this
     # commit has only the second phase.
     with job_busy(ctx, job, "gate"):
@@ -5161,14 +5254,12 @@ def gate_round(ctx, a, place):
     runs it per repository (gate_round_repos)."""
     ctx.load_config(True)  # as they are now: the gate may have waited for its turn, and the settings may have moved
     job = ctx.load(a.job)
-    if job["stage"] != "build":
-        raise FxError("gate runs after a build; job is in stage %s" % job["stage"])
-    if (job.get("lane") or {}).get("name") == "light":
+    dry = getattr(a, "dry_run", False)
+    gate_stage_ok(job, dry)
+    if (job.get("lane") or {}).get("name") == "light" and not dry:
         lane_check(ctx, job)  # the steps the real diff puts back, before any of them is left out
         ctx.save(job, "light lane: %s" % ((job["lane"].get("cancelled") or "diff %(lines)s line(s) in %(files)s file(s)"
                                            % job["lane"]["diff"])))
-    if rounds_left(job) <= 0:
-        raise FxError("no rounds left for %s" % job["id"])
     if not job_names(job, "change"):
         raise FxError("%s has no clones yet: intake names its repositories, then fx repos clones them" % job["id"], code=3)
     if len(job_order(job)) <= 1:
@@ -10204,12 +10295,24 @@ def perm_tech(rctx, job=None):
     if not isinstance(t, dict):
         return None, ["%s is not a JSON object" % rel]
     if job is not None:
-        own = read(perm_job_file(rctx, job))
+        jfile = perm_job_file(rctx, job)
+        own = read(jfile)
+        if own is None:
+            # The job's additions are read from one name only (the technical part's own file name). A file of another
+            # name next to it was never read: say so at once, not after a whole table that lacks what it holds.
+            jd = os.path.dirname(jfile)
+            strays = sorted(n for n in (os.listdir(jd) if os.path.isdir(jd) else [])
+                            if re.fullmatch(r"permissions(-[A-Za-z0-9_.-]+)?\.json", n) and n != os.path.basename(jfile)
+                            and not (len(perm_app_repos(rctx)) > 1 and n != "permissions.json"))
+            if strays:
+                return None, ["the job's own additions must be in %s (the name of %s); fx does not read %s" % (
+                    os.path.relpath(jfile, rctx.factory), rel, ", ".join(
+                        os.path.relpath(os.path.join(jd, n), rctx.factory) for n in strays))]
         try:
             extra = json.loads(own) if own else {}
         except ValueError as e:
             return None, ["the job's %s is not valid JSON: %s" % (os.path.basename(path), e)]
-        for k in ("requests", "not_app", "who"):
+        for k in ("requests", "not_app", "who", "out_of_scope"):
             if isinstance(extra.get(k), dict):
                 t[k] = dict(t.get(k) or {}, **extra[k])
     if t.get("none"):
@@ -10565,7 +10668,7 @@ def perm_plan(tech, rows, routes):
     return plan, sorted(set(lacks)), reqs
 
 
-def perm_matrix(rctx, job, url, tech, rows, scope=None):
+def perm_matrix(rctx, job, url, tech, rows, scope=None, early=None):
     """Every cell of the table, called on the app running at url. Reads first, then the writes that must be refused
     (the data must stay as it was), then the allowed writes (the data must change; the snapshot is put back after
     each). scope (perm_scope): only the rows it names are called, the rest neither pass nor fail; a route with no row
@@ -10580,6 +10683,8 @@ def perm_matrix(rctx, job, url, tech, rows, scope=None):
     out_scope = {k: v for k, v in out_scope.items() if v}
     unrowed = sorted(k for k in routes if k not in rows and k not in outside and k not in out_scope)
     stale = sorted(k for k in rows if k not in routes)
+    if early:  # what would set the round aside anyway is known now: before a single cell is called (PermsSetup)
+        early(routes, unrowed, stale)
     sc = scope(routes) if scope else {"kind": "full", "why": "the whole table", "only": None}
     reached = sorted(k for k in sc["only"] if k in routes) if sc["only"] is not None else None
     rowed = sorted(k for k in rows if k in routes)
@@ -11327,9 +11432,23 @@ def permissions_gate(ctx, job, view, rctx, url, rdir, suffix=""):
     staged = perm_tables(rctx, over=os.path.join(ctx.job_dir(job_real_id(job)), "logic"))
     if staged["problems"]:
         return {"void": ["the permission rows have problems:\n- " + "\n- ".join(staged["problems"][:20])]}
+    base = baseline_of(rctx).get("permissions") or {}
+    base_routes = set(base.get("routes") or {})
+    base_unrowed, base_stale = set(base.get("unrowed") or []), set(base.get("stale") or [])
+
+    def early(routes, unrowed, stale):
+        # The same judgement as below on unrowed and stale routes, made before the table is called: a round that would
+        # be set aside for them is set aside in seconds, not after every cell.
+        t = perm_touched(view, staged["rows"], perm_tables(rctx)["rows"], routes)
+        lines = ["%s has no row in the permission table: the rows say who may call it (from the ticket, or the user), "
+                 "never the builder" % r for r in unrowed if not (r in base_unrowed and not t(r))]
+        lines += ["the permission table has a row for %s, which the job's app no longer has: its row goes from the "
+                  "job's staged logic" % r for r in stale if not (r in base_stale or (r not in base_routes and not t(r)))]
+        if lines:
+            raise PermsSetup("\n- ".join(lines))
     try:
         res = perm_matrix(rctx, view, url, tech, staged["rows"],
-                          scope=perm_scope(rctx, job, view, staged["rows"], perm_tables(rctx)["rows"]))
+                          scope=perm_scope(rctx, job, view, staged["rows"], perm_tables(rctx)["rows"]), early=early)
     except PermsSetup as e:
         return {"void": [e.why]}
     write_atomic(os.path.join(rdir, "permissions%s.md" % suffix), perm_markdown(res))
@@ -11340,10 +11459,7 @@ def permissions_gate(ctx, job, view, rctx, url, rdir, suffix=""):
     sc = res.get("scope") or {"kind": "full", "why": "the whole table", "rows": len({c["route"] for c in res["cells"]}),
                               "of": len({c["route"] for c in res["cells"]})}
     job.setdefault("perm_scope", {})[suffix.lstrip("-") or "-"] = {k: sc.get(k) for k in ("kind", "why", "rows", "of")}
-    base = baseline_of(rctx).get("permissions") or {}
     base_bad = {perm_cell_key(c) for c in base.get("mismatches") or []}
-    base_routes = set(base.get("routes") or {})
-    base_unrowed, base_stale = set(base.get("unrowed") or []), set(base.get("stale") or [])
     touched = perm_touched(view, staged["rows"], perm_tables(rctx)["rows"], res["routes"])
     out_ = {"problems": [], "void": [], "notes": [], "base": []}
     for c in res["mismatches"]:
@@ -31695,6 +31811,13 @@ def build_parser():
     s.add_argument("--confirm", help="the code the first run printed, after the person said yes")
     s.add_argument("--drop", action="store_true", help="withdraw everything allowed for this job")
     s.set_defaults(fn=cmd_override)
+    s = sub.add_parser("rounds", help="a job's rounds; --give-back: rounds a human says the factory lost, not the code")
+    s.add_argument("job")
+    s.add_argument("--give-back", metavar="N,...", help="failed rounds to give back (comma-separated)")
+    s.add_argument("--reason", help="--give-back: what in the factory failed those rounds")
+    s.add_argument("--approved", help="who gave them back and when, in their words")
+    s.add_argument("--confirm", help="the code the first run printed, after the person said yes")
+    s.set_defaults(fn=cmd_rounds)
     s = sub.add_parser("lane", help="work that must not overlap between jobs (they share files in the factory repository)")
     s.add_argument("action", choices=["status", "take", "release", "setup"])
     s.add_argument("job", nargs="?")

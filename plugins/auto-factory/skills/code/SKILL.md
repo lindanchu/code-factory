@@ -519,7 +519,7 @@ confirm rules in plain words.
   agent the answer. Never let the builder write rows. Then the gate again.
 - Anything else (a user cannot log in, a command failed, the technical part lacks a value): the same agent with
   `job <KEY>` and fx's error; it fixes the technical part (the factory's, or the job's own
-  `jobs/<KEY>/permissions.json`); commit and push what it changed in the factory, then the gate again.
+  `jobs/<KEY>/permissions.json`, `permissions-<repo>.json` with several apps); commit and push what it changed in the factory, then the gate again.
 - Already wrong on the base branch and touched by this job: the job waits for that route's fix task (step 7).
 
 ### `/auto-factory:code lessons`
@@ -1085,8 +1085,17 @@ one as it finishes.
 ### Gate
 
 `python3 ${CLAUDE_SKILL_DIR}/fx gate <job> --dry-run` runs the whole gate and counts nothing (the round is put
-aside, the job stays where it was): use it when the factory's scripts (checks, `app.up`, e2e) changed, before they
-cost a round. A gate that fails because the job's box has no network (`void: true`, `next: stop`) is the factory's
+aside, the job stays where it was): use it when the factory's scripts (checks, `app.up`, e2e), its seed or its
+permission table changed, before they cost a round. It runs in any stage after a build (review, approve, and pr while
+nothing is pushed) and with no round left, so it never needs `fx stage --force`.
+
+**Rounds the factory lost.** A round can fail for the factory and not the code: a seed that lacks a row, a permission
+table that cannot judge a cell, a checks script that was wrong. fx cannot tell those apart, a person can. When the user
+says so, `python3 ${CLAUDE_SKILL_DIR}/fx rounds <job> --give-back <n,...> --reason "<what in the factory failed them>"`:
+the first run prints `would_give_back` and a `confirm` code; ask the user with AskUserQuestion, naming each round and
+why it failed; only on yes run its `then` with their words in `--approved`. The rounds stop counting; a job that went to
+its pull request for want of rounds, with nothing pushed, goes back to build, and its next gate is a real round.
+`fx rounds <job>` alone shows the rounds. A gate that fails because the job's box has no network (`void: true`, `next: stop`) is the factory's
 script to fix (fetch at setup, another repository through `repos[].needs`), never a builder's.
 A box that cannot run anything any more (every command fails, a setup's images are gone) is made again by fx itself
 before the job's next command; `python3 ${CLAUDE_SKILL_DIR}/fx sandbox box --job <job> --recreate` does it on demand,
@@ -1526,7 +1535,7 @@ is saved without the user's approval.
    `python3 ${CLAUDE_SKILL_DIR}/fx login --kind <web|api> --command '<its command>' --header <its header>
    --check <its check> --role <its role> --untested --save factory`, commit `factory.json` and push.
    The next scan proves it on its check page (**Scanner login** if not).
-4c. **Permissions of merged jobs.** A job that added routes kept their requests in `jobs/<KEY>/permissions.json`.
+4c. **Permissions of merged jobs.** A job that added routes kept their requests in `jobs/<KEY>/permissions.json` (`permissions-<repo>.json` with several apps).
    Once all its pull requests are merged: `python3 ${CLAUDE_SKILL_DIR}/fx permissions apply <KEY>`, commit what it
    names and push. Its rows came into `logic/` with its logic (step 4).
 5. Knowledge, when `learning.knowledge_refresh` is on (logic files whose cited
