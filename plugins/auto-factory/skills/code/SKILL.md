@@ -1146,7 +1146,11 @@ done without changing an existing test (a protected path), only a human allows i
 only for that job:
 `python3 ${CLAUDE_SKILL_DIR}/fx override <job> --accept <rule id from security.md> --path "<glob>" --reason "<why>"`
 or `fx override <job> --unprotect <test file>` (both can be given, `--unprotect`
-several times). The first run writes nothing: it prints `would_allow` and a `confirm`
+several times; with several repositories, `--unprotect <repo>:<test file>` limits it
+to one, and each repository's own `protected_paths` count). A finding of the tool
+`fx suppressions` cannot be accepted this way (fx refuses it): only
+`security.allow_suppressions` allows suppressions, for the whole factory; otherwise the
+builder takes the suppression out. The first run writes nothing: it prints `would_allow` and a `confirm`
 code. Ask the user with AskUserQuestion, naming each test and each finding and what
 allowing it means. Only when they say yes, run the `then` command with their own words
 in `--approved`. fx writes `overrides/<job>.json` and commits it; then `git push` in
@@ -1188,7 +1192,10 @@ commit and the fingerprint are still the same and the pass is not older than
 `reuse.max_age_hours` (24), the gate does not run the script a second time: its output
 has `checks.reused: true` with the run, the commit and the time, and the same line is
 in `round-<N>/checks.md`. In a job of several repositories each repository's run is kept
-for its own commit (`fx checks <job> --repo <name>`), and `checks.reused` is per repository. Tell the user in one line. Every other step of the round runs
+for its own commit (`fx checks <job> --repo <name>`), and `checks.reused` is per repository.
+`fx checks <job> --only <stage> -- <test arguments>` runs one stage of the script with the
+script's own setup (containers, test database) for a builder's single test; it is never kept
+for the gate (init.md, Stages). Tell the user in one line. Every other step of the round runs
 as always, a failure is never taken over, and `fx pr` still runs the checks on what it
 pushes when merging the target branch made a new commit. When `checks.reused` is false
 and `not_reused_because` is there, that is what changed since the builder's run.

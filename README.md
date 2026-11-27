@@ -1239,6 +1239,34 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
 - The VM's memory: one box per job at once (and per candidate or package). Its 6 GB held three small web
   jobs at once with room to spare (above); since 3.13 you choose it, from what fx measured (below).
 
+### Upgrading to 3.16.0: one test with the checks script's own setup
+
+- `fx checks <job> --only <stage> -- <test arguments>` runs one stage of the checks script, with the setup it needs (the
+  project's containers, a migrated test database), passing the arguments to its test runner: what a builder uses for
+  one test file or one test when `fx run` has no runtime or database for it. The script gets `FACTORY_ONLY_STAGE` and
+  `FACTORY_TEST_ARGS` (init.md, "Stages"); the run is never kept for the gate. A checks script written before 3.16.0
+  does not read them: `fx doctor` names it, and `/auto-factory:code init` adds it. Until then `--only` stops with that
+  advice.
+- The builder's prompt names each repository's `protected_paths` (the existing files the gate refuses to see changed).
+  Another existing test may change only when the spec changes what it asserts; the builder lists each one in the
+  report under `## Existing tests changed`.
+
+### Upgrading to 3.16.0: fixes
+
+- A job of one repository in a factory of several read the top level of `factory.json`, not its repository's entry:
+  the gate started no app (no ZAP, no permission table) and used the wrong `protected_paths`, `ui_paths` and the like.
+- `fx override --unprotect` reads the protected_paths of the job's repositories; `<repo>:<path>` limits it to one.
+- `fx override --accept` refuses a finding of `fx suppressions` at once: only `security.allow_suppressions` allows
+  suppressions, for the whole factory.
+- A folder in `copy_into_worktree` (built assets an app bundles) is copied with what it holds, its small text files
+  are searched for secrets, and `fx pr` and `fx logic check` no longer crash on it. A local file put in `local/<repo>/`
+  after the clone was made reaches the clone at the next `fx setup`, `fx checks` or gate. `fx logic check --job` of a
+  job that stages no logic file answers at once.
+- `fx pr` keeps only a pull or merge request's address, not the link in a CLI's notice of its own new release; an
+  address kept wrongly before is found again from the branch.
+- `fx audit-import` reads the security-audit skill's `severity.overall_severity` and the place from its trace (the
+  sink, and the entrypoint when it is elsewhere) or evidence.
+
 ### Upgrading to 3.15.1: a factory in a folder of its repository
 
 - Several factories kept in one git repository (`<project>/<repo>/factory.json`) could not run a gate or `fx checks`:

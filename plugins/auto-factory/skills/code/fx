@@ -1142,18 +1142,39 @@ def copy_source(ctx, repo=None):
     return src_root if os.path.isabs(src_root) else os.path.join(ctx.factory, src_root)
 
 
-def copy_local_files(ctx, dest, repo=None):
+def copy_local_files(ctx, dest, repo=None, missing_only=False):
     """Untracked files a fresh clone needs (for example .env): local/<repo>/<file> in the factory repository, else from
-    copy_from or local/<file>."""
+    copy_from or local/<file>. An entry may be a folder (built assets an app bundles): copied with what it holds.
+    missing_only: only what the clone does not have yet (one put in local/ after the clone was made), never over what
+    is there."""
     copied = []
     for rel in (ctx.rc(repo, "copy_into_worktree", []) if ctx.repos else ctx.c("copy_into_worktree", [])) or []:
         src = local_file_source(ctx, rel, repo)
-        if src:
-            dst = os.path.join(dest, rel)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if not src:
+            continue
+        dst = os.path.join(dest, rel)
+        if missing_only and os.path.lexists(dst):
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.isdir(src):
+            shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
+        else:
             shutil.copy2(src, dst)
-            copied.append(rel)
+        copied.append(rel)
     return copied
+
+
+def local_files_fill(ctx, view):
+    """Copy into each clone of a job (or view) the copy_into_worktree entries it lacks: a file put in local/<repo>/ after
+    fx new made the clone reaches it too. Returns ["<repo>: <file>", ...] for what it copied, also told on stderr."""
+    got = []
+    for n, wt in view_worktrees(view).items():
+        repo = n if n in ctx.repo_names() else None
+        for rel in copy_local_files(ctx, wt, repo, missing_only=True):
+            got.append("%s: %s" % (n, rel) if repo and len(ctx.repos) > 1 else rel)
+    if got:
+        hint("copied into the clone what local/ holds and it did not have yet: %s" % ", ".join(got))
+    return got
 
 
 def job_clone(ctx, dest, branch, start=None, repo=None):
@@ -3089,6 +3110,20 @@ def job_override_read(ctx, job, at=None):
     return data
 
 
+def unprotect_globs(ctx, allowed, repo=None):
+    """The existing tests a human allowed the job to change, for one repository: an entry "<repo>:<glob>" is that
+    repository's only, a plain glob any repository's."""
+    out_ = []
+    for g in (allowed or {}).get("unprotect") or []:
+        name, sep, rest = g.partition(":")
+        if sep and name in ctx.repo_names():
+            if repo is None or name == repo:
+                out_.append(rest)
+        else:
+            out_.append(g)
+    return out_
+
+
 def override_code(job, data):
     text = json.dumps([job["id"], sorted(data.get("unprotect") or []),
                        sorted(json.dumps(e, sort_keys=True) for e in data.get("accepted_rules") or [])])
@@ -3115,20 +3150,41 @@ def cmd_override(ctx, a):
         commit = commit_paths(ctx.factory, [rel], "%s: what was allowed for this job is withdrawn" % job["id"])
         out({"ok": True, "job": job["id"], "dropped": True, "commit": commit[:12], "next": "push the factory repository"})
         return
-    prot = ctx.c("protected_paths", []) or []
+    # protected_paths is a per-repository setting: each repository the job changes (every one when the job does not
+    # say yet) has its own, its entry's or else the top level's
+    names = [n for n in (job_names(job, "change") if job.get("repos") else []) if n in ctx.repo_names()] or \
+        ctx.repo_names()
+    prot = {n: ctx.rc(n, "protected_paths", []) or [] for n in names} if names else \
+        {None: ctx.c("protected_paths", []) or []}
     new = {"unprotect": list(cur.get("unprotect") or []), "accepted_rules": list(cur.get("accepted_rules") or [])}
     covers = {}
     for g in a.unprotect or []:
         g = g.strip()
-        covers[g] = [p for p in prot if p == g or match_any(p, [g]) or match_any(g, [p])]
+        name, sep, glob = g.partition(":")
+        if sep and name in ctx.repo_names():  # <repo>:<path>, that repository's only
+            if name not in prot:
+                raise FxError("%s: this job does not change repository %s (it changes %s)" % (
+                    g, name, ", ".join(n for n in prot if n) or "none yet"), code=3)
+            where = {name: prot[name]}
+        else:
+            glob, where = g, prot
+        covers[g] = ["%s:%s" % (n, p) if n and len(prot) > 1 else p for n, ps in where.items() for p in ps
+                     if p == glob or match_any(p, [glob]) or match_any(glob, [p])]
         if not covers[g]:
-            raise FxError("%s is not among protected_paths in factory.json, so no job is kept from changing it" % g, code=3)
+            raise FxError("%s is not among protected_paths in factory.json%s, so no job is kept from changing it" % (
+                g, " (%s)" % "; ".join("%s: %s" % (n, ", ".join(ps) or "none") for n, ps in where.items())
+                if any(where) else ""), code=3)
         if g not in new["unprotect"]:
             new["unprotect"].append(g)
     if a.accept:
         if not (a.reason or "").strip() or not (a.path or "").strip():
             raise FxError("--accept needs --path (a glob of the files, or of the site's paths for ZAP and the header check) "
                           "and --reason (why a human accepts it)", code=3)
+        if suppression_rule(a.accept):
+            raise FxError("%s is a scanner suppression the job added (tool \"fx suppressions\"): no override accepts it "
+                          "for one job. Only security.allow_suppressions in factory.json allows suppressions, for every "
+                          "job of the factory; otherwise the builder takes the suppression out and fixes the finding, "
+                          "or a human accepts the finding the suppression hid (its own rule id)" % a.accept.strip(), code=3)
         entry = {"rule": a.accept.strip(), "path": a.path.strip(), "reason": a.reason.strip()}
         if entry not in new["accepted_rules"]:
             new["accepted_rules"].append(entry)
@@ -3709,7 +3765,10 @@ def cmd_ctx(ctx, a):
                              "Commit first, then run it once, at the end: a run on uncommitted changes shows the result but "
                              "is not kept. While you work, and after a failure, run only the tests that cover the change or "
                              "that failed (the runner's filter for a file or a test name) as a heavy command, never the whole "
-                             "script to see one fix" if agent == "builder"
+                             "script to see one fix. Tests that need the script's own setup (the project's containers, a "
+                             "test database), or a runtime only its containers have: `%s checks %s%s --only <stage> -- <the "
+                             "runner's arguments>` runs that stage alone with them (testing.md names the stages; never kept "
+                             "for the gate)" % (FX_CMD, job["id"], which) if agent == "builder"
                              else "It answers at once when the script already passed on this commit"))
             if len(job_names(job, "change")) > 1:
                 lines.append("Several repositories change: run it once for each, with `--repo <name>` (%s), each in that "
@@ -3720,6 +3779,16 @@ def cmd_ctx(ctx, a):
             lines.append("Install: `%s run --job %s%s --install -- <the install command>` adds or upgrades a dependency; "
                          "only this command reaches the package registries, every other one has no internet" % (
                              FX_CMD, job["id"], which))
+    if agent == "builder":
+        # What the gate refuses to see changed: each repository's protected_paths, and what a human allowed this job
+        prot_names = (job_names(job, "change") if several else [None])
+        prot = [(n, (repo_ctx(ctx, n) if n else rctx).c("protected_paths", []) or []) for n in prot_names]
+        freed = unprotect_globs(ctx, job_override(ctx, job)) if job.get("id") else []
+        lines.append("Protected paths (an existing file there may not be modified, deleted or renamed: the gate fails the "
+                     "round; add new files instead): %s%s. Another existing test changes only when the spec changes "
+                     "what it asserts; list each one in the report" % (
+                         "; ".join(("%s: " % n if n else "") + (", ".join(ps) or "none") for n, ps in prot),
+                         ". A human allowed this job to change: %s" % ", ".join(freed) if freed else ""))
     if agent == "planner":
         cap = int(ctx.c("split.max_builders", 0) or 0)
         lines.append("Plan file: %s" % os.path.join(jd, "plan.md"))
@@ -4377,12 +4446,13 @@ def cmd_setup(ctx, a):
         names = [a.repo_name]
     if not names:
         raise FxError("%s has no clones yet: intake names its repositories, then fx repos clones them" % job["id"], code=3)
+    filled = local_files_fill(ctx, {"repos": {n: job["repos"][n] for n in names}})
     # The job's box first (decision J4): without a sandbox, nothing of the job runs until the person says how.
     box = job_box_of(ctx, job, setup=False)
     todo = [n for n in names if a.force or not job["repos"][n].get("setup_done")
             or (box and n not in (box.get("setup") or []))]
     if not todo:
-        out({"ok": True, "job": job["id"], "skipped": "already done"})
+        out(dict({"ok": True, "job": job["id"], "skipped": "already done"}, **({"local_files_copied": filled} if filled else {})))
         return
     lane_take(ctx, job)  # a job that shares files with another one waits here, before it builds anything
     several = len(job["repos"]) > 1
@@ -4430,6 +4500,8 @@ def cmd_setup(ctx, a):
         job_box_warm(ctx, job, box)
         job_box_images(ctx, job["id"], box)
     res = {"ok": True, "job": job["id"], "log": logs.get(todo[0]) if not several else None}
+    if filled:
+        res["local_files_copied"] = filled
     warn = [w for n in todo for w in [node_engine_warning(ctx, job, n, box)] if w]
     if box and box.get("warm_failed"):
         warn.append("the apps did not start while the box could still pull their images: %s" % box["warm_failed"])
@@ -4460,7 +4532,7 @@ def local_only_paths(ctx, repo=None):
 
 
 def is_local_file(ctx, path, repo=None):
-    return path in local_only_paths(ctx, repo) or (match_any(path, LOCAL_FILE_GLOBS) and not path.endswith(SHARED_ENV_SUFFIXES))
+    return any(path_under(path, p) for p in local_only_paths(ctx, repo)) or (match_any(path, LOCAL_FILE_GLOBS) and not path.endswith(SHARED_ENV_SUFFIXES))
 
 
 def stage_work(ctx, wt, untracked, repo=None):
@@ -4490,7 +4562,7 @@ def worktree_dirt(ctx, wt, repo=None):
     for entry in git(["status", "--porcelain", "-z", "--untracked-files=all"], wt).stdout.split("\0"):
         if entry.startswith("?? "):
             path = entry[3:]
-            if not match_any(path, patterns) and path not in local:
+            if not match_any(path, patterns) and not any(path_under(path, p) for p in local):
                 untracked.append(path)
     return tracked, untracked
 
@@ -4671,7 +4743,7 @@ def gate_round_repos(ctx, job, a, place):
             if any(match_any(p, frozen) for p in paths):
                 mine.append("Frozen path changed: %s (frozen_paths in factory.json may not be touched by a job)"
                             % " -> ".join(paths))
-            elif status in ("M", "D", "R") and match_any(old, prot) and match_any(old, allowed.get("unprotect") or []):
+            elif status in ("M", "D", "R") and match_any(old, prot) and match_any(old, unprotect_globs(ctx, allowed, n)):
                 unprotected.append("%s:%s" % (n, old))  # a human allowed this job to change this existing test
             elif status in ("M", "D", "R") and match_any(old, prot):
                 mine.append("Protected file %s: %s (existing tests may not be modified or deleted; "
@@ -5100,7 +5172,9 @@ def gate_round(ctx, a, place):
     if not job_names(job, "change"):
         raise FxError("%s has no clones yet: intake names its repositories, then fx repos clones them" % job["id"], code=3)
     if len(job_order(job)) <= 1:
-        return gate_round_one(ctx, job, a, place)
+        # A job of one repository in a factory of several reads that repository's settings (app.up, protected_paths,
+        # ui_paths, e2e, security...), as gate_round_repos does: the top level of factory.json holds only defaults.
+        return gate_round_one(repo_ctx(ctx, job_primary(job)) if len(ctx.repos) > 1 else ctx, job, a, place)
     return gate_round_repos(ctx, job, a, place)
 
 
@@ -5162,7 +5236,8 @@ def gate_round_one(ctx, job, a, place):
         if any(match_any(p, frozen) for p in paths):
             problems.append("Frozen path changed: %s (frozen_paths in factory.json may not be touched by a job)"
                             % " -> ".join(paths))
-        elif status in ("M", "D", "R") and match_any(old, prot) and match_any(old, allowed.get("unprotect") or []):
+        elif status in ("M", "D", "R") and match_any(old, prot) and \
+                match_any(old, unprotect_globs(ctx, allowed, job_primary(job))):
             unprotected.append(old)  # a human allowed this job to change this existing test
         elif status in ("M", "D", "R") and match_any(old, prot):
             problems.append("Protected file %s: %s (existing tests may not be modified or deleted; "
@@ -5365,7 +5440,7 @@ def gate_round_one(ctx, job, a, place):
                "- Approved: %s" % allowed["approved"].strip()]
         md += ["- Existing test changed with that permission: %s" % f for f in sorted(set(unprotected))]
         md += ["- Existing tests it may change, not changed so far: %s" % g for g in allowed.get("unprotect") or []
-               if not any(match_any(f, [g]) for f in unprotected)]
+               if not any(match_any(f, unprotect_globs(ctx, {"unprotect": [g]}, job_primary(job))) for f in unprotected)]
         md += ["- Finding accepted for this job: %s in %s (%s)" % (e["rule"], e.get("path") or "every file", e["reason"])
                for e in allowed.get("accepted_rules") or []] + [""]
     if flags:
@@ -6284,6 +6359,10 @@ def file_mark(path):
     try:
         if os.path.islink(path):
             return "link:" + os.readlink(path)
+        if os.path.isdir(path) and not os.path.lexists(os.path.join(path, ".git")):
+            # a folder of local files (copy_into_worktree): by each file in it
+            return "dir:" + digest(sorted((os.path.relpath(os.path.join(d, n), path), file_mark(os.path.join(d, n)))
+                                          for d, _, names in os.walk(path) for n in names))
         if os.path.isdir(path):
             head = git(["rev-parse", "HEAD"], path, check=False).stdout.strip()
             return "repo:%s:%s" % (head, digest(git(["status", "--porcelain"], path, check=False).stdout))
@@ -6641,6 +6720,99 @@ def checks_reused(ctx, job, look, log_path=None):
     return dict(rec, ok=True, reused=True, output="", timed_out=False, outside=None, note=text, problem=None)
 
 
+ONLY_STAGE_VAR = "FACTORY_ONLY_STAGE"  # what a checks script reads to run some of its stages (fx checks --only)
+
+
+def checks_only(ctx, job, a, args, who=None):
+    """fx checks --only: some stages of the checks script, with the test runner's arguments, in the job's clone (or a
+    candidate's, a package's) and its box, as the gate runs the script. What a builder runs one test file or one test
+    with when the tests need the script's own setup: the project's containers, a migrated test database. The script
+    gets FACTORY_ONLY_STAGE (the stage names, comma-separated) and FACTORY_TEST_ARGS (the arguments, shell-quoted: bash
+    reads them with eval "args=($FACTORY_TEST_ARGS)"). A partial run says nothing about the commit: never kept."""
+    only = [x.strip() for x in a.only.split(",") if x.strip()]
+    if not only or not all(re.fullmatch(r"[A-Za-z0-9_.:/-]{1,60}", x) for x in only):
+        raise FxError("--only takes stage names as the script prints them (::fx-stage <name>), comma-separated", code=3)
+    held = None
+    if a.wp:
+        pk = ((job.get("split") or {}).get("packages") or {}).get(a.wp)
+        if not pk:
+            raise FxError("no package %s in %s" % (a.wp, job["id"]))
+        held = pk.get("place")
+        who = wp_pseudo_job(ctx, job, a.wp)
+        n = pk.get("repo") or job_primary(job)
+        if len(job_order(job)) > 1 and n:
+            ctx = repo_ctx(ctx, n)
+            who = dict(who, repo=n)
+    if not os.path.isdir((who or {}).get("worktree") or ""):
+        raise FxError("the clone %s is missing" % (who or {}).get("worktree"), code=3)
+    script = checks_script(ctx, who)
+    if ONLY_STAGE_VAR not in (read(script, "") or ""):
+        raise FxError("%s does not run single stages yet (it never reads %s), so --only cannot work: run the whole "
+                      "script with `%s checks %s`, and ask the person to let /auto-factory:code init add it (init.md, "
+                      "\"Stages\")" % (os.path.relpath(script, settings_root(ctx)), ONLY_STAGE_VAR, FX_CMD, job["id"]),
+                      code=3, extra={"next": "checks"})
+    local_files_fill(ctx, who)
+    jd = ctx.job_dir(job["id"])
+    os.makedirs(os.path.join(jd, "checks"), exist_ok=True)
+    k = 1 + len([f for f in os.listdir(os.path.join(jd, "checks")) if f.startswith("only-")])
+    log = os.path.join(jd, "checks", "only-%d.log" % k)
+    env = checks_env(ctx, who)
+    env[ONLY_STAGE_VAR] = ",".join(only)
+    env["FACTORY_TEST_ARGS"] = shlex.join(args)
+    limit = int(ctx.c("gate_timeout_sec", 1800))
+    wait = a.wait if a.wait is not None else (max_wait_asked() if max_wait_asked() is not None
+                                              else ledger_settings()["agent_wait_sec"])
+    with ledger_lock():
+        st = ledger_load()
+        ledger_reap(st)
+        over = held if held and held in st["leases"] else None
+    t0, timed_out = time.time(), False
+    try:
+        with step_place(ctx, "package-run" if a.wp else "run", job, folders=[who["worktree"], jd], max_wait=wait,
+                        name=a.wp or None, over=over) as place:
+            env["FACTORY_PLACE"] = place.lease["id"]
+            env["FACTORY_CPUS"] = str(place_cpus_now())
+            box = job_box_of(ctx, who)
+            try:
+                if box:
+                    p = box_job_exec(ctx, who, box, "bash %s" % shlex.quote(script), who["worktree"], env, limit)
+                else:
+                    p = run(["bash", script], cwd=who["worktree"], check=False, env=env, timeout=limit, group=True)
+                output, rc = p.stdout or "", p.returncode
+            except subprocess.TimeoutExpired as e:
+                output, rc, timed_out = (e.output if isinstance(e.output, str) else "") + \
+                    "\ntimed out after %ss\n" % limit, None, True
+    except PlaceWait as e:
+        raise place_refusal(e, "the checks of %s" % job["id"])
+    if over:
+        package_at_rest(over)
+    write_atomic(log, output)
+    ran = [s_["name"] for s_ in checks_stages(output, time.time())]
+    ok = rc == 0 and not timed_out
+    res = {"ok": ok, "job": job["id"], "only": only, "test_args": args, "checks": "PASS" if ok else
+           "TIMEOUT" if timed_out else "FAIL", "exit": rc, "seconds": round(time.time() - t0), "log": log,
+           "stages_ran": ran, "kept_for_the_gate": False,
+           "note": "part of the checks, so it says nothing about the commit: the gate runs the whole script"}
+    extra = [x for x in ran if x not in only]
+    missing = [x for x in only if x not in ran]
+    if extra:
+        res["warnings"] = ["the script ran stages --only did not name (%s): it does not honour %s for them" % (
+            ", ".join(extra), ONLY_STAGE_VAR)]
+    if missing and ok:  # a name the script does not have: nothing of what was asked ran, which is no pass
+        ok = res["ok"] = False
+        res["checks"] = "FAIL"
+        res["problem"] = "no stage named %s ran (::fx-stage <name> in the output)%s" % (
+            ", ".join(missing), "; the script's stages that ran: %s" % ", ".join(ran) if ran else "")
+    if not ok:
+        res["tail"] = output.splitlines()[-60:]
+    res["next"] = ("fix what fails and run it again; when every test you touch passes, commit and run `%s checks %s` once"
+                   % (FX_CMD, job["id"]) if not ok else "go on; once the work is done, commit and run `%s checks %s` once"
+                   % (FX_CMD, job["id"]))
+    out(res)
+    if not ok:
+        sys.exit(1)
+
+
 def checks_execute(ctx, job, look, log_path, by, who=None, cand=None, rn=None, place=None):
     """Run the checks script now, the way the gate always has (the job's clone, the job's own port, database name and
     lanes, no credentials of fx, the gate's time limit, everything it starts in one process group), and keep what
@@ -6732,6 +6904,7 @@ def checks_once(ctx, job, log_path, by, who=None, cand=None, rn=None, place=None
     use) and must run them after all, since something they read changed, first takes a place for the run itself, of
     the kind `fx checks` takes: the line then counts what the script uses, and the gate waits for that room. That place
     is a command of the gate's (over): it does not wait for the gate's own place to end, which would never come."""
+    local_files_fill(ctx, who or job)  # a local file put in local/ after the clone was made
     look = checks_look(ctx, job, who, cand)
     if look["hit"]:
         return checks_reused(ctx, job, look, log_path)
@@ -7001,8 +7174,13 @@ def cmd_checks(ctx, a):
     if getattr(a, "full", False):
         os.environ["FX_SCAN_FULL"] = "1"  # e2e_env: the whole e2e suite
     job = ctx.load(a.job)
-    if a.wp:
+    args = list(getattr(a, "test_args", None) or [])
+    if args and not getattr(a, "only", None):
+        raise FxError("test arguments go with --only <stage>: fx checks %s --only <stage> -- <arguments>" % job["id"], code=3)
+    if a.wp and not getattr(a, "only", None):
         raise checks_script_refusal(job, wp=a.wp)
+    if a.wp:
+        return checks_only(ctx, job, a, args)
     who = candidate_job(ctx, job, a.candidate) if a.candidate else job
     name = getattr(a, "repo_name", None)
     if len(job_order(job)) > 1 or name:
@@ -7018,6 +7196,8 @@ def cmd_checks(ctx, a):
         ctx = repo_ctx(ctx, name)
     if not os.path.isdir(who["worktree"] or ""):
         raise FxError("the clone %s is missing" % who["worktree"], code=3)
+    if getattr(a, "only", None):
+        return checks_only(ctx, job, a, args, who)
     jd = ctx.job_dir(job["id"])
     by = {"build": "builder", "review": "reviewer"}.get(job.get("stage"), "builder")
     res = {"job": job["id"]}
@@ -7094,8 +7274,9 @@ def cmd_checks(ctx, a):
                        "before as well (%s), so it is taken for a failure now, as the gate does" % before[-1].get("id"))
     else:
         res["next"] = ("read every failure in the log first, fix what fails, run the failed tests alone (`%s run --job %s -- "
-                       "<the runner with a filter for them>`) until they pass, then commit and run this again, once"
-                       % (FX_CMD, shlex.quote(job["id"])))
+                       "<the runner with a filter for them>`, or `%s checks %s --only <stage> -- <a filter for them>` when "
+                       "they need the script's containers or database) until they pass, then commit and run this again, once"
+                       % (FX_CMD, shlex.quote(job["id"]), FX_CMD, shlex.quote(job["id"])))
     out(res)
     sys.exit(1)
 
@@ -9412,6 +9593,31 @@ def looks_like_key(v):
     return len(v) >= 16 and entropy(v) >= 3.5 and bool(re.search(r"[0-9]", v)) and bool(re.search(r"[A-Za-z]", v))
 
 
+LOCAL_TEXT_MAX = 256 * 1024  # a local file bigger than this is no env file: its values are not looked for
+
+
+def local_texts(path):
+    """The text of a local file, or of each small regular text file in a local folder (copy_into_worktree may name a
+    folder); [] for what is not there. Binary files and links are left out."""
+    if os.path.isdir(path) and not os.path.islink(path):
+        paths = [os.path.join(d, n) for d, dirs, names in os.walk(path) for n in sorted(names)]
+    else:
+        paths = [path]
+    texts = []
+    for p_ in paths:
+        try:
+            st = os.lstat(p_)
+            if not stat.S_ISREG(st.st_mode) or st.st_size > LOCAL_TEXT_MAX:
+                continue
+            with open(p_, "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        if b"\0" not in data:
+            texts.append(data.decode("utf-8", "surrogateescape"))
+    return texts
+
+
 def local_secret_values(ctx):
     """Values of the local env files (copy_into_worktree) that are secrets: those of variables named like one
     (DB_PASSWORD, APP_KEY, SENTRY_DSN…) and any other value that looks like a key. Settings such as DB_HOST=mariadb,
@@ -9424,7 +9630,7 @@ def local_secret_values(ctx):
     texts = []
     for repo, rel in places:  # every repository's local files: local/<repo>/ and the shared place
         for root in ([os.path.join(ctx.factory, "local", repo)] if repo else []) + [copy_source(ctx, repo)]:
-            texts.append(read(os.path.join(root, rel), "") or "")
+            texts += local_texts(os.path.join(root, rel))
     for text in texts:
         for line in text.splitlines():
             m = re.match(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*['\"]?([^'\"#\s]+)", line)
@@ -11711,6 +11917,14 @@ def cmd_logic(ctx, a):
         if a.job:
             job = ctx.load(a.job)
             sdir, names = staged_logic(ctx, job)
+            if not names:  # nothing staged: what the gate's logic step says then, without reading the project
+                planned = logic_ready(ctx) and logic_changes_planned(ctx, job)
+                out({"ok": True, "clean": not planned, "problems": [
+                    "the spec lists logic changes but no updated logic file was staged in the job folder's logic/"]
+                    if planned else [], "files": 0, "citations_checked": 0, "excerpts_checked": 0,
+                    "next": "stage the updated logic files in the job folder's logic/, then check again" if planned
+                    else "nothing to check: the job stages no logic file"})
+                return
             roots = job_code_roots(job)
             if isinstance(roots, dict):  # a repository without a clone (merged in a rework) is read from its base
                 roots = {n: d for n, d in roots.items() if d or not job["repos"][n].get("merged")}
@@ -19679,6 +19893,16 @@ def required_scanners(ctx):
     return [SCANNER_ALIASES.get(str(r).strip().lower(), str(r).strip().lower()) for r in req if str(r).strip()]
 
 
+SUPPRESSION_FILES = (".gitleaksignore", ".semgrepignore", ".gitleaks.toml", "osv-scanner.toml")
+
+
+def suppression_rule(rule):
+    """Is this the rule id of an "fx suppressions" finding (scan_suppressions)? Those block unless
+    security.allow_suppressions is true, whatever a job's override says."""
+    r = (rule or "").strip().lower()
+    return r in SUPPRESSION_FILES or r == "fx suppressions" or bool(SUPPRESS_RE.fullmatch(r))
+
+
 def scan_suppressions(ctx, job, mb):
     """Scanner suppressions the job's diff adds: nosemgrep/nosem and gitleaks:allow comments, entries in
     .gitleaksignore or .semgrepignore, ignore entries in osv-scanner.toml, a changed .gitleaks.toml. They let the
@@ -19696,7 +19920,7 @@ def scan_suppressions(ctx, job, mb):
             line_no += 1
             text = line[1:].strip()
             base = os.path.basename(path)
-            if base in (".gitleaksignore", ".semgrepignore", ".gitleaks.toml"):
+            if base in SUPPRESSION_FILES[:3]:
                 if text and not text.startswith("#"):
                     per_file.setdefault(path, []).append(line_no)
             elif base == "osv-scanner.toml":
@@ -20299,6 +20523,39 @@ def source_modules(files, min_files=5, split_at=60, max_depth=3):
     return modules
 
 
+def audit_severity(f):
+    """A finding's severity: the security-audit skill's severity.overall_severity (its likelihood and impact are only
+    reasons), else a flat severity or impact word; medium when it says none."""
+    sev = f.get("severity")
+    if isinstance(sev, dict):
+        sev = sev.get("overall_severity")
+    if not isinstance(sev, str) or not sev.strip():
+        sev = f.get("impact") if isinstance(f.get("impact"), str) else None
+    return sev_word(sev or "medium")
+
+
+def audit_location(f):
+    """Where a finding is, as file:line: the security-audit skill's trace (its sink, with the entrypoint when that is
+    elsewhere), else its first evidence, else a flat location, file or path."""
+    def at(e):
+        return "%s:%s" % (e["file"], e["line"]) if e.get("line") else str(e["file"])
+    trace = [e for e in f.get("trace") or [] if isinstance(e, dict) and e.get("file")]
+    if trace:
+        sink = next((e for e in reversed(trace) if e.get("kind") == "sink"), trace[-1])
+        entry = next((e for e in trace if e.get("kind") == "entrypoint"), None)
+        return at(sink) + (" (from %s)" % at(entry) if entry and at(entry) != at(sink) else "")
+    ev = [e for e in f.get("evidence") or [] if isinstance(e, dict) and e.get("file")]
+    if ev:
+        return at(ev[0])
+    loc = f.get("location") or f.get("file") or f.get("path") or ""
+    if isinstance(loc, dict) and (loc.get("file") or loc.get("path")):
+        start = loc.get("line") or loc.get("start_line") or loc.get("line_start")
+        end = loc.get("end_line") or loc.get("line_end")
+        return "%s%s%s" % (loc.get("file") or loc.get("path"), ":%s" % start if start else "",
+                           "-%s" % end if start and end and end != start else "")
+    return json.dumps(loc)[:200] if isinstance(loc, (dict, list)) else str(loc)
+
+
 def cmd_audit_import(ctx, a):
     """Turn a security audit's findings.json into a summary and one task file per confirmed finding."""
     try:
@@ -20315,10 +20572,7 @@ def cmd_audit_import(ctx, a):
             continue
         status = str(f.get("verdict") or f.get("status") or f.get("state") or "").lower()
         title = f.get("title") or f.get("name") or f.get("summary") or f.get("id") or "finding %d" % i
-        sev = sev_word(str(f.get("severity") or f.get("impact") or "medium"))
-        loc = f.get("location") or f.get("file") or f.get("path") or ""
-        if isinstance(loc, (dict, list)):
-            loc = json.dumps(loc)[:200]
+        sev, loc = audit_severity(f), audit_location(f)
         fid = str(f.get("id") or "F%d" % i)
         rows.append({"id": fid, "status": status or "unknown", "severity": sev, "title": str(title)[:200],
                      "location": str(loc)[:200]})
@@ -20701,6 +20955,14 @@ def doctor_checks(ctx, issue=None, session=True, live=False):
         add("e2e map%s (advice)" % of, True, "%d entries: a job runs the e2e tests its change reaches; fx e2e check lists the "
             "tests no entry lists" % len(m_.get("map", [])) if m_ else
             "%s: every job runs the whole e2e suite (init.md, The e2e map)" % why_)
+        script_ = checks_script(rctx, None, n) if n or ctx.old_form else None
+        if script_ and os.path.isfile(script_):
+            honours = ONLY_STAGE_VAR in (read(script_, "") or "")
+            add("single stages of the checks script%s (advice)" % of, True,
+                "a builder runs one test with the script's own setup: fx checks <job> --only <stage> -- <test arguments>"
+                if honours else "%s never reads %s: a builder cannot run one test with the script's containers and "
+                "database (fx checks --only); init adds it (init.md, Stages)" % (
+                    os.path.relpath(script_, settings_root(ctx)), ONLY_STAGE_VAR))
     gv = re.search(r"(\d+)\.(\d+)", run(["git", "--version"]).stdout or "")
     gver = (int(gv.group(1)), int(gv.group(2))) if gv else (0, 0)
     add("git >= 2.38", gver >= (2, 38), "%d.%d (the approver's merge-tree needs 2.38)" % gver)
@@ -25619,7 +25881,12 @@ def box_listing(ctx, view):
             if rel:
                 add(os.path.join(wt, rel))
         for rel in local_only_paths(ctx, n if n in ctx.repo_names() else None):
-            add(os.path.join(wt, rel))
+            if os.path.isdir(os.path.join(wt, rel)) and not os.path.islink(os.path.join(wt, rel)):
+                for d, _, names in os.walk(os.path.join(wt, rel)):
+                    for name in names:
+                        add(os.path.join(d, name))
+            else:
+                add(os.path.join(wt, rel))
 
     def walk(root, skip_top=()):
         for d, dirs, names in os.walk(root):
@@ -29196,7 +29463,7 @@ def local_file_source(ctx, rel, repo=None):
     repository first (each repository's own .env), then copy_from, else local/<file>."""
     name = ctx.repo_name(repo) if ctx.repos else None
     for root in ([os.path.join(ctx.factory, "local", name)] if name else []) + [copy_source(ctx, repo)]:
-        if os.path.isfile(os.path.join(root, rel)):
+        if os.path.isfile(os.path.join(root, rel)) or os.path.isdir(os.path.join(root, rel)):
             return os.path.join(root, rel)
     return None
 
@@ -29350,6 +29617,8 @@ def pr_open(ctx, job, n, title, body, body_path, labels, draft, retarget, notes,
     provider, url = remote_provider(ctx, job, n)
     rf = host_repo_flag(provider, url)
     pr_url, pr_hint = e.get("pr_url"), None
+    if pr_url and not re.search(r"/(pull|merge_requests|pull-requests)/\d+", pr_url):
+        pr_url = None  # not a pull request's address (an older fx kept a CLI's release notice): found again below
     if ctx.c("pr.create", True) is False:
         pr_hint = ("Branch %s%s pushed. Pull requests are opened by hand (pr.create is off): open one into %s when "
                    "you want." % (branch, " of %s" % n if where else "", target))
@@ -29379,7 +29648,8 @@ def pr_open(ctx, job, n, title, body, body_path, labels, draft, retarget, notes,
                 if not pr_url:
                     raise FxError("gh pr create failed%s:\n" % (" for %s" % n if where else "") + (p.stdout or ""))
             else:
-                urls = re.findall(r"https://\S+", p.stdout or "")
+                # only a pull request's address: gh may also print the link of its own new release
+                urls = re.findall(r"https?://\S+/pull/\d+", p.stdout or "")
                 pr_url = urls[-1] if urls else gh_existing_pr(branch, wt, rf)
     elif provider == "gitlab" and shutil.which("glab"):
         iid = re.search(r"/merge_requests/(\d+)", pr_url or "")
@@ -29401,11 +29671,12 @@ def pr_open(ctx, job, n, title, body, body_path, labels, draft, retarget, notes,
             if labels:
                 cmd += ["--label", ",".join(labels)]
             p = run(cmd, cwd=wt, check=False)
-            urls = re.findall(r"https://\S+", p.stdout or "")
-            if p.returncode != 0 and not urls:
+            # only a merge request's address: glab also prints the link of its own new release when it is outdated
+            urls = re.findall(r"https?://\S+/merge_requests/\d+", p.stdout or "")
+            if not urls:  # read it back from the branch
                 v = run(["glab", "mr", "view", branch] + rf, cwd=wt, check=False)
-                urls = re.findall(r"https://\S+/merge_requests/\d+", v.stdout or "")
-                if not urls:
+                urls = re.findall(r"https?://\S+/merge_requests/\d+", v.stdout or "")
+                if not urls and p.returncode != 0:
                     raise FxError("glab mr create failed%s:\n" % (" for %s" % n if where else "") + (p.stdout or ""))
             pr_url = urls[-1] if urls else None
     else:
@@ -31290,7 +31561,10 @@ def build_parser():
     s.add_argument("--wait", type=float, metavar="SEC", help="how long to wait for room before answering `next: wait`")
     s.add_argument("--repo", dest="repo_name", metavar="NAME", help="a job of several repositories: this repository's "
                    "checks script, in its clone")
-    s.set_defaults(fn=cmd_checks)
+    s.add_argument("--only", metavar="STAGE", help="only these stages of the script (comma-separated ::fx-stage names), "
+                   "with its own setup (containers, database); the test runner's arguments after --. Never kept for "
+                   "the gate")
+    s.set_defaults(fn=cmd_checks, test_args=[])  # with --only, after --: the test runner's arguments (main)
     s = sub.add_parser("e2e", help="the e2e map: check it against the base branch, or show what a job's change runs")
     s.add_argument("action", choices=["check", "show"])
     s.add_argument("job", nargs="?", help="show: the job")
@@ -31667,7 +31941,15 @@ def main(argv=None):
     if gone:
         out({"ok": False, "error": gone, "exit_code": 3, "unknown_command": True})
         sys.exit(3)
+    tail, i = None, 0
+    while i < len(argv) and argv[i].startswith("-") and argv[i] != "--":  # fx's own options, before the command
+        i += 2 if argv[i] in ("--repo", "--max-wait") else 1
+    if argv[i:i + 1] == ["checks"] and "--" in argv[i:]:  # fx checks <job> --only <stage> -- <test arguments>
+        cut = argv.index("--", i)
+        tail, argv = argv[cut + 1:], argv[:cut]
     a = build_parser().parse_args(argv)
+    if tail is not None:
+        a.test_args = tail
     _MAX_WAIT[0] = a.max_wait
     _LANE_NAMED.clear()  # what a command found out about the factory repository's files holds for that command
     _BOX_LOOKED.clear()

@@ -64,8 +64,15 @@ anything else there.
 Never: push, merge, rebase onto or check out the base branch, force anything,
 change git config, edit the factory repository (settings, checks, knowledge,
 lessons), or edit `.claude/`, `AGENTS.md`, `CLAUDE.md` or
-existing test files (the gate fails the round if you do; add new test files
-instead). Never put secrets, tokens or real personal data in code, tests,
+an existing file under the project's protected paths (the `Protected paths`
+line of your prompt: the gate fails the round on a modified, deleted or renamed
+one; add new test files instead, and when the job cannot be done without such a
+change, stop with `STATUS: BLOCKED` naming the file: only a human allows it).
+Change another existing test only when the spec changes the behaviour it
+asserts or asks for the change: change only the assertions that behaviour makes
+wrong, never delete or loosen any other, and list every existing test you
+changed, with the reason, under `## Existing tests changed` in the report.
+Never put secrets, tokens or real personal data in code, tests,
 fixtures, seeds or logs. Never install tools into the project for the
 factory's own checks (Playwright for UI checks is already provided). Never
 silence a scanner: `nosemgrep`/`nosem` or `gitleaks:allow` comments, entries in
@@ -155,7 +162,9 @@ packages of `plan.md` at the same time, each in its own clone. You:
 - test your own part, not the whole: run the tests that cover the files you
   own (the test files you add, and the existing tests of the code you change;
   the project's `testing.md` says how to run one file or one folder), through
-  the `Heavy commands` line of your prompt. Never the whole suite and never the
+  the `Heavy commands` line of your prompt, or `fx checks <job> --wp <package>
+  --only <stage> -- <the runner's arguments>` when they need the checks
+  script's containers or database. Never the whole suite and never the
   checks script: every package running it is the same hour spent several
   times, on code that is not joined yet. It runs once for the whole job, when
   every package is merged, and fx does not run it for a package. Say in your
@@ -266,7 +275,12 @@ where the spec asks for them.
 6. **Checks.** While you work, run only the tests that cover your change: the
    tests you add or change, and the existing tests of the code you change
    (`testing.md` says how to run one file or one test), through the `Heavy
-   commands` line. The whole checks script takes as long as the whole suite
+   commands` line. When those tests need what the checks script sets up (the
+   project's containers, a migrated test database), or the language runtime is
+   only in the project's containers, run them with `fx checks <job> --only
+   <stage> -- <the runner's arguments>` (the `Checks` line of your prompt;
+   `testing.md` names the stages): never write your own `docker compose` or
+   database setup around `fx run`. The whole checks script takes as long as the whole suite
    (on some projects half an hour or more): never run it to learn whether one
    fix worked.
    - When a test fails, run that test (or its file) alone, with the test
@@ -471,6 +485,10 @@ STATUS: READY
 
 ## Acceptance criteria
 1. met: how you verified it (test name, command, screenshot path)
+
+## Existing tests changed
+path::test: which assertion and why (the spec's line, or the behaviour it
+changes); or "none".
 
 ## Test data and cases
 Where the scenario lives; every case of the spec's table → its test (file::name).

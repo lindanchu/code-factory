@@ -433,6 +433,29 @@ name of letters, digits and `-`). fx keeps each stage's seconds (selftest's in
 `baseline.json`) and names a stage of a job that takes 3 times as long as in
 selftest: the machine or the sandbox, not the code.
 
+The script also runs single stages, so a builder can run one test file or one
+test with the script's own setup (the project's containers, a migrated test
+database) instead of rebuilding it: `fx checks <job> --only <stage> -- <test
+arguments>` sets `FACTORY_ONLY_STAGE` (stage names, comma-separated) and
+`FACTORY_TEST_ARGS` (the arguments, shell-quoted). When `FACTORY_ONLY_STAGE` is
+set, the script still does the setup those stages need, skips every other stage
+(and prints no `::fx-stage` line for it), and passes the arguments to the test
+runner of the stage in place of its default selection:
+
+```bash
+only() { [ -z "${FACTORY_ONLY_STAGE:-}" ] || [[ ",$FACTORY_ONLY_STAGE," == *",$1,"* ]]; }
+TEST_ARGS=(); [ -n "${FACTORY_TEST_ARGS:-}" ] && eval "TEST_ARGS=($FACTORY_TEST_ARGS)"
+if only feature-tests; then
+  echo "::fx-stage feature-tests $(date +%s)"
+  # database up and migrated, as for the whole run, then:
+  run_tests "${TEST_ARGS[@]:-tests/Feature}"
+fi
+```
+
+Name the stages and an example of each stage's arguments (a file, a filter) in
+the repository's `testing.md`: the builder reads them there. `fx doctor` names a checks script that
+never reads `FACTORY_ONLY_STAGE`.
+
 **The e2e map.** When a repository has e2e tests (in its checks script or in
 `e2e`), a job runs only those its change can reach. Write
 `knowledge/<repo>/e2e-map.json` from the suite and the code (what each test
