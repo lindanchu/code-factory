@@ -25854,13 +25854,22 @@ def box_no_proxy(box):
                     sorted(x for x in (box.get("no_proxy") or "").split(",") if x))
 
 
+def box_stack_names(box, roots):
+    """The compose services under roots (the clones, the factory) go into the box's no_proxy (box_no_proxy): what the
+    commands it runs get, and, while it has its proxy, its Docker client's config, which every container reads."""
+    box["no_proxy"] = ",".join(sorted(compose_service_names(roots)))
+    if box.get("online") and box.get("proxy_ip"):
+        vm_run(["sudo", "docker", "exec", box["name"], "bash", "-c", "# fx-box-noproxy\n" +
+                box_client_proxy_line(box["proxy_ip"], box_no_proxy(box))], timeout=60)
+
+
 def box_open(box, ctx=None, view=None):
     """An install: the box gets a proxy again, which lets through only the registries, until box_cut. With ctx, its
     filter is written again from sandbox.allow as it is now: a host the user allowed after the box was made counts.
     The services of the compose files of the job's clones (view) and of the factory are left out of the proxy."""
     if ctx is not None and getattr(ctx, "factory", None):
-        roots = [ctx.factory] + (list(view_worktrees(view).values()) if view else [])
-        box["no_proxy"] = ",".join(sorted(compose_service_names(roots)))
+        box["no_proxy"] = ",".join(sorted(compose_service_names(
+            [ctx.factory] + (list(view_worktrees(view).values()) if view else []))))
     filt = sandbox_filter(sandbox_allow(ctx)) if ctx is not None else None
     script = r"""# fx-box-open
 set -e
@@ -27061,6 +27070,8 @@ def review_sandbox(ctx, a):
                 box_put(b, [wt] + [c["worktree"] for c in (box.get("clones") or {}).values()])
                 box_put(b, [ctx.factory], exclude=[os.path.join(ctx.factory, x).lstrip("/") for x in BOX_FACTORY_EXCLUDE])
                 box_exec(b, "mkdir -p %s" % shlex.quote(rdir), "/", {}, timeout=60)
+                # its stack's services call each other by name, never through the proxy, as in a job's box (box_open)
+                box_stack_names(b, [ctx.factory, wt] + [c["worktree"] for c in (box.get("clones") or {}).values()])
             cmd = bctx.c("setup", "")
             if cmd:
                 try:

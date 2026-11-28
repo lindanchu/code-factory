@@ -1239,6 +1239,14 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
 - The VM's memory: one box per job at once (and per candidate or package). Its 6 GB held three small web
   jobs at once with room to spare (above); since 3.13 you choose it, from what fx measured (below).
 
+### Upgrading to 3.17.1: a review's stack reaches its own services
+
+- A review's box (`fx review sandbox`) left only `localhost` out of its proxy: a container that called another service
+  of the stack by name (an init container creating a bucket on `http://minio:9000`) got the proxy's 403, the app never
+  came up and the review stopped at `ask-no-sandbox`. The box now gets the compose services of the clones and the
+  factory in `no_proxy`, for its setup and every container, as a job's box always did. A project's own `NO_PROXY`
+  workaround in its compose file is no longer needed.
+
 ### Upgrading to 3.17.0: rounds the factory lost, the permission table before it runs, a job from another branch
 
 - `fx gate <job> --dry-run` runs in any stage after a build (review, approve, and pr while nothing is pushed) and with
