@@ -643,6 +643,9 @@ def repo_key(dotted):
     return any(fnmatch.fnmatchcase(dotted, g) for g in REPO_KEY_GLOBS)
 
 
+_REPO_HOME = {}  # {repository: its base_branch in factory.json}, as the last Ctx read it (changed_files)
+
+
 class Ctx:
     repos, repo_problems, cfg = (), (), {}  # set by load_config
     scope = None  # a RepoCtx: the repository whose settings ctx.c reads
@@ -674,6 +677,8 @@ class Ctx:
         if not isinstance(self.cfg, dict):
             raise FxError("factory.json is not a JSON object")
         self.repos, self.repo_problems = config_repos(self.cfg)
+        _REPO_HOME.clear()
+        _REPO_HOME.update({r["name"]: r.get("base_branch") or "main" for r in self.repos if r.get("name")})
 
     @property
     def old_form(self):
@@ -2270,6 +2275,7 @@ def new_job(ctx, a, claim):
         raise
     if store_warnings:
         bl_out["warnings"] = store_warnings
+    notes = list(notes or []) + base_notes(ctx, job)
     if notes:
         bl_out["notes"] = notes
     if "lanes" not in ctx.cfg and bl_cfg and bl_cfg["repo"] == "factory":
@@ -3461,6 +3467,14 @@ def job_base_from_remote(ctx, job, repo=None):
     if r.returncode != 0:
         raise FxError("could not read the base branch %s from %s, and everything the gate checks is measured from it: %s" % (
             branch, u, (r.stdout or "")[-400:].strip()), code=3)
+    home = _REPO_HOME.get(name)
+    if home and home != branch:  # the job's change is also measured from it (changed_files): as the remote has it now
+        try:
+            run(["git", "fetch", "-q", "--no-tags"] + clone_filter_args(ctx, name) + [
+                url, "+refs/heads/%s:refs/remotes/%s/%s" % (home, REMOTE, home)], cwd=e["worktree"], check=False,
+                env=baselines_git_env(), timeout=int(ctx.c("clone_timeout_sec", 1800)))
+        except subprocess.TimeoutExpired:
+            pass  # measured from what the clone last had of it
 
 
 def latest_rework(ctx, job):
@@ -3583,7 +3597,7 @@ def lane_stub(ctx, job, agent):
         write_atomic(os.path.join(jd, "plan.md"), "PLAN: SINGLE\n\nOne builder: the light lane left the planner out.\n")
         return "plan.md"
     if agent == "approver":
-        if job.get("flags") or job.get("security_missed") or job.get("needs_human"):
+        if job.get("flags") or job.get("security_missed") or job.get("needs_human") or job.get("rounds_human"):
             return None  # what a human must look at is never waved through
         write_atomic(os.path.join(jd, "decision.md"), "APPROVE\n\n## Why\nThe light lane left the approver out: "
                      "the gate passed, and the diff stayed within the light lane's rules.\n\n%s\n"
@@ -3707,6 +3721,11 @@ def cmd_ctx(ctx, a):
         lines.append("Tests: write the spec's Test data scenario; cases written as failing tests before the code: "
                      "%s; e2e tests committed to the repo: %s" % (", ".join(tf) or "none",
                                                                   ctx.c("tests.commit_e2e", "if-present")))
+    if agent == "approver" and job.get("rounds_human"):
+        lines.append("Gate rounds a human gave back as the factory's failures, not the code's (fx rounds; read those "
+                     "rounds' checks.md and judge whether the code had a part in them): %s" % "; ".join(
+                         "round(s) %s: %s (%s)" % (",".join(map(str, h.get("rounds") or [])), h.get("reason"),
+                                                   h.get("approved")) for h in job["rounds_human"]))
     if agent in ("spec", "security", "verifier", "approver"):
         lines.append("Security standard: %s level %s; tag findings with %s" % (
             "OWASP ASVS 5.0", ctx.c("security.asvs_level", "L2"),
@@ -4567,9 +4586,19 @@ def worktree_dirt(ctx, wt, repo=None):
     return tracked, untracked
 
 
-def changed_files(job):
-    wt = job["worktree"]
-    mb = git(["merge-base", job["base_ref"], "HEAD"], wt).stdout.strip()
+def home_ref(job):
+    """The remote ref of the repository's own base branch (factory.json), when the job started from another branch (an
+    earlier attempt's, say) and the clone has it; else None."""
+    name = job.get("repo") or (job_primary(job) if isinstance(job.get("repos"), dict) else None)
+    home = _REPO_HOME.get(name) if name else None
+    ref = "%s/%s" % (REMOTE, home) if home else None
+    if not ref or ref == job.get("base_ref") or not job.get("worktree"):
+        return None
+    return ref if git(["rev-parse", "--verify", "-q", ref], job["worktree"], check=False).returncode == 0 else None
+
+
+def diff_files(wt, base):
+    mb = git(["merge-base", base, "HEAD"], wt).stdout.strip()
     diff = git(["diff", "--name-status", "-M", "%s..HEAD" % mb], wt).stdout
     files = []
     for line in diff.splitlines():
@@ -4577,6 +4606,21 @@ def changed_files(job):
         if len(parts) >= 2:
             files.append((parts[0][0], parts[1:]))
     return files
+
+
+def changed_files(job, guard=False):
+    """What the job changed, as [(status, paths)], from the branch it started from (base_ref). When that is not the
+    repository's own base branch, the job's work is what differs from both: what it merged in from the base branch is
+    not its change. guard: for protected and frozen paths, what differs from the repository's base branch, which is what
+    its pull request brings there: also what the branch it started from changed, never what it merged in."""
+    home = home_ref(job)
+    if guard and home:
+        return diff_files(job["worktree"], home)
+    files = diff_files(job["worktree"], job["base_ref"])
+    if not home:
+        return files
+    theirs = {p for _, ps in diff_files(job["worktree"], home) for p in ps}
+    return [f for f in files if any(p in theirs for p in f[1])]
 
 
 def gate_void(ctx, job_id, rn, rdir, place, why, also=None, next_step=None):
@@ -4786,7 +4830,7 @@ def gate_round_repos(ctx, job, a, place):
         all_paths = [p for _, ps in files for p in ps]
         scanner = sorted({p for p in all_paths if match_any(p, SCANNER_SETTINGS)})
         per[n] = {"files": files, "scanner": scanner, "state": "not checked", "checks_out": "", "e2e_out": "",
-                  "cr": None,
+                  "cr": None, "guarded": changed_files(views[n], guard=True),
                   "flags": sorted({p for p in all_paths if match_any(p, rctxs[n].c("sensitive_paths", []) or [])}
                                   | set(scanner)),
                   "ui_hit": [p for p in all_paths if match_any(p, rctxs[n].c("ui_paths", []) or [])]}
@@ -4795,7 +4839,7 @@ def gate_round_repos(ctx, job, a, place):
     scanner_files = sorted({x for n in change for x in named(n, per[n]["scanner"])})
     # A repository intake named that turned out to need nothing: while another has commits, it is not changed (no
     # checks, no scans, no pull request). With no commits anywhere, the gate fails as always.
-    idle = [n for n in change if not per[n]["files"]] if any(per[n]["files"] for n in change) else []
+    idle = [n for n in change if not per[n]["guarded"]] if any(per[n]["guarded"] for n in change) else []
     clean = True
 
     problems, bl, stopped_at, unprotected = [], None, None, []
@@ -4827,11 +4871,11 @@ def gate_round_repos(ctx, job, a, place):
             mine.append("Untracked files that are not in any commit (commit them, delete them, or add "
                         "build artifacts to .gitignore):\n" + "\n".join(untracked[:50]))
         clean = clean and not tracked and not untracked
-        if not info["files"] and n not in idle:
+        if not info["guarded"] and n not in idle:
             mine.append("The branch has no commits beyond %s." % v["base_ref"])
         prot = rc_.c("protected_paths", []) or []
         frozen = rc_.c("frozen_paths", [".claude/*"]) or []
-        for status, paths in info["files"]:
+        for status, paths in info["guarded"]:
             old = paths[0]
             if any(match_any(p, frozen) for p in paths):
                 mine.append("Frozen path changed: %s (frozen_paths in factory.json may not be touched by a job)"
@@ -5027,7 +5071,7 @@ def gate_round_repos(ctx, job, a, place):
         # Secrets are checked every round, even when the rest of the gate stopped early.
         for n in change:
             v = views[n]
-            if not per[n]["files"] or not scanners_on(rctxs[n])["gitleaks"]:
+            if not per[n]["guarded"] or not scanners_on(rctxs[n])["gitleaks"]:
                 continue
             mb = git(["merge-base", v["base_ref"], "HEAD"], v["worktree"]).stdout.strip()
             leaks, err, _ = scan_secrets(rctxs[n], v, mb, sec_dir(n))
@@ -5317,12 +5361,13 @@ def gate_round_one(ctx, job, a, place):
                         "build artifacts to .gitignore):\n" + "\n".join(untracked[:50]))
     clean = not tracked and not untracked
     files = changed_files(job)
-    if not files:
+    guarded = changed_files(job, guard=True)  # protected and frozen paths: what the pull request brings
+    if not guarded:
         problems.append("The branch has no commits beyond %s." % job["base_ref"])
     prot = ctx.c("protected_paths", []) or []
     frozen = ctx.c("frozen_paths", [".claude/*"]) or []
     unprotected = []
-    for status, paths in files:
+    for status, paths in guarded:
         old = paths[0]
         if any(match_any(p, frozen) for p in paths):
             problems.append("Frozen path changed: %s (frozen_paths in factory.json may not be touched by a job)"
@@ -10668,6 +10713,41 @@ def perm_plan(tech, rows, routes):
     return plan, sorted(set(lacks)), reqs
 
 
+def perm_route_judge(tech, rows, routes):
+    """The app's routes against the rows: (out_of_scope {route: module}, routes with no row, rows with no route). A route
+    the technical part says is not the app's (not_app), or outside the modules the table covers (out_of_scope), needs
+    no row."""
+    outside = {perm_key_norm(k) for k in (tech.get("not_app") or {})}
+    out_scope = {k: perm_out_of_scope(tech, k) for k in routes if k not in rows}
+    out_scope = {k: v for k, v in out_scope.items() if v}
+    unrowed = sorted(k for k in routes if k not in rows and k not in outside and k not in out_scope)
+    stale = sorted(k for k in rows if k not in routes)
+    return out_scope, unrowed, stale
+
+
+def perm_rowless(rctx, view, staged_rows, routes, unrowed, stale):
+    """Routes with no row and rows with no route, split as the gate splits them: (the job's, which set the round aside
+    until the rows are written; the base branch's, which stop nothing the job does not touch)."""
+    base = baseline_of(rctx).get("permissions") or {}
+    base_routes = set(base.get("routes") or {})
+    base_unrowed, base_stale = set(base.get("unrowed") or []), set(base.get("stale") or [])
+    touched = perm_touched(view, staged_rows, perm_tables(rctx)["rows"], routes)
+    mine, base_ = [], []
+    for r in unrowed:
+        if r in base_unrowed and not touched(r):
+            base_.append("%s has no row in the permission table" % r)
+        else:
+            mine.append("%s has no row in the permission table: the rows say who may call it (from the ticket, or the "
+                        "user), never the builder" % r)
+    for r in stale:
+        if r in base_stale or (r not in base_routes and not touched(r)):
+            base_.append("the permission table has a row for %s, which the app does not have" % r)
+        else:
+            mine.append("the permission table has a row for %s, which the job's app no longer has: its row goes from "
+                        "the job's staged logic" % r)
+    return mine, base_
+
+
 def perm_matrix(rctx, job, url, tech, rows, scope=None, early=None):
     """Every cell of the table, called on the app running at url. Reads first, then the writes that must be refused
     (the data must stay as it was), then the allowed writes (the data must change; the snapshot is put back after
@@ -10678,11 +10758,7 @@ def perm_matrix(rctx, job, url, tech, rows, scope=None, early=None):
     routes = perm_routes_parse(perm_cmd(rctx, job, tech["routes"], "routes"))
     if not routes:
         raise PermsSetup("its routes command printed no route")
-    outside = {perm_key_norm(k) for k in (tech.get("not_app") or {})}
-    out_scope = {k: perm_out_of_scope(tech, k) for k in routes if k not in rows}
-    out_scope = {k: v for k, v in out_scope.items() if v}
-    unrowed = sorted(k for k in routes if k not in rows and k not in outside and k not in out_scope)
-    stale = sorted(k for k in rows if k not in routes)
+    out_scope, unrowed, stale = perm_route_judge(tech, rows, routes)
     if early:  # what would set the round aside anyway is known now: before a single cell is called (PermsSetup)
         early(routes, unrowed, stale)
     sc = scope(routes) if scope else {"kind": "full", "why": "the whole table", "only": None}
@@ -11433,19 +11509,13 @@ def permissions_gate(ctx, job, view, rctx, url, rdir, suffix=""):
     if staged["problems"]:
         return {"void": ["the permission rows have problems:\n- " + "\n- ".join(staged["problems"][:20])]}
     base = baseline_of(rctx).get("permissions") or {}
-    base_routes = set(base.get("routes") or {})
-    base_unrowed, base_stale = set(base.get("unrowed") or []), set(base.get("stale") or [])
 
     def early(routes, unrowed, stale):
         # The same judgement as below on unrowed and stale routes, made before the table is called: a round that would
         # be set aside for them is set aside in seconds, not after every cell.
-        t = perm_touched(view, staged["rows"], perm_tables(rctx)["rows"], routes)
-        lines = ["%s has no row in the permission table: the rows say who may call it (from the ticket, or the user), "
-                 "never the builder" % r for r in unrowed if not (r in base_unrowed and not t(r))]
-        lines += ["the permission table has a row for %s, which the job's app no longer has: its row goes from the "
-                  "job's staged logic" % r for r in stale if not (r in base_stale or (r not in base_routes and not t(r)))]
-        if lines:
-            raise PermsSetup("\n- ".join(lines))
+        mine = perm_rowless(rctx, view, staged["rows"], routes, unrowed, stale)[0]
+        if mine:
+            raise PermsSetup("\n- ".join(mine))
     try:
         res = perm_matrix(rctx, view, url, tech, staged["rows"],
                           scope=perm_scope(rctx, job, view, staged["rows"], perm_tables(rctx)["rows"]), early=early)
@@ -11471,18 +11541,9 @@ def permissions_gate(ctx, job, view, rctx, url, rdir, suffix=""):
                                 "(fx permissions tasks)" % line)
         else:
             out_["base"].append(line)
-    for r in res["unrowed"]:
-        if r in base_unrowed and not touched(r):
-            out_["base"].append("%s has no row in the permission table" % r)
-        else:
-            out_["void"].append("%s has no row in the permission table: the rows say who may call it (from the "
-                                "ticket, or the user), never the builder" % r)
-    for r in res["stale"]:
-        if r in base_stale or (r not in base_routes and not touched(r)):
-            out_["base"].append("the permission table has a row for %s, which the app does not have" % r)
-        else:
-            out_["void"].append("the permission table has a row for %s, which the job's app no longer has: its row "
-                                "goes from the job's staged logic" % r)
+    mine, base_ = perm_rowless(rctx, view, staged["rows"], res["routes"], res["unrowed"], res["stale"])
+    out_["void"] += mine
+    out_["base"] += base_
     # Every route the change reaches, with a row or not (not_app, out of scope): what ZAP's scans of it are cut to.
     out_["routes_reached"] = list(sc.get("reached") or []) if sc["kind"] == "affected" else None
     out_["routes_total"] = len(res.get("routes") or {})
@@ -11544,6 +11605,45 @@ def perm_task_text(repo, route, lines):
             % (route, "Repository `%s`.\n\n" % repo if repo else "", "\n".join("- %s" % l for l in lines)))
 
 
+def perm_check_job(ctx, job, only=None):
+    """fx permissions check <job>: what the gate's table would say of the job's routes before a single cell is called,
+    in seconds: the job's own file read as the gate reads it (with its out_of_scope), its staged rows, and the routes of
+    the job's clone against them. Needs no running app, only the routes command."""
+    names = [n for n in perm_app_repos(ctx) if n is None or n in (job.get("repos") or {})]
+    if only:
+        if only not in names:
+            raise FxError("%s is not an app of %s the table is about (%s)" % (only, job["id"], ", ".join(
+                n for n in names if n) or "none"), code=3)
+        names = [only]
+    repos, ok = {}, True
+    for n in names:
+        rctx, view = one_app(ctx, job, n) if n else (ctx, job)
+        tech, tp = perm_tech(rctx, job)
+        info = {"technical": os.path.relpath(perm_file(rctx), ctx.factory),
+                "job_file": os.path.relpath(perm_job_file(rctx, job), ctx.factory)}
+        if tech and tech.get("none"):
+            repos[n or ""] = dict(info, none=tech["none"])
+            continue
+        staged = perm_tables(rctx, over=os.path.join(ctx.job_dir(job_real_id(job)), "logic"))
+        problems = list(tp) + staged["problems"]
+        if not problems:
+            try:
+                routes = perm_routes_parse(perm_cmd(rctx, view, tech["routes"], "routes"))
+                out_scope, unrowed, stale = perm_route_judge(tech, staged["rows"], routes)
+                mine, base_ = perm_rowless(rctx, view, staged["rows"], routes, unrowed, stale)
+                info.update(routes=len(routes), unrowed=unrowed, stale=stale, gate_would_void=mine, base=base_,
+                            out_of_scope={"routes": len(out_scope), "modules": sorted(set(out_scope.values()))})
+                if mine:
+                    ok = False
+            except PermsSetup as e:
+                problems.append("its routes command: %s" % e.why)
+        info["problems"] = problems
+        ok = ok and not problems
+        repos[n or ""] = info
+    out({"ok": ok, "job": job["id"], "repos": repos, "cells_called": 0,
+         "next": "the gate's table can run" if ok else "fix what is listed (permissions.md), then check again"})
+
+
 def cmd_permissions(ctx, a):
     """The permission table: check it, try it on a job's running app, mark it confirmed by the user, write the fix
     tasks of what the base branch gets wrong, or keep a merged job's additions to the technical part."""
@@ -11551,6 +11651,9 @@ def cmd_permissions(ctx, a):
         st = perm_state(ctx)
         if not perm_needed(ctx):
             out({"ok": True, "needed": False, "note": "no logic or no app to run: nothing to check"})
+            return
+        if a.job:
+            perm_check_job(ctx, ctx.load(a.job), a.repo_name)
             return
         out(dict(st, next="go on" if st["ok"] else "permissions",
                  tell_user=bool(st["base"]),
@@ -28823,8 +28926,11 @@ def cmd_repos(ctx, a):
         route(ctx, job)
     ctx.save(job, "repositories cloned: %s" % ", ".join(added))
     nxt = "spec" if job["stage"] == "spec" else job["stage"]
-    out({"ok": True, "job": job["id"], "cloned": added, "repos": job_repo_rows(ctx, job),
-         "branch": job_branch_name(job), "next": nxt})
+    res = {"ok": True, "job": job["id"], "cloned": added, "repos": job_repo_rows(ctx, job),
+           "branch": job_branch_name(job), "next": nxt}
+    if base_notes(ctx, job, added):
+        res["notes"] = base_notes(ctx, job, added)
+    out(res)
 
 
 def code_lines(ctx, codes):
@@ -29329,6 +29435,21 @@ def job_add_repos(ctx, job, change, bases):
     job["repo_order"] = [n for n in ctx.repo_names() if n in repos] + [n for n in job_order(job)
                                                                         if n not in ctx.repo_names()]
     return made
+
+
+def base_notes(ctx, job, names=None):
+    """A line for each repository the job changes from another branch than the repository's own base_branch: how the
+    gate measures its change then (changed_files)."""
+    notes = []
+    for n in names if names is not None else job_names(job, "change"):
+        e = (job.get("repos") or {}).get(n) or {}
+        home = ctx.rc(n, "base_branch", "main")
+        if e.get("role", "change") == "change" and e.get("base_branch") and e["base_branch"] != home:
+            notes.append("%s starts from %s, not its base branch %s: the gate counts as the job's work only what differs "
+                         "from both, and checks protected and frozen paths against %s: what %s changed that %s does "
+                         "not have is the job's too (its pull request brings it)" % (
+                             n, e["base_branch"], home, home, e["base_branch"], home))
+    return notes
 
 
 def job_apps(ctx, job):

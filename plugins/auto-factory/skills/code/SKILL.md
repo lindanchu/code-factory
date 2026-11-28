@@ -521,6 +521,9 @@ confirm rules in plain words.
   `job <KEY>` and fx's error; it fixes the technical part (the factory's, or the job's own
   `jobs/<KEY>/permissions.json`, `permissions-<repo>.json` with several apps); commit and push what it changed in the factory, then the gate again.
 - Already wrong on the base branch and touched by this job: the job waits for that route's fix task (step 7).
+- Before the gate again: `python3 ${CLAUDE_SKILL_DIR}/fx permissions check <KEY>` reads the job's file and staged rows
+  and runs only the routes command (seconds, no cell called). `ok: false` with `gate_would_void` or `problems` → back
+  to the agent with them; the gate only when it says `ok: true`.
 
 ### `/auto-factory:code lessons`
 
@@ -1105,7 +1108,9 @@ with each repository's setup, and leaves every other box and the VM as they are.
 whole app, whatever the job changed; only when the user asks for it, since by default a gate scans what the change can
 reach). For each changed repository, in merge
 order, stopping at the first failure: all work committed; no protected or frozen
-file touched; its checks script from the factory repository (`checks/<repo>.sh`, or
+file touched (a job started from another branch than the repository's `base_branch` is checked against that base
+branch, and only what differs from both counts as its work for the sensitive paths, the UI and the scans' scope; `fx new` and
+`fx repos` say so in `notes`); its checks script from the factory repository (`checks/<repo>.sh`, or
 `checks.sh` in an older one-repository factory, and every helper file under
 `checks/`: a change to any file there that is not committed and pushed stops the
 gate), run in its clone (once for a commit: see **One run of the checks for a commit**

@@ -135,7 +135,9 @@ The gate named routes of the job without a row, or rows without a route. Read th
 (`jobs/<KEY>/logic/<module>/README.md`, the whole file as it should be after the job) and the route's requests in
 the job's own file, named like the technical part's (`jobs/<KEY>/permissions.json`, or `jobs/<KEY>/permissions-<repo>.json`
 in a factory of several apps; same shape, only what the job adds: `requests`, `not_app`, `who`, `out_of_scope`; fx keeps it
-with the job until its pull request is merged). A file of another name is not read, and the gate says so. When it does not say, answer `ask`. Never take who may call a route from what the code does:
+with the job until its pull request is merged). A file of another name is not read, and the gate says so. Before
+you answer, run `fx permissions check <KEY>`: it reads your files as the gate does and lists, without calling the table,
+the routes that still have no row (`gate_would_void`). When it does not say, answer `ask`. Never take who may call a route from what the code does:
 the builder wrote that code.
 
 ## Answer

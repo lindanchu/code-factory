@@ -1239,6 +1239,23 @@ stay `opus` there. To have them on Sonnet too, set both to `"sonnet"`, commit an
 - The VM's memory: one box per job at once (and per candidate or package). Its 6 GB held three small web
   jobs at once with room to spare (above); since 3.13 you choose it, from what fx measured (below).
 
+### Upgrading to 3.17.0: rounds the factory lost, the permission table before it runs, a job from another branch
+
+- `fx gate <job> --dry-run` runs in any stage after a build (review, approve, and pr while nothing is pushed) and with
+  no round left, so trying a changed seed, permission table or script never needs `fx stage --force`.
+- `fx rounds <job> --give-back <n,...> --reason "<what in the factory failed them>"`: rounds a person says the factory
+  lost (a seed without a row, a permission table that could not judge a cell), not the code. Two steps like
+  `fx override`; the rounds stop counting, and a job that went to its pull request for want of rounds, with nothing
+  pushed, goes back to build. The approver is told which rounds were given back and why.
+- The permission table: a job's own file under another name than the technical part's (`permissions.json` where fx
+  reads `permissions-<repo>.json`) is named at once instead of being left unread; `out_of_scope` in the job's file
+  counts; routes without a row set the round aside before any cell is called, in seconds. `fx permissions check <job>`
+  says the same without a gate: the job's file and staged rows against the routes of its clone.
+- A job started from another branch than the repository's `base_branch` (an earlier attempt's, say): only what
+  differs from both counts as its work (sensitive paths, UI, ZAP and permission scope), so what it merged in from the
+  base branch is not flagged; protected and frozen paths are checked against the base branch (what the pull request
+  brings), so a protected test the other branch changed is caught. A job from the base branch itself is measured as before. `fx new` and `fx repos` say so.
+
 ### Upgrading to 3.16.0: one test with the checks script's own setup
 
 - `fx checks <job> --only <stage> -- <test arguments>` runs one stage of the checks script, with the setup it needs (the
